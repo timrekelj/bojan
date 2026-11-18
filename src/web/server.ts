@@ -196,6 +196,24 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
           .sort((a, b) => a.name.localeCompare(b.name))
       : [];
     const total = db.countMessages(config.guildId);
+    const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
+    const allRows = db.topUsers(config.guildId, 10);
+    const recentEmbeds = db.recentEmbeds(config.guildId, 15);
+
+    // Cache-only lookups: guild member -> global user -> raw id (handled in the view).
+    const members: Record<string, { name: string; avatar: string | null }> = {};
+    for (const { userId } of [...weekRows, ...allRows]) {
+      if (members[userId]) continue;
+      const m = guild?.members.cache.get(userId);
+      const u = m?.user ?? client.users.cache.get(userId);
+      if (m) members[userId] = { name: m.displayName, avatar: m.displayAvatarURL({ size: 64 }) };
+      else if (u) members[userId] = { name: u.displayName, avatar: u.displayAvatarURL({ size: 64 }) };
+    }
+    const channelNames: Record<string, string> = {};
+    for (const { channelId } of recentEmbeds) {
+      const name = guild?.channels.cache.get(channelId)?.name;
+      if (name) channelNames[channelId] = name;
+    }
 
     return c.html(
       dashboardPage({
@@ -211,10 +229,12 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
           embedsConverted: db.recentEmbeds(config.guildId, 10_000).length,
         },
         today: db.countMessages(config.guildId, Date.now() - 86_400_000),
-        week: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: db.topUsers(config.guildId, 10, week.start, week.end) },
-        allTime: { total, rows: db.topUsers(config.guildId, 10) },
+        week: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
+        allTime: { total, rows: allRows },
         reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
-        recentEmbeds: db.recentEmbeds(config.guildId, 15),
+        recentEmbeds,
+        members,
+        channelNames,
         user: { username: session.username, avatar: session.avatar },
         saved: c.req.query('saved') === '1',
       }),

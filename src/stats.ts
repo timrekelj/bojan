@@ -90,6 +90,31 @@ export function weekRangeLabel(b: WeekBounds, timeZone: string): string {
   return `${a} – ${bb}`;
 }
 
+/** The 7 local days of a week (Mon..Sun) with a YYYY-MM-DD key and a short label. */
+export function daySeries(week: WeekBounds, timeZone: string): { key: string; label: string }[] {
+  const out: { key: string; label: string }[] = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(week.start + i * 86_400_000);
+    const p = localParts(timeZone, d);
+    const key = `${p.y}-${String(p.mo).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+    const label = new Intl.DateTimeFormat('en-GB', { timeZone, weekday: 'short', day: 'numeric' }).format(d);
+    out.push({ key, label });
+  }
+  return out;
+}
+
+/** ASCII bar chart, one line per day of the week: "Mon 9  ██████ 12". */
+export function barChartLines(counts: { day: string; count: number }[], week: WeekBounds, timeZone: string, maxWidth = 24): string[] {
+  const map = new Map(counts.map((c) => [c.day, c.count]));
+  const days = daySeries(week, timeZone);
+  const max = Math.max(1, ...days.map((d) => map.get(d.key) ?? 0));
+  return days.map((d) => {
+    const c = map.get(d.key) ?? 0;
+    const bar = c === 0 ? '' : '█'.repeat(Math.max(1, Math.round((c / max) * maxWidth)));
+    return `${d.label}  ${bar} ${c}`;
+  });
+}
+
 /** Leaderboard lines, e.g. "**1.** <@123> — 1,234 messages". */
 export function leaderboardLines(rows: UserRow[], total: number): string[] {
   if (rows.length === 0) return ['No messages recorded yet.'];

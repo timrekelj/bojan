@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { statSync } from 'node:fs';
+import { localParts } from './stats.js';
 
 export interface Settings {
   guildId: string;
@@ -52,6 +53,21 @@ export interface ReactionStats {
 export interface EmojiRow {
   emojiKey: string;
   emojiLabel: string;
+  count: number;
+}
+
+export interface ChannelRow {
+  channelId: string;
+  count: number;
+}
+
+export interface ReactionCountRow {
+  userId: string;
+  count: number;
+}
+
+export interface DayCount {
+  day: string; // YYYY-MM-DD in the guild timezone
   count: number;
 }
 
@@ -245,9 +261,43 @@ export class BotDatabase {
     return { given: given.c, received: received.c };
   }
 
-  countReactions(guildId: string): number {
+  countReactions(guildId: string, fromTs?: number, toTs?: number): number {
+    if (fromTs !== undefined && toTs !== undefined) {
+      const row = this.db.prepare('SELECT COUNT(*) AS c FROM reactions WHERE guild_id = ? AND ts >= ? AND ts < ?').get(guildId, fromTs, toTs) as { c: number };
+      return row.c;
+    }
     const row = this.db.prepare('SELECT COUNT(*) AS c FROM reactions WHERE guild_id = ?').get(guildId) as { c: number };
     return row.c;
+  }
+
+  topChannels(guildId: string, fromTs: number, toTs: number, limit: number): ChannelRow[] {
+    return this.db
+      .prepare('SELECT channel_id AS channelId, COUNT(*) AS count FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ? GROUP BY channel_id ORDER BY count DESC, channel_id ASC LIMIT ?')
+      .all(guildId, fromTs, toTs, limit) as unknown as ChannelRow[];
+  }
+
+  topReactionsGiven(guildId: string, fromTs: number, toTs: number, limit: number): ReactionCountRow[] {
+    return this.db
+      .prepare('SELECT reactor_id AS userId, COUNT(*) AS count FROM reactions WHERE guild_id = ? AND ts >= ? AND ts < ? GROUP BY reactor_id ORDER BY count DESC, userId ASC LIMIT ?')
+      .all(guildId, fromTs, toTs, limit) as unknown as ReactionCountRow[];
+  }
+
+  topReactionsReceived(guildId: string, fromTs: number, toTs: number, limit: number): ReactionCountRow[] {
+    return this.db
+      .prepare('SELECT author_id AS userId, COUNT(*) AS count FROM reactions WHERE guild_id = ? AND ts >= ? AND ts < ? GROUP BY author_id ORDER BY count DESC, userId ASC LIMIT ?')
+      .all(guildId, fromTs, toTs, limit) as unknown as ReactionCountRow[];
+  }
+
+  /** Message counts bucketed by local calendar day in `timeZone` (DST-safe). */
+  messageCountsPerDay(guildId: string, fromTs: number, toTs: number, timeZone: string): DayCount[] {
+    const rows = this.db.prepare('SELECT ts FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ?').all(guildId, fromTs, toTs) as unknown as { ts: number }[];
+    const map = new Map<string, number>();
+    for (const r of rows) {
+      const p = localParts(timeZone, new Date(r.ts));
+      const key = `${p.y}-${String(p.mo).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+      map.set(key, (map.get(key) ?? 0) + 1);
+    }
+    return [...map.entries()].map(([day, count]) => ({ day, count })).sort((a, b) => a.day.localeCompare(b.day));
   }
 
   topEmojiForUser(guildId: string, userId: string, limit: number): EmojiRow[] {

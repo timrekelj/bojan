@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
-import { currentWeekBounds, lastWeekBounds, leaderboardLines, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
+import { barChartLines, currentWeekBounds, lastWeekBounds, leaderboardLines, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'bojan-smoke-'));
@@ -82,6 +82,28 @@ const rxAdded = db.recordReactionsBatch([
   { guildId: G, channelId: 'c1', messageId: 'a0', authorId: 'alice', reactorId: 'bob', emojiKey: '👍', emojiLabel: '👍', ts: now - 1 * H }, // duplicate of live-recorded
 ]);
 check('reaction batch dedup', rxAdded === 1 && db.countReactions(G) === 5, `added=${rxAdded} total=${db.countReactions(G)}`);
+
+// Weekly recap data: last week's messages spread over 7 days across two channels,
+// plus last-week reactions with known givers/receivers
+const lwk = lastWeekBounds('UTC');
+for (let i = 0; i < 7; i++) {
+  for (let j = 0; j <= i; j++) db.recordMessage(G, i % 2 === 0 ? 'c1' : 'c2', 'alice', lwk.start + i * D + j * H, `w${i}-${j}`);
+}
+db.recordReaction({ guildId: G, channelId: 'c1', messageId: 'w0-0', authorId: 'alice', reactorId: 'bob', emojiKey: '👍', emojiLabel: '👍', ts: lwk.start + 1 * H });
+db.recordReaction({ guildId: G, channelId: 'c1', messageId: 'w1-0', authorId: 'carol', reactorId: 'bob', emojiKey: '🔥', emojiLabel: '🔥', ts: lwk.start + 2 * H });
+db.recordReaction({ guildId: G, channelId: 'c2', messageId: 'w2-0', authorId: 'carol', reactorId: 'erin', emojiKey: '👍', emojiLabel: '👍', ts: lwk.start + 3 * H });
+
+const chans = db.topChannels(G, lwk.start, lwk.end, 5);
+check('top channels last week', chans[0]?.channelId === 'c1' && chans[0]?.count === 19 && chans[1]?.channelId === 'c2' && chans[1]?.count === 12, JSON.stringify(chans));
+const given = db.topReactionsGiven(G, lwk.start, lwk.end, 3);
+check('top reactions given', given[0]?.userId === 'bob' && given[0]?.count === 2 && given[1]?.userId === 'erin', JSON.stringify(given));
+const received = db.topReactionsReceived(G, lwk.start, lwk.end, 3);
+check('top reactions received', received[0]?.userId === 'carol' && received[0]?.count === 2, JSON.stringify(received));
+check('reaction count in range', db.countReactions(G, lwk.start, lwk.end) === 3, `got ${db.countReactions(G, lwk.start, lwk.end)}`);
+const perDay = db.messageCountsPerDay(G, lwk.start, lwk.end, 'UTC');
+check('per-day counts', perDay.length === 7 && perDay.reduce((s, d) => s + d.count, 0) === 31 && perDay[1]?.count === 5, JSON.stringify(perDay));
+const chart = barChartLines(perDay, lwk, 'UTC');
+check('bar chart', chart.length === 7 && chart[0]?.includes('Mon') === true && chart[6]?.trim().endsWith('7') === true && (chart[6]?.match(/█/g)?.length ?? 0) === 24, JSON.stringify(chart));
 
 db.setState('k', 'v');
 check('bot state', db.getState('k') === 'v');

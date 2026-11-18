@@ -11,8 +11,9 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   *given*), plus the emoji. Tables: `messages`, `reactions`, `settings`,
   `embed_log`, `bot_state`. Reactions can also be backfilled with `/backfill`.
 - **Weekly stats message** — on a configurable day/hour (per guild timezone,
-  weeks run Monday–Sunday) the bot posts last week's top-10 to a configured
-  channel.
+  weeks run Monday–Sunday) the bot posts last week's recap to a configured
+  channel: total messages and reactions, top-5 messagers, top-5 channels,
+  top-3 reactions given / received, and a per-day message bar chart.
 - **Slash commands**
   - `/leaderboard [limit]` — all-time top message senders
   - `/stats [user]` — all-time stats for a member: messages (total, share),
