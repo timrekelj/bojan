@@ -223,6 +223,22 @@ export class BotDatabase {
       .run(r.guildId, r.channelId, r.messageId, r.authorId, r.reactorId, r.emojiKey, r.emojiLabel, r.ts);
   }
 
+  /** Insert many reaction rows in one transaction; returns how many were new. */
+  recordReactionsBatch(rows: ReactionRow[]): number {
+    if (rows.length === 0) return 0;
+    this.db.exec('BEGIN');
+    try {
+      const ins = this.db.prepare('INSERT OR IGNORE INTO reactions (guild_id, channel_id, message_id, author_id, reactor_id, emoji_key, emoji_label, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      let changes = 0;
+      for (const r of rows) changes += Number(ins.run(r.guildId, r.channelId, r.messageId, r.authorId, r.reactorId, r.emojiKey, r.emojiLabel, r.ts).changes);
+      this.db.exec('COMMIT');
+      return changes;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
   reactionStats(guildId: string, userId: string): ReactionStats {
     const given = this.db.prepare('SELECT COUNT(*) AS c FROM reactions WHERE guild_id = ? AND reactor_id = ?').get(guildId, userId) as { c: number };
     const received = this.db.prepare('SELECT COUNT(*) AS c FROM reactions WHERE guild_id = ? AND author_id = ?').get(guildId, userId) as { c: number };

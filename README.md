@@ -9,8 +9,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   channel, user, timestamp), and every reaction is recorded with both sides:
   the message author (reactions *received*) and the reactor (reactions
   *given*), plus the emoji. Tables: `messages`, `reactions`, `settings`,
-  `embed_log`, `bot_state`. Reactions are counted live only — there is no
-  history backfill for them.
+  `embed_log`, `bot_state`. Reactions can also be backfilled with `/backfill`.
 - **Weekly stats message** — on a configurable day/hour (per guild timezone,
   weeks run Monday–Sunday) the bot posts last week's top-10 to a configured
   channel.
@@ -20,10 +19,12 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
     reactions given/received, most used emoji, last message seen
   - `/setstats #channel` — (admin) choose the weekly stats channel
   - `/backfill [channel] [days]` — (admin) seed the database from channel
-    history (all text channels by default; `days` limits how far back).
-    Safe to re-run — messages are deduplicated by Discord message id, so
-    anything the bot already counted live is not counted twice. Progress is
-    posted ephemerally while it runs.
+    history: messages **and** their reactions (it pages through the users who
+    reacted to each message, so this is slower than a plain message backfill
+    and rate-limited by Discord on big servers; use `days` to bound it).
+    All text channels by default. Safe to re-run — messages and reactions are
+    deduplicated by Discord id, so anything already counted live is not
+    counted twice. Progress is posted ephemerally while it runs.
 - **Admin dashboard** — a Hono web server (same process) with **Discord OAuth2
   login**; only server administrators (or a configured admin role) get in.
   Shows bot status (ping, uptime, DB size), this-week and all-time

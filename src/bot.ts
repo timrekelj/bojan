@@ -45,13 +45,20 @@ const commands = [
     .addChannelOption((o) => o.setName('channel').setDescription('Channel for weekly stats').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
   new SlashCommandBuilder()
     .setName('backfill')
-    .setDescription('(Admin) Record old messages from channel history into the stats database')
+    .setDescription('(Admin) Record old messages and reactions from channel history into the stats database')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addChannelOption((o) => o.setName('channel').setDescription('Only this channel (default: all text channels)').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(false))
     .addIntegerOption((o) => o.setName('days').setDescription('Only messages from the last N days (default: all history)').setMinValue(1).setRequired(false)),
 ];
 
 let backfillRunning = false;
+
+function emojiParts(emoji: { id: string | null; name: string | null; animated?: boolean | null }): { key: string; label: string } {
+  return {
+    key: emoji.id ?? emoji.name ?? '',
+    label: emoji.id ? `<${emoji.animated ? 'a' : ''}:${emoji.name ?? 'emoji'}:${emoji.id}>` : (emoji.name ?? ''),
+  };
+}
 
 export async function registerCommands(client: Client): Promise<void> {
   const rest = new REST().setToken(config.token);
@@ -129,6 +136,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
 
       let scanned = 0;
       let recorded = 0;
+      let reactionsRecorded = 0;
       const skipped: string[] = [];
       let done = 0;
       for (const channel of channelList) {
@@ -140,27 +148,53 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
             if (batch.size === 0) break;
             scanned += batch.size;
             const rows = [];
+            const reactionRows = [];
             for (const m of batch.values()) {
-              if (m.author.bot || m.webhookId) continue;
+              if (m.author.bot || m.webhookId || !m.author) continue;
               rows.push({ guildId, channelId: channel.id, userId: m.author.id, ts: m.createdTimestamp, messageId: m.id });
+              // Fetch who reacted to this message (paginated, 100 per request).
+              for (const reaction of m.reactions.cache.values()) {
+                const total = reaction.count ?? 0;
+                if (total === 0) continue;
+                try {
+                  const { key, label } = emojiParts(reaction.emoji);
+                  let after: string | undefined;
+                  let collected = 0;
+                  for (;;) {
+                    const users = await reaction.users.fetch(after ? { limit: 100, after } : { limit: 100 });
+                    if (users.size === 0) break;
+                    for (const u of users.values()) {
+                      if (u.bot) continue;
+                      reactionRows.push({ guildId, channelId: channel.id, messageId: m.id, authorId: m.author.id, reactorId: u.id, emojiKey: key, emojiLabel: label, ts: m.createdTimestamp });
+                    }
+                    collected += users.size;
+                    after = users.last()?.id;
+                    if (users.size < 100 || collected >= total) break;
+                  }
+                } catch {
+                  // rate-limited or emoji gone — skip this reaction
+                }
+              }
             }
             recorded += db.recordMessagesBatch(rows);
+            reactionsRecorded += db.recordReactionsBatch(reactionRows);
             const oldest = batch.last();
             if (!oldest) break;
             before = oldest.id;
             if (batch.size < 100 || (cutoff !== null && oldest.createdTimestamp < cutoff)) break;
           }
           await interaction
-            .editReply({ content: `Backfilling… channel ${done}/${channelList.length} — scanned ${fmt(scanned)}, recorded ${fmt(recorded)} new` })
+            .editReply({ content: `Backfilling… channel ${done}/${channelList.length} — scanned ${fmt(scanned)} messages, recorded ${fmt(recorded)} new, ${fmt(reactionsRecorded)} reactions` })
             .catch(() => undefined);
         } catch {
           skipped.push(channel.name);
         }
       }
       const total = db.countMessages(guildId);
+      const totalReactions = db.countReactions(guildId);
       await interaction.editReply({
         content: [
-          `Backfill complete: scanned **${fmt(scanned)}** messages, recorded **${fmt(recorded)}** new (${fmt(total)} total in the database) across ${channelList.length} channel(s).`,
+          `Backfill complete: scanned **${fmt(scanned)}** messages, recorded **${fmt(recorded)}** new (${fmt(total)} total in the database), **${fmt(reactionsRecorded)}** new reactions (${fmt(totalReactions)} total) across ${channelList.length} channel(s).`,
           skipped.length > 0 ? `No access to: ${skipped.map((n) => `[#${n}]`).join(', ')}` : '',
         ].filter(Boolean).join('\n'),
       });
@@ -208,15 +242,15 @@ export function registerEvents(client: Client, db: BotDatabase): void {
         let message = reaction.message;
         if (message.partial) message = await message.fetch();
         if (!message.guildId || message.author?.bot || message.webhookId) return;
-        const emoji = reaction.emoji;
+        const { key, label } = emojiParts(reaction.emoji);
         db.recordReaction({
           guildId: message.guildId,
           channelId: message.channelId,
           messageId: message.id,
           authorId: message.author.id,
           reactorId: user.id,
-          emojiKey: emoji.id ?? emoji.name ?? '',
-          emojiLabel: emoji.id ? `<${emoji.animated ? 'a' : ''}:${emoji.name ?? 'emoji'}:${emoji.id}>` : (emoji.name ?? ''),
+          emojiKey: key,
+          emojiLabel: label,
           ts: Date.now(),
         });
       } catch {
