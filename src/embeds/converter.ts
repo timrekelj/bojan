@@ -37,6 +37,9 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
     const url = extractUrl(message.content);
     if (!url) return;
     if (!detectProvider(url)) return; // not a mirrorable platform; Discord's native embed is fine
+    // Bare-link messages (nothing but the URL) are left to Discord's native
+    // embed; we only convert links that come with actual text around them.
+    if (message.content.split(url).join('').trim().length === 0) return;
     // Resolve short share links (vm.tiktok.com/..., t.co/...) to the canonical
     // URL so the mirror gets a path it understands.
     let target = url;
