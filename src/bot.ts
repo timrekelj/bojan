@@ -10,6 +10,7 @@ import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
   type Message,
+  type TextChannel,
 } from 'discord.js';
 import type { BotDatabase } from './db.js';
 import { config } from './config.js';
@@ -41,7 +42,15 @@ const commands = [
     .setDescription('Set the channel where weekly stats are posted')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addChannelOption((o) => o.setName('channel').setDescription('Channel for weekly stats').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('backfill')
+    .setDescription('(Admin) Record old messages from channel history into the stats database')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addChannelOption((o) => o.setName('channel').setDescription('Only this channel (default: all text channels)').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(false))
+    .addIntegerOption((o) => o.setName('days').setDescription('Only messages from the last N days (default: all history)').setMinValue(1).setRequired(false)),
 ];
+
+let backfillRunning = false;
 
 export async function registerCommands(client: Client): Promise<void> {
   const rest = new REST().setToken(config.token);
@@ -92,7 +101,81 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     return;
   }
 
+  if (interaction.commandName === 'backfill') {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+      await interaction.reply({ content: 'This command is admin-only.', ephemeral: true });
+      return;
+    }
+    if (backfillRunning) {
+      await interaction.reply({ content: 'A backfill is already running — check the other invocation.', ephemeral: true });
+      return;
+    }
+    backfillRunning = true;
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const guild = interaction.guild;
+      if (!guild) return;
+      const onlyChannel = interaction.options.getChannel('channel');
+      const days = interaction.options.getInteger('days');
+      const cutoff = days ? Date.now() - days * 86_400_000 : null;
+
+      const channelList: TextChannel[] = onlyChannel
+        ? [onlyChannel as TextChannel]
+        : [...guild.channels.cache
+            .filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
+            .values()] as TextChannel[];
+
+      let scanned = 0;
+      let recorded = 0;
+      const skipped: string[] = [];
+      let done = 0;
+      for (const channel of channelList) {
+        done++;
+        try {
+          let before: string | undefined;
+          for (;;) {
+            const batch = await channel.messages.fetch(before ? { limit: 100, before } : { limit: 100 });
+            if (batch.size === 0) break;
+            scanned += batch.size;
+            const rows = [];
+            for (const m of batch.values()) {
+              if (m.author.bot || m.webhookId) continue;
+              rows.push({ guildId, channelId: channel.id, userId: m.author.id, ts: m.createdTimestamp, messageId: m.id });
+            }
+            recorded += db.recordMessagesBatch(rows);
+            const oldest = batch.last();
+            if (!oldest) break;
+            before = oldest.id;
+            if (batch.size < 100 || (cutoff !== null && oldest.createdTimestamp < cutoff)) break;
+          }
+          await interaction
+            .editReply({ content: `Backfilling… channel ${done}/${channelList.length} — scanned ${fmt(scanned)}, recorded ${fmt(recorded)} new` })
+            .catch(() => undefined);
+        } catch {
+          skipped.push(channel.name);
+        }
+      }
+      const total = db.countMessages(guildId);
+      await interaction.editReply({
+        content: [
+          `Backfill complete: scanned **${fmt(scanned)}** messages, recorded **${fmt(recorded)}** new (${fmt(total)} total in the database) across ${channelList.length} channel(s).`,
+          skipped.length > 0 ? `No access to: ${skipped.map((n) => `[#${n}]`).join(', ')}` : '',
+        ].filter(Boolean).join('\n'),
+      });
+    } catch (err) {
+      console.error('[bot] backfill failed:', err);
+      await interaction.editReply({ content: 'Backfill failed — see bot logs.' }).catch(() => undefined);
+    } finally {
+      backfillRunning = false;
+    }
+    return;
+  }
+
   if (interaction.commandName === 'setstats') {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+      await interaction.reply({ content: 'This command is admin-only.', ephemeral: true });
+      return;
+    }
     const channel = interaction.options.getChannel('channel', true);
     settings.statsChannelId = channel.id;
     db.saveSettings(settings);
@@ -109,7 +192,7 @@ export function registerEvents(client: Client, db: BotDatabase): void {
 
   client.on(Events.MessageCreate, (message: Message) => {
     if (!message.guildId || message.author.bot || message.webhookId) return;
-    db.recordMessage(message.guildId, message.channelId, message.author.id, message.createdTimestamp);
+    db.recordMessage(message.guildId, message.channelId, message.author.id, message.createdTimestamp, message.id);
     const settings = db.getSettings(message.guildId);
     if (settings.embedChannels.length > 0) {
       void maybeConvert(message, db, settings.embedChannels);

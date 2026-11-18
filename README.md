@@ -15,6 +15,11 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   - `/stats [user]` — all-time stats for a member (total, share, last week +
     rank, first/last message seen)
   - `/setstats #channel` — (admin) choose the weekly stats channel
+  - `/backfill [channel] [days]` — (admin) seed the database from channel
+    history (all text channels by default; `days` limits how far back).
+    Safe to re-run — messages are deduplicated by Discord message id, so
+    anything the bot already counted live is not counted twice. Progress is
+    posted ephemerally while it runs.
 - **Admin dashboard** — a Hono web server (same process) with **Discord OAuth2
   login**; only server administrators (or a configured admin role) get in.
   Shows bot status (ping, uptime, DB size), this-week and all-time

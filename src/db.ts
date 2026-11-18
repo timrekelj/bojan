@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS messages (
   guild_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
-  ts INTEGER NOT NULL
+  ts INTEGER NOT NULL,
+  message_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_guild_ts ON messages (guild_id, ts);
 CREATE INDEX IF NOT EXISTS idx_messages_guild_user ON messages (guild_id, user_id);
@@ -90,6 +91,14 @@ export class BotDatabase {
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
+    // Migration for databases created before message_id existed.
+    const cols = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'message_id')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN message_id TEXT');
+    }
+    // Dedup key: the same Discord message must never be counted twice
+    // (live tracking + backfill can overlap).
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_guild_msg ON messages (guild_id, message_id)');
   }
 
   close(): void {
@@ -106,8 +115,26 @@ export class BotDatabase {
 
   // ---- messages -------------------------------------------------------
 
-  recordMessage(guildId: string, channelId: string, userId: string, ts: number): void {
-    this.db.prepare('INSERT INTO messages (guild_id, channel_id, user_id, ts) VALUES (?, ?, ?, ?)').run(guildId, channelId, userId, ts);
+  recordMessage(guildId: string, channelId: string, userId: string, ts: number, messageId: string): void {
+    this.db
+      .prepare('INSERT OR IGNORE INTO messages (guild_id, channel_id, user_id, ts, message_id) VALUES (?, ?, ?, ?, ?)')
+      .run(guildId, channelId, userId, ts, messageId);
+  }
+
+  /** Insert many rows in one transaction; returns how many were actually new. */
+  recordMessagesBatch(rows: { guildId: string; channelId: string; userId: string; ts: number; messageId: string }[]): number {
+    if (rows.length === 0) return 0;
+    this.db.exec('BEGIN');
+    try {
+      const ins = this.db.prepare('INSERT OR IGNORE INTO messages (guild_id, channel_id, user_id, ts, message_id) VALUES (?, ?, ?, ?, ?)');
+      let changes = 0;
+      for (const r of rows) changes += Number(ins.run(r.guildId, r.channelId, r.userId, r.ts, r.messageId).changes);
+      this.db.exec('COMMIT');
+      return changes;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   countMessages(guildId: string, fromTs?: number, toTs?: number): number {

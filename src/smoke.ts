@@ -16,11 +16,11 @@ const H = 3_600_000;
 const D = 24 * H;
 
 // Fake messages: alice 10 this week, bob 5 this week, carol 3 last week, dave 1 long ago
-db.recordMessage(G, 'c1', 'alice', now - 1 * H);
-for (let i = 0; i < 9; i++) db.recordMessage(G, 'c1', 'alice', now - (2 + i) * H);
-for (let i = 0; i < 5; i++) db.recordMessage(G, 'c1', 'bob', now - (3 + i) * H);
-for (let i = 0; i < 3; i++) db.recordMessage(G, 'c1', 'carol', now - 8 * D - i * H);
-db.recordMessage(G, 'c1', 'dave', now - 40 * D);
+db.recordMessage(G, 'c1', 'alice', now - 1 * H, 'a0');
+for (let i = 0; i < 9; i++) db.recordMessage(G, 'c1', 'alice', now - (2 + i) * H, `a${i + 1}`);
+for (let i = 0; i < 5; i++) db.recordMessage(G, 'c1', 'bob', now - (3 + i) * H, `b${i}`);
+for (let i = 0; i < 3; i++) db.recordMessage(G, 'c1', 'carol', now - 8 * D - i * H, `c${i}`);
+db.recordMessage(G, 'c1', 'dave', now - 40 * D, 'd0');
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -29,13 +29,25 @@ function check(name: string, cond: boolean, detail = ''): void {
 }
 
 check('total messages', db.countMessages(G) === 19, `got ${db.countMessages(G)}`);
+
+// Dedup: re-recording the same message id must not double-count (backfill overlap)
+db.recordMessage(G, 'c1', 'alice', now - 1 * H, 'a0');
+check('dedup on message id', db.countMessages(G) === 19, `got ${db.countMessages(G)}`);
+// Batch insert, half of them duplicates
+const added = db.recordMessagesBatch([
+  { guildId: G, channelId: 'c1', userId: 'erin', ts: now - 2 * H, messageId: 'e0' },
+  { guildId: G, channelId: 'c1', userId: 'erin', ts: now - 3 * H, messageId: 'e1' },
+  { guildId: G, channelId: 'c1', userId: 'alice', ts: now - 1 * H, messageId: 'a0' }, // duplicate
+]);
+check('batch insert dedup', added === 2 && db.countMessages(G) === 21, `added=${added} total=${db.countMessages(G)}`);
+
 const week = lastWeekBounds('UTC');
 const curWeek = currentWeekBounds('UTC');
 check('last week total', db.countMessages(G, week.start, week.end) === 3, `got ${db.countMessages(G, week.start, week.end)}`);
-check('current week total', db.countMessages(G, curWeek.start, curWeek.end) === 15, `got ${db.countMessages(G, curWeek.start, curWeek.end)}`);
+check('current week total', db.countMessages(G, curWeek.start, curWeek.end) === 17, `got ${db.countMessages(G, curWeek.start, curWeek.end)}`);
 check('week bounds are Mon..Mon', new Date(week.start).getUTCDay() === 1 && new Date(week.end).getUTCDay() === 1 && week.end - week.start === 7 * D);
 const top = db.topUsers(G, 10);
-check('leaderboard order', top[0]?.userId === 'alice' && top[0]?.messages === 10 && top[3]?.userId === 'dave', JSON.stringify(top));
+check('leaderboard order', top[0]?.userId === 'alice' && top[0]?.messages === 10 && top[3]?.userId === 'erin' && top[4]?.userId === 'dave', JSON.stringify(top));
 const ua = db.userStats(G, 'alice');
 check('user stats', ua.messages === 10 && ua.firstTs !== null && ua.lastTs !== null);
 check('leaderboard lines', leaderboardLines(top, 19)[0]?.includes('<@alice>') ?? false);
