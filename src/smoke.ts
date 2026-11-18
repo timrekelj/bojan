@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { currentWeekBounds, lastWeekBounds, leaderboardLines, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
-import { detectProvider, extractUrl, transformUrl } from './embeds/providers.js';
+import { detectProvider, extractUrl, transformUrl, isShortLink } from './embeds/providers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'bojan-smoke-'));
 const db = new BotDatabase(join(dir, 'test.db'));
@@ -102,10 +102,13 @@ check('extractUrl', extractUrl('check this https://x.com/foo/status/123 out') ==
 check('extractUrl strips punctuation', extractUrl('look https://youtu.be/abc123.') === 'https://youtu.be/abc123');
 check('detect x', detectProvider('https://x.com/foo/status/123')?.name === 'x');
 check('detect twitter', detectProvider('https://twitter.com/foo/status/123')?.name === 'x');
+check('detect mobile.twitter', detectProvider('https://mobile.twitter.com/foo/status/123')?.name === 'x');
 check('detect tiktok', detectProvider('https://www.tiktok.com/@foo/video/7312345678901234567')?.name === 'tiktok');
+check('detect tiktok share link (vm.)', detectProvider('https://vm.tiktok.com/ZN8aa1dqy/')?.name === 'tiktok');
 check('detect instagram', detectProvider('https://www.instagram.com/reel/ABC123/')?.name === 'instagram');
 check('detect instagr.am', detectProvider('https://instagr.am/p/ABC123/')?.name === 'instagram');
 check('detect reddit', detectProvider('https://www.reddit.com/r/test/comments/abc123/title/')?.name === 'reddit');
+check('short link flags', isShortLink('https://vm.tiktok.com/ZN8aa1dqy/') && isShortLink('https://t.co/abc123') && !isShortLink('https://www.tiktok.com/@foo/video/123') && !isShortLink('https://x.com/a/status/1'));
 check('ignore youtube (native embed)', detectProvider('https://youtu.be/dQw4w9WgXcQ') === null);
 check('ignore spotify (native embed)', detectProvider('https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC') === null);
 check('ignore plain link', detectProvider('https://example.com/article') === null);
@@ -115,6 +118,7 @@ check('transform x', transformUrl('https://x.com/GameJoker_/status/2122004700644
 check('transform twitter', transformUrl('https://twitter.com/foo/status/123') === 'https://fxtwitter.com/foo/status/123');
 check('transform instagram (www dropped, like embeddo)', transformUrl('https://www.instagram.com/reel/ABC123/') === 'https://kkinstagram.com/reel/ABC123/');
 check('transform tiktok (www dropped)', transformUrl('https://www.tiktok.com/@foo/video/7312345678901234567') === 'https://kktiktok.com/@foo/video/7312345678901234567');
+check('transform tiktok share link', transformUrl('https://vm.tiktok.com/ZN8aa1dqy/') === 'https://kktiktok.com/ZN8aa1dqy/');
 check('transform reddit (www dropped)', transformUrl('https://www.reddit.com/r/test/comments/abc123/title/') === 'https://vxreddit.com/r/test/comments/abc123/title/');
 check('no transform for plain link', transformUrl('https://example.com/a') === null);
 

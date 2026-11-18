@@ -1,6 +1,6 @@
 import { ChannelType, Webhook, type Message, type TextChannel } from 'discord.js';
 import type { BotDatabase } from '../db.js';
-import { extractUrl, detectProvider, transformUrl } from './providers.js';
+import { extractUrl, detectProvider, transformUrl, canonicalizeUrl, isShortLink } from './providers.js';
 
 const WEBHOOK_NAME = 'embed-converter';
 const webhookCache = new Map<string, Webhook>();
@@ -36,9 +36,17 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
     if (!embedChannels.includes(message.channelId)) return;
     const url = extractUrl(message.content);
     if (!url) return;
-    const provider = detectProvider(url);
-    if (!provider) return; // not a mirrorable platform; Discord's native embed is fine
-    const mirror = transformUrl(url);
+    if (!detectProvider(url)) return; // not a mirrorable platform; Discord's native embed is fine
+    // Resolve short share links (vm.tiktok.com/..., t.co/...) to the canonical
+    // URL so the mirror gets a path it understands.
+    let target = url;
+    if (isShortLink(url)) {
+      const resolved = await canonicalizeUrl(url);
+      if (detectProvider(resolved)) target = resolved;
+    }
+    const provider = detectProvider(target);
+    if (!provider) return;
+    const mirror = transformUrl(target);
     if (!mirror) return;
 
     const channel = message.channel;

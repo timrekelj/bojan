@@ -1,20 +1,22 @@
 // URL → embed-friendly mirror rewrites, same approach as embeddo
-// (https://github.com/aikenahac/embeddo src/lib/url-transforms.ts): the
-// reposted message keeps the mirror link and Discord's own embedder fetches
-// it, which yields proper video players (unlike an embed we build ourselves).
+// (https://github.com/aikenahac/embeddo src/lib/url-transforms.ts): match by
+// host (subdomains included, e.g. vm.tiktok.com), replace the hostname, keep
+// scheme/path/query. The reposted message keeps the mirror link and Discord's
+// own embedder fetches it, which yields proper video players.
 // Platforms not listed here (youtube, spotify, ...) already get good native
 // embeds from Discord and are left alone.
 export interface Provider {
   name: string;
-  pattern: RegExp;
   mirror: string;
 }
 
-const PROVIDERS: Provider[] = [
-  { name: 'x', pattern: /(?:twitter\.com|x\.com)\/[\w]+\/status\/\d+/i, mirror: 'fxtwitter.com' },
-  { name: 'instagram', pattern: /(?:instagram\.com|instagr\.am)\/(p|reel|reels|tv)\/[\w-]+/i, mirror: 'kkinstagram.com' },
-  { name: 'tiktok', pattern: /tiktok\.com\/@[\w.-]+\/video\/\d+/i, mirror: 'kktiktok.com' },
-  { name: 'reddit', pattern: /reddit\.com\/r\/[\w]+\/comments\/[\w]+/i, mirror: 'vxreddit.com' },
+const MIRRORS: [host: string, mirror: string, name: string][] = [
+  ['x.com', 'fxtwitter.com', 'x'],
+  ['twitter.com', 'fxtwitter.com', 'x'],
+  ['instagram.com', 'kkinstagram.com', 'instagram'],
+  ['instagr.am', 'kkinstagram.com', 'instagram'],
+  ['tiktok.com', 'kktiktok.com', 'tiktok'],
+  ['reddit.com', 'vxreddit.com', 'reddit'],
 ];
 
 const URL_RE = /https?:\/\/[^\s<>"']+/i;
@@ -26,7 +28,15 @@ export function extractUrl(text: string): string | null {
 }
 
 export function detectProvider(url: string): Provider | null {
-  for (const p of PROVIDERS) if (p.pattern.test(url)) return p;
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  for (const [pattern, mirror, name] of MIRRORS) {
+    if (host === pattern || host.endsWith(`.${pattern}`)) return { name, mirror };
+  }
   return null;
 }
 
@@ -40,5 +50,36 @@ export function transformUrl(url: string): string | null {
     return u.toString();
   } catch {
     return null;
+  }
+}
+
+/** True for short share links that redirect (vm.tiktok.com/..., t.co/...). */
+export function isShortLink(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 't.co' || /^(vm|vt)\.tiktok\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Short share links redirect to the canonical URL; resolve them so the mirror
+ * gets a URL it understands. Falls back to the original URL on failure.
+ */
+export async function canonicalizeUrl(url: string): Promise<string> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: ctrl.signal,
+      headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36' },
+    });
+    clearTimeout(t);
+    return res.url || url;
+  } catch {
+    return url;
   }
 }
