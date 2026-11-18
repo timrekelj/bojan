@@ -284,8 +284,8 @@ export function dashboardPage(d: DashboardData): string {
       <div class="actions"><button type="submit">Save settings</button></div>
     </form>
   </section>
-  <section aria-labelledby="h-embeds"><div class="sec-head"><h2 id="h-embeds">Recent embed conversions</h2></div>
-    ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d)}
+  <section aria-labelledby="h-embeds"><div class="sec-head"><h2 id="h-embeds">Embed conversions</h2></div>
+    ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}
   </section>`;
   return layout('Dashboard', body, d.user);
 }

@@ -371,7 +371,7 @@ export class BotDatabase {
 
   recentEmbeds(guildId: string, limit: number, offset = 0): EmbedLogRow[] {
     return this.db
-      .prepare('SELECT * FROM embed_log WHERE guild_id = ? ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?')
+      .prepare('SELECT id, guild_id AS guildId, channel_id AS channelId, message_id AS messageId, url, provider, ts FROM embed_log WHERE guild_id = ? ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?')
       .all(guildId, limit, offset) as unknown as EmbedLogRow[];
   }
 
