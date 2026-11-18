@@ -34,9 +34,14 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
 - **URL converter (embeddo-style)** — in the channels you pick, messages
   containing a social link (X/Twitter, Instagram, TikTok, YouTube, Reddit,
   Facebook, Threads, Spotify, SoundCloud) are reposted via a webhook with a
-  rich embed (oEmbed where the platform allows it keyless, OpenGraph scraping
-  as fallback) and the original message is deleted so the plain link preview
-  doesn't double up. Inspired by https://github.com/aikenahac/embeddo
+  rich embed and the original message is deleted so the plain link preview
+  doesn't double up. Inspired by https://github.com/aikenahac/embeddo.
+  X/Twitter is fetched via the keyless fxtwitter API (x.com blocks scraping),
+  other platforms use keyless oEmbed where available with OpenGraph scraping
+  as fallback. Requires the **Message Content** intent (the bot reads the link
+  text) and, in the conversion channels, the **Manage Webhooks** and
+  **Manage Messages** permissions. Skips and conversions are logged
+  (`docker compose logs`, `[embeds]` lines).
 
 ## Setup
 

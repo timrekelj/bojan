@@ -53,7 +53,10 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
     if (!provider) return; // only known social platforms
 
     const meta = await fetchEmbedMeta(url);
-    if (!meta) return;
+    if (!meta) {
+      console.warn(`[embeds] no metadata for ${url} (provider page unreachable/blocked)`);
+      return;
+    }
     const embed = toEmbed(meta);
     if (!embed) return;
 
@@ -69,17 +72,25 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
     };
 
     let webhook = await getWebhook(channel as TextChannel);
-    if (!webhook) return;
+    if (!webhook) {
+      console.warn(`[embeds] could not get/create a webhook in #${(channel as TextChannel).name} — the bot needs the Manage Webhooks permission there`);
+      return;
+    }
     try {
       await webhook.send(payload);
-    } catch {
+    } catch (err) {
       // Cached webhook may be stale/deleted — refetch once and retry.
       webhook = await getWebhook(channel as TextChannel, true);
-      if (!webhook) return;
+      if (!webhook || !webhook.token) {
+        console.warn(`[embeds] webhook resend failed in #${(channel as TextChannel).name}:`, err);
+        return;
+      }
       await webhook.send(payload);
     }
 
-    await message.delete().catch(() => undefined);
+    await message.delete().catch((err) => {
+      console.warn(`[embeds] could not delete original message ${message.id} — needs Manage Messages in that channel:`, err);
+    });
     db.logEmbed({
       guildId: message.guildId,
       channelId: message.channelId,
@@ -88,6 +99,7 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
       provider: provider.name,
       ts: Date.now(),
     });
+    console.log(`[embeds] converted ${provider.name} link in #${(channel as TextChannel).name}: ${url}`);
   } catch {
     // Conversion is best-effort; never let it break message handling.
   }

@@ -15,13 +15,39 @@ interface Provider {
   pattern: RegExp;
   color: number;
   oembed?: (url: string) => string;
+  /** Keyless JSON API for platforms that block scraping (X/Twitter). */
+  api?: (url: string) => Promise<Partial<EmbedMeta> | null>;
+}
+
+/** X/Twitter blocks anonymous OpenGraph fetches, so use the public fxtwitter API. */
+async function fetchXTweet(url: string): Promise<Partial<EmbedMeta> | null> {
+  const m = url.match(/(?:twitter\.com|x\.com)\/([\w]+)\/status\/(\d+)/i);
+  if (!m) return null;
+  const json = await fetchJson(`https://api.fxtwitter.com/${m[1]}/status/${m[2]}`);
+  const tweet = json && typeof json.tweet === 'object' && json.tweet !== null ? (json.tweet as Record<string, unknown>) : null;
+  if (!tweet) return null;
+  const author = typeof tweet.author === 'object' && tweet.author !== null ? (tweet.author as Record<string, unknown>) : {};
+  const media = typeof tweet.media === 'object' && tweet.media !== null ? (tweet.media as Record<string, unknown>) : {};
+  const photos = Array.isArray(media.photos) ? (media.photos as Record<string, unknown>[]) : [];
+  const videos = Array.isArray(media.videos) ? (media.videos as Record<string, unknown>[]) : [];
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
+  const first = (arr: Record<string, unknown>[]): string | undefined => str(arr[0]?.url);
+  const screenName = str(author.screen_name);
+  return {
+    title: str(author.name) ? `${str(author.name)} (@${screenName})` : undefined,
+    description: str(tweet.text),
+    author: screenName ? `@${screenName}` : undefined,
+    image: first(photos) ?? str(videos[0]?.thumbnail_url),
+    video: first(videos),
+    siteName: 'X',
+  };
 }
 
 // Inspired by https://github.com/aikenahac/embeddo — keyless oEmbed where the
 // platform offers it, OpenGraph scraping as a universal fallback (needed for
 // X/Twitter and Instagram, whose oEmbed endpoints require app credentials).
 const PROVIDERS: Provider[] = [
-  { name: 'x', pattern: /(?:twitter\.com|x\.com)\/[\w]+\/status\/\d+/i, color: 0x000000 },
+  { name: 'x', pattern: /(?:twitter\.com|x\.com)\/[\w]+\/status\/\d+/i, color: 0x000000, api: fetchXTweet },
   { name: 'instagram', pattern: /instagram\.com\/(p|reel|reels|tv)\/[\w-]+/i, color: 0xc13584 },
   { name: 'tiktok', pattern: /tiktok\.com\/@[\w.-]+\/video\/\d+/i, color: 0xfe2c55, oembed: (u) => `https://www.tiktok.com/oembed?url=${encodeURIComponent(u)}` },
   { name: 'youtube', pattern: /(?:youtube\.com\/(?:watch|shorts|live)|youtu\.be\/)[\w-]+/i, color: 0xff0000, oembed: (u) => `https://www.youtube.com/oembed?url=${encodeURIComponent(u)}&format=json` },
@@ -116,6 +142,11 @@ async function fetchOpenGraph(url: string, timeoutMs = 8000): Promise<Partial<Em
 export async function fetchEmbedMeta(url: string): Promise<EmbedMeta | null> {
   const provider = detectProvider(url);
   const base: EmbedMeta = { provider: provider?.name ?? 'link', url, color: provider?.color };
+
+  if (provider?.api) {
+    const meta = await provider.api(url);
+    if (meta) return { ...base, ...meta };
+  }
 
   if (provider?.oembed) {
     const json = await fetchJson(provider.oembed(url));

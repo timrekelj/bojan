@@ -222,7 +222,9 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
   });
 
   app.post('/settings', requireAdmin, async (c) => {
-    const form = await c.req.parseBody();
+    // all: true — repeated checkbox values (embedChannels) arrive as an array
+    // instead of only the last one overwriting the rest.
+    const form = await c.req.parseBody({ all: true });
     const current = db.getSettings(config.guildId);
     const str = (v: unknown): string => (typeof v === 'string' ? v : '');
     const num = (v: unknown, fallback: number, min: number, max: number): number => {
