@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { currentWeekBounds, lastWeekBounds, leaderboardLines, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
-import { detectProvider, extractUrl } from './embeds/providers.js';
+import { detectProvider, extractUrl, transformUrl } from './embeds/providers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'bojan-smoke-'));
 const db = new BotDatabase(join(dir, 'test.db'));
@@ -104,10 +104,19 @@ check('detect x', detectProvider('https://x.com/foo/status/123')?.name === 'x');
 check('detect twitter', detectProvider('https://twitter.com/foo/status/123')?.name === 'x');
 check('detect tiktok', detectProvider('https://www.tiktok.com/@foo/video/7312345678901234567')?.name === 'tiktok');
 check('detect instagram', detectProvider('https://www.instagram.com/reel/ABC123/')?.name === 'instagram');
-check('detect youtube', detectProvider('https://youtu.be/dQw4w9WgXcQ')?.name === 'youtube');
+check('detect instagr.am', detectProvider('https://instagr.am/p/ABC123/')?.name === 'instagram');
 check('detect reddit', detectProvider('https://www.reddit.com/r/test/comments/abc123/title/')?.name === 'reddit');
-check('detect spotify', detectProvider('https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC')?.name === 'spotify');
+check('ignore youtube (native embed)', detectProvider('https://youtu.be/dQw4w9WgXcQ') === null);
+check('ignore spotify (native embed)', detectProvider('https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC') === null);
 check('ignore plain link', detectProvider('https://example.com/article') === null);
+
+// embeddo-style mirror rewrites (path and query preserved)
+check('transform x', transformUrl('https://x.com/GameJoker_/status/2122004700644200505?a=wGngWqYCkNzMmNE29c&s=20') === 'https://fxtwitter.com/GameJoker_/status/2122004700644200505?a=wGngWqYCkNzMmNE29c&s=20');
+check('transform twitter', transformUrl('https://twitter.com/foo/status/123') === 'https://fxtwitter.com/foo/status/123');
+check('transform instagram', transformUrl('https://www.instagram.com/reel/ABC123/') === 'https://www.kkinstagram.com/reel/ABC123/');
+check('transform tiktok', transformUrl('https://www.tiktok.com/@foo/video/7312345678901234567') === 'https://www.kktiktok.com/@foo/video/7312345678901234567');
+check('transform reddit', transformUrl('https://www.reddit.com/r/test/comments/abc123/title/') === 'https://www.vxreddit.com/r/test/comments/abc123/title/');
+check('no transform for plain link', transformUrl('https://example.com/a') === null);
 
 db.close();
 rmSync(dir, { recursive: true, force: true });

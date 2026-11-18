@@ -32,17 +32,19 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   weekly day/hour/timezone, embed-conversion channels). JSON API at
   `/api/stats.json`.
 - **URL converter (embeddo-style)** — in the channels you pick, messages
-  containing a social link (X/Twitter, Instagram, TikTok, YouTube, Reddit,
-  Facebook, Threads, Spotify, SoundCloud) are reposted via a webhook with a
-  rich embed and the original message is deleted (or its embeds suppressed)
-  so the native preview doesn't double up. Inspired by
-  https://github.com/aikenahac/embeddo.
-  X/Twitter is fetched via the keyless fxtwitter API (x.com blocks scraping),
-  other platforms use keyless oEmbed where available with OpenGraph scraping
-  as fallback. Requires the **Message Content** intent (the bot reads the link
-  text) and, in the conversion channels, the **Manage Webhooks** and
-  **Manage Messages** permissions. Skips and conversions are logged
-  (`docker compose logs`, `[embeds]` lines).
+  containing a supported social link are reposted via a webhook **as the
+  original user**, with the link rewritten to an embed-friendly mirror and
+  the original message removed so nothing doubles up. Like
+  [embeddo](https://github.com/aikenahac/embeddo), the rewrites are:
+  `x.com`/`twitter.com` → `fxtwitter.com`, `instagram.com`/`instagr.am` →
+  `kkinstagram.com`, `tiktok.com` → `kktiktok.com`, `reddit.com` →
+  `vxreddit.com`. Discord's own embedder then fetches the mirror, which gives
+  rich embeds *with playable video* (building the embed ourselves lost the
+  play button). Platforms not in the list (YouTube, Spotify, …) already get
+  good native embeds and are left alone. Requires the **Message Content**
+  intent and, in conversion channels, **Manage Webhooks** + **Manage
+  Messages**. Skips and conversions are logged (`docker compose logs`,
+  `[embeds]` lines).
 
 ## Setup
 
