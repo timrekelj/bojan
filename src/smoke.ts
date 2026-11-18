@@ -113,9 +113,9 @@ check('ignore plain link', detectProvider('https://example.com/article') === nul
 // embeddo-style mirror rewrites (path and query preserved)
 check('transform x', transformUrl('https://x.com/GameJoker_/status/2122004700644200505?a=wGngWqYCkNzMmNE29c&s=20') === 'https://fxtwitter.com/GameJoker_/status/2122004700644200505?a=wGngWqYCkNzMmNE29c&s=20');
 check('transform twitter', transformUrl('https://twitter.com/foo/status/123') === 'https://fxtwitter.com/foo/status/123');
-check('transform instagram', transformUrl('https://www.instagram.com/reel/ABC123/') === 'https://www.kkinstagram.com/reel/ABC123/');
-check('transform tiktok', transformUrl('https://www.tiktok.com/@foo/video/7312345678901234567') === 'https://www.kktiktok.com/@foo/video/7312345678901234567');
-check('transform reddit', transformUrl('https://www.reddit.com/r/test/comments/abc123/title/') === 'https://www.vxreddit.com/r/test/comments/abc123/title/');
+check('transform instagram (www dropped, like embeddo)', transformUrl('https://www.instagram.com/reel/ABC123/') === 'https://kkinstagram.com/reel/ABC123/');
+check('transform tiktok (www dropped)', transformUrl('https://www.tiktok.com/@foo/video/7312345678901234567') === 'https://kktiktok.com/@foo/video/7312345678901234567');
+check('transform reddit (www dropped)', transformUrl('https://www.reddit.com/r/test/comments/abc123/title/') === 'https://vxreddit.com/r/test/comments/abc123/title/');
 check('no transform for plain link', transformUrl('https://example.com/a') === null);
 
 db.close();
