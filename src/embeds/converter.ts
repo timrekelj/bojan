@@ -46,7 +46,9 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
   try {
     if (!message.guildId || message.webhookId || message.author.bot) return;
     if (!embedChannels.includes(message.channelId)) return;
-    if (message.embeds.length > 0) return; // Discord already made a rich embed
+    // Note: we intentionally do NOT skip messages that already have embeds —
+    // Discord's native social-link embeds are exactly what we want to replace
+    // (embeddo-style). Our own reposts are excluded via the webhookId check above.
     const url = extractUrl(message.content);
     if (!url) return;
     const provider = detectProvider(url);
@@ -76,21 +78,30 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
       console.warn(`[embeds] could not get/create a webhook in #${(channel as TextChannel).name} — the bot needs the Manage Webhooks permission there`);
       return;
     }
+    let sent;
     try {
-      await webhook.send(payload);
+      sent = await webhook.send(payload);
     } catch (err) {
       // Cached webhook may be stale/deleted — refetch once and retry.
       webhook = await getWebhook(channel as TextChannel, true);
       if (!webhook || !webhook.token) {
-        console.warn(`[embeds] webhook resend failed in #${(channel as TextChannel).name}:`, err);
+        console.warn(`[embeds] webhook send failed in #${(channel as TextChannel).name}:`, err);
         return;
       }
-      await webhook.send(payload);
+      sent = await webhook.send(payload);
     }
 
-    await message.delete().catch((err) => {
-      console.warn(`[embeds] could not delete original message ${message.id} — needs Manage Messages in that channel:`, err);
-    });
+    // Remove the original so its native embed doesn't double up with ours.
+    const deleted = await message.delete().then(() => true).catch(() => false);
+    if (!deleted) {
+      const suppressed = await message.suppressEmbeds(true).then(() => true).catch(() => false);
+      if (!suppressed) {
+        // Can't remove the original at all — undo the repost to avoid duplicates.
+        await sent.delete().catch(() => undefined);
+        console.warn(`[embeds] cannot delete or suppress the original message in #${(channel as TextChannel).name} (needs Manage Messages) — skipped ${url}`);
+        return;
+      }
+    }
     db.logEmbed({
       guildId: message.guildId,
       channelId: message.channelId,
