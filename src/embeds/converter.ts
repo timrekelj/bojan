@@ -1,6 +1,6 @@
 import { ChannelType, Webhook, type Message, type TextChannel } from 'discord.js';
 import type { BotDatabase } from '../db.js';
-import { extractUrl, detectProvider, transformUrl, canonicalizeUrl, isShortLink } from './providers.js';
+import { extractUrlOutsideCode, detectProvider, transformUrl, canonicalizeUrl, isShortLink } from './providers.js';
 
 const WEBHOOK_NAME = 'embed-converter';
 const webhookCache = new Map<string, Webhook>();
@@ -34,12 +34,10 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
   try {
     if (!message.guildId || message.webhookId || message.author.bot) return;
     if (!embedChannels.includes(message.channelId)) return;
-    const url = extractUrl(message.content);
+    // Links inside code blocks or inline code (`...`) are never converted.
+    const url = extractUrlOutsideCode(message.content);
     if (!url) return;
     if (!detectProvider(url)) return; // not a mirrorable platform; Discord's native embed is fine
-    // Bare-link messages (nothing but the URL) are left to Discord's native
-    // embed; we only convert links that come with actual text around them.
-    if (message.content.split(url).join('').trim().length === 0) return;
     // Resolve short share links (vm.tiktok.com/..., t.co/...) to the canonical
     // URL so the mirror gets a path it understands.
     let target = url;

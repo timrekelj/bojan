@@ -21,10 +21,20 @@ const MIRRORS: [host: string, mirror: string, name: string][] = [
 
 const URL_RE = /https?:\/\/[^\s<>"']+/i;
 
+/** Remove code blocks (```...```) and inline code (`...`) from text. */
+export function stripCode(text: string): string {
+  return text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ');
+}
+
 /** First URL in the text, if any. */
 export function extractUrl(text: string): string | null {
   const m = text.match(URL_RE);
   return m ? m[0].replace(/[.,;!?)\]]+$/, '') : null;
+}
+
+/** First URL that is NOT inside a code block or inline code, if any. */
+export function extractUrlOutsideCode(text: string): string | null {
+  return extractUrl(stripCode(text));
 }
 
 export function detectProvider(url: string): Provider | null {

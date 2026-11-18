@@ -32,11 +32,11 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   weekly day/hour/timezone, embed-conversion channels). JSON API at
   `/api/stats.json`.
 - **URL converter (embeddo-style)** — in the channels you pick, messages
-  containing a supported social link **plus some text of their own** are
-  reposted via a webhook **as the original user**, with the link rewritten to
-  an embed-friendly mirror and the original message removed so nothing
-  doubles up. Messages that are only a bare link are left to Discord's native
-  embed. Like
+  containing a supported social link are reposted via a webhook **as the
+  original user**, with the link rewritten to an embed-friendly mirror and
+  the original message removed so nothing doubles up — in all cases (bare
+  link or with surrounding text), **except** links inside code blocks or
+  inline code (`...`), which are never converted. Like
   [embeddo](https://github.com/aikenahac/embeddo), the rewrites are:
   `x.com`/`twitter.com` → `fxtwitter.com`, `instagram.com`/`instagr.am` →
   `kkinstagram.com`, `tiktok.com` → `kktiktok.com`, `reddit.com` →
