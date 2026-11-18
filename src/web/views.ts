@@ -7,142 +7,162 @@ export function escapeHtml(s: string): string {
 
 const CSS = `
   :root {
-    color-scheme: light dark;
-    --bg: #f5f6f8; --surface: #fff; --surface-2: #f0f1f4; --border: #e1e3e8;
-    --text: #1b1d22; --muted: #646b78; --accent: #5865f2; --accent-hover: #4752c4; --accent-soft: #eceefe;
-    --success: #1f8a4c; --success-soft: #e5f5ec; --radius: 12px;
+    color-scheme: dark light;
+    --bg: #1a1a1e; --chrome: #17171b; --raised: #27272b; --input: rgba(255,255,255,.06); --soft: rgba(255,255,255,.08);
+    --border: rgba(255,255,255,.10); --border-strong: rgba(255,255,255,.25);
+    --text: #fff; --text-2: #ccccd1; --muted: #a1a1aa;
+    --btn-bg: #f9f9fa; --btn-fg: #101013; --accent: #fa500f; --success: #3ec979;
+    --float: 0 0 0 1px rgba(255,255,255,.1), 0 1px 2px rgba(0,0,0,.2), 0 6px 16px -6px rgba(0,0,0,.28);
   }
-  @media (prefers-color-scheme: dark) {
+  @media (prefers-color-scheme: light) {
     :root {
-      --bg: #131417; --surface: #1c1e23; --surface-2: #25272d; --border: #2e3139;
-      --text: #e8e9ed; --muted: #9096a3; --accent: #7983f5; --accent-hover: #8e97f7; --accent-soft: #272a4a;
-      --success: #3ec979; --success-soft: #16301f;
+      --bg: #fafaf9; --chrome: #f6f5f3; --raised: #fff; --input: rgba(0,0,0,.04); --soft: #f3f2ef;
+      --border: rgba(0,0,0,.10); --border-strong: rgba(0,0,0,.25);
+      --text: #18181b; --text-2: #3f3f46; --muted: #71706b;
+      --btn-bg: #1a1a1e; --btn-fg: #fff; --success: #1f8a4c;
+      --float: 0 0 0 1px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06), 0 6px 16px -6px rgba(0,0,0,.14);
     }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
-  a { color: var(--accent); }
-  code { background: var(--surface-2); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
-  .topbar { background: var(--surface); border-bottom: 1px solid var(--border); }
-  .topbar-in { max-width: 1040px; margin: 0 auto; padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
-  .brand { margin: 0; flex: 1; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
-  .brand::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 3px; background: var(--accent); margin-right: 10px; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 400 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: inherit; text-underline-offset: 3px; text-decoration-color: var(--muted); }
+  code { background: var(--soft); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
+  .topbar { background: var(--chrome); border-bottom: 1px solid var(--border); }
+  .topbar-in { max-width: 960px; margin: 0 auto; padding: 10px 20px; display: flex; align-items: center; gap: 12px; }
+  .brand { flex: 1; display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 500; }
+  .mark { display: block; flex: none; }
   .me { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .me img { width: 28px; height: 28px; border-radius: 50%; }
-  .me span { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
-  .me a { color: var(--muted); font-size: 13px; text-decoration: none; margin-left: 4px; }
+  .me img { width: 24px; height: 24px; border-radius: 50%; }
+  .me span { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+  .me a { color: var(--muted); font-size: 13px; text-decoration: none; margin-left: 6px; }
   .me a:hover { color: var(--text); text-decoration: underline; }
-  main { max-width: 1040px; margin: 0 auto; padding: 24px 20px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  main > * { min-width: 0; }
-  section, .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-  h2 { margin: 0; font-size: 15px; font-weight: 650; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 20px 64px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 36px; }
+  .wrap > * { min-width: 0; }
+  .wrap > section, .wrap > .cols { border-top: 1px solid var(--border); padding-top: 28px; }
+  h1 { margin: 0; font-weight: 400; }
+  h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+  .title { font-size: 32px; line-height: 1.2; letter-spacing: -.02em; }
+  .lede { margin: 8px 0 0; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .head { display: grid; gap: 0; }
   .sec-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 14px; }
   .sub, .muted { color: var(--muted); font-size: 13px; }
   .muted { margin: 0; }
-  .empty { margin: 0; padding: 22px 12px; text-align: center; color: var(--muted); background: var(--surface-2); border-radius: 8px; }
-  .flash { background: var(--success-soft); color: var(--success); border: 1px solid var(--success); border-radius: 10px; padding: 10px 14px; font-weight: 550; }
-  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
-  .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
-  .kpi b { display: block; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-  .kpi span { color: var(--muted); font-size: 13px; }
-  .health { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 22px; padding: 12px 18px; color: var(--muted); font-size: 13px; }
-  .health strong { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: 6px; }
-  .dot.ok { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
-  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .empty { margin: 0; padding: 4px 0; color: var(--muted); }
+  .flash { display: flex; align-items: center; gap: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+  .flash::before { content: ''; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+  .kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .kpi { padding: 18px 20px; border-left: 1px solid var(--border); }
+  .kpi:first-child { border-left: 0; padding-left: 0; }
+  .kpi span { display: block; color: var(--muted); font-size: 13px; }
+  .kpi b { display: block; font-size: 28px; line-height: 1.2; font-weight: 500; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: 8px; }
+  .dot.ok { background: var(--success); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 48px; }
   .cols > section { min-width: 0; }
   .lb { list-style: none; margin: 0; padding: 0; }
-  .lb li { display: grid; grid-template-columns: 22px 28px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; padding: 9px 0; border-top: 1px solid var(--border); }
+  .lb li { display: grid; grid-template-columns: 20px 24px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; padding: 9px 0; border-top: 1px solid var(--border); }
   .lb li:first-child { border-top: 0; }
   .rank { color: var(--muted); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
-  .top .rank { color: var(--accent); font-weight: 700; }
-  .top .name { font-weight: 650; }
-  .av { width: 28px; height: 28px; border-radius: 50%; background: var(--surface-2); object-fit: cover; display: grid; place-items: center; font-size: 12px; font-weight: 650; color: var(--muted); }
-  .top .av { box-shadow: 0 0 0 2px var(--accent); }
+  .top .name { font-weight: 600; }
+  .av { width: 24px; height: 24px; border-radius: 50%; background: var(--soft); object-fit: cover; display: grid; place-items: center; font-size: 11px; font-weight: 500; color: var(--muted); }
   .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
   .share { grid-column: 3 / 5; display: flex; align-items: center; gap: 8px; }
-  .bar { flex: 1; height: 4px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
-  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  .bar { flex: 1; height: 2px; background: var(--soft); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
   .pct { color: var(--muted); font-size: 12px; min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
-  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; padding: 0; list-style: none; }
-  .chip { display: inline-flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px 4px 10px; font-size: 18px; line-height: 1.3; }
-  .chip small { font-size: 13px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .chip img { width: 20px; height: 20px; }
+  .emojis { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 0 0 14px; padding: 0; list-style: none; }
+  .emojis li { display: inline-flex; align-items: center; gap: 8px; font-size: 20px; line-height: 1.3; }
+  .emojis small { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .emojis img { width: 20px; height: 20px; }
+  .panel { background: var(--raised); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
   fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
   fieldset + fieldset { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--border); }
-  legend { float: left; width: 100%; padding: 0; font-weight: 650; font-size: 15px; }
+  legend { float: left; width: 100%; padding: 0; font-weight: 600; font-size: 15px; }
   legend + .sub { clear: both; margin: 2px 0 14px; }
   .field { margin-top: 14px; }
-  .field > label, .lbl { display: block; font-weight: 550; margin-bottom: 2px; }
+  .field > label, .lbl { display: block; font-weight: 500; margin-bottom: 2px; }
   .help { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  select, input[type=text] { width: 100%; max-width: 100%; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; }
+  select, input[type=text] { width: 100%; max-width: 100%; background: var(--input); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; }
+  select option { background: var(--raised); color: var(--text); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .switch { display: flex; align-items: center; gap: 12px; cursor: pointer; }
   .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-  .track { flex: none; width: 38px; height: 22px; border-radius: 999px; background: var(--border); position: relative; transition: background .15s; }
-  .track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .track { flex: none; width: 36px; height: 20px; border-radius: 999px; background: var(--border-strong); position: relative; transition: background .15s; }
+  .track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; }
   .switch input:checked + .track { background: var(--accent); }
   .switch input:checked + .track::after { transform: translateX(16px); }
   .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; max-height: 240px; overflow: auto; padding: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; }
-  .pill { display: flex; align-items: center; gap: 8px; padding: 6px 10px; margin: 0; font-weight: 400; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; cursor: pointer; min-width: 0; }
-  .pill:hover { border-color: var(--accent); }
-  .pill:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
-  .pill input { accent-color: var(--accent); margin: 0; flex: none; }
-  .pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; max-height: 240px; overflow: auto; padding: 8px; background: var(--input); border: 1px solid var(--border); border-radius: 8px; }
+  .opt { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin: 0; font-weight: 400; border-radius: 6px; cursor: pointer; min-width: 0; }
+  .opt:hover { background: var(--soft); }
+  .opt input { accent-color: var(--accent); margin: 0; flex: none; }
+  .opt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .actions { margin-top: 24px; }
-  button, .btn { display: inline-block; background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 10px 20px; font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
-  button:hover, .btn:hover { background: var(--accent-hover); }
-  .btn.discord { background: #5865f2; padding: 12px 26px; font-size: 15px; }
-  .btn.discord:hover { background: #4752c4; }
-  .btn.ghost { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
-  .btn.ghost:hover { background: var(--border); }
-  .pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  button, .btn { display: inline-block; background: var(--btn-bg); color: var(--btn-fg); border: 0; border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 500; text-decoration: none; cursor: pointer; box-shadow: inset 0 -1.5px 0 rgba(0,0,0,.08); }
+  button:hover, .btn:hover { opacity: .88; }
+  .btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); box-shadow: none; opacity: 1; }
+  .btn.ghost:hover { background: var(--soft); }
+  .pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 12px; }
   .pager .muted, .pager-nav { font-variant-numeric: tabular-nums; }
   .pager-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
-  .pager-btn { display: inline-block; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; font-size: 13px; font-weight: 600; text-decoration: none; }
+  .pager-btn { display: inline-block; background: var(--soft); color: var(--text); border-radius: 8px; padding: 4px 12px; font-size: 13px; font-weight: 500; text-decoration: none; }
   a.pager-btn:hover { background: var(--border); }
   .pager-btn[aria-disabled=true] { color: var(--muted); opacity: .55; }
-  .scroll { overflow-x: auto; max-width: 100%; }
+  .scroll { overflow-x: auto; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 9px 12px; border-top: 1px solid var(--border); white-space: nowrap; }
-  th { border-top: 0; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: none; }
+  th, td { text-align: left; padding: 9px 14px; border-top: 1px solid var(--border); white-space: nowrap; }
+  th { border-top: 0; color: var(--muted); font-size: 12px; font-weight: 500; }
   td.url { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
-  td.url a { display: block; overflow: hidden; text-overflow: ellipsis; }
-  .badge { display: inline-block; background: var(--accent-soft); color: var(--accent); border-radius: 6px; padding: 1px 8px; font-size: 12px; font-weight: 600; }
+  td.url a { display: block; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
+  td.url a:hover { text-decoration: underline; }
+  .badge { display: inline-block; background: var(--soft); color: var(--text-2); border-radius: 6px; padding: 1px 8px; font-size: 12px; font-weight: 500; }
   .center { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
-  .auth { width: 100%; max-width: 380px; text-align: center; padding: 32px 28px; }
-  .auth h1 { margin: 0 0 8px; font-size: 20px; letter-spacing: -.01em; }
+  .auth { width: 100%; max-width: 380px; text-align: center; padding: 36px 28px; background: var(--raised); border-radius: 12px; box-shadow: var(--float); }
+  .auth h1 { margin: 18px 0 8px; font-size: 24px; letter-spacing: -.02em; }
   .auth p { margin: 0 0 24px; color: var(--muted); }
-  .auth .mark { width: 40px; height: 40px; border-radius: 10px; background: var(--accent); margin: 0 auto 18px; }
   @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
+  @media (max-width: 640px) {
+    .kpis { grid-template-columns: 1fr 1fr; }
+    .kpi, .kpi:first-child { padding: 14px 16px; border-left: 0; border-top: 1px solid var(--border); }
+    .kpi:nth-child(-n+2) { border-top: 0; }
+    .kpi:nth-child(odd) { padding-left: 0; }
+    .kpi:nth-child(even) { border-left: 1px solid var(--border); }
+  }
   @media (max-width: 480px) {
-    main { padding: 16px 12px 40px; }
-    section, .card { padding: 16px; }
-    .topbar-in { padding: 10px 12px; }
+    .wrap { padding: 28px 16px 48px; gap: 28px; }
+    .panel { padding: 16px; }
+    .topbar-in { padding: 10px 16px; }
     .me span { max-width: 90px; }
     .row { grid-template-columns: 1fr; }
-    .kpi b { font-size: 26px; }
+    .title { font-size: 26px; }
   }
 `;
 
+// Chunky pixel "B" on a 5x7 grid, drawn as runs of <rect>s.
+const MARK_ROWS = ['XXXX.', 'X...X', 'X...X', 'XXXX.', 'X...X', 'X...X', 'XXXX.'];
+
+function mark(px: number): string {
+  const rects = MARK_ROWS.flatMap((row, y) => Array.from(row.matchAll(/X+/g), (m) => `<rect x="${m.index}" y="${y}" width="${m[0].length}" height="1"/>`));
+  return `<svg class="mark" width="${px * 5}" height="${px * 7}" viewBox="0 0 5 7" fill="#fa500f" shape-rendering="crispEdges" aria-hidden="true">${rects.join('')}</svg>`;
+}
+
 function page(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>${escapeHtml(title)}</title><style>${CSS}</style></head><body>${body}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark light"><title>${escapeHtml(title)}</title><style>${CSS}</style></head><body>${body}</body></html>`;
 }
 
 function layout(title: string, body: string, user: { username: string; avatar: string }): string {
-  const header = `<header class="topbar"><div class="topbar-in"><h1 class="brand">Bojan dashboard</h1><div class="me"><img src="${escapeHtml(user.avatar)}" alt=""><span>${escapeHtml(user.username)}</span><a href="/logout">Log out</a></div></div></header>`;
-  return page(title, `${header}<main>${body}</main>`);
+  const header = `<header class="topbar"><div class="topbar-in"><div class="brand">${mark(3)}Bojan</div><div class="me"><img src="${escapeHtml(user.avatar)}" alt=""><span>${escapeHtml(user.username)}</span><a href="/logout">Log out</a></div></div></header>`;
+  return page(title, `${header}<main class="wrap">${body}</main>`);
 }
 
 function authCard(title: string, text: string, button: string): string {
-  return page(title, `<main class="center"><div class="card auth"><div class="mark"></div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>${button}</div></main>`);
+  return page(title, `<main class="center"><div class="auth">${mark(5)}<h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>${button}</div></main>`);
 }
 
 export function loginPage(discordAuthUrl: string): string {
-  return authCard('Server stats dashboard', 'Sign in with Discord. Only server administrators can access this.', `<a class="btn discord" href="${escapeHtml(discordAuthUrl)}">Sign in with Discord</a>`);
+  return authCard('Server stats dashboard', 'Sign in with Discord. Only server administrators can access this.', `<a class="btn" href="${escapeHtml(discordAuthUrl)}">Sign in with Discord</a>`);
 }
 
 export function errorPage(message: string): string {
@@ -167,7 +187,7 @@ export interface DashboardData {
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-const kpi = (value: string, label: string): string => `<div class="kpi"><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></div>`;
+const kpi = (value: string, label: string): string => `<div class="kpi"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`;
 
 function emptyState(text: string): string {
   return `<p class="empty">${escapeHtml(text)}</p>`;
@@ -193,7 +213,7 @@ function emojiChip(e: EmojiRow): string {
   const glyph = custom
     ? `<img src="https://cdn.discordapp.com/emojis/${custom[3]}.${custom[1] ? 'gif' : 'webp'}?size=48" alt="${escapeHtml(custom[2] ?? '')}" title=":${escapeHtml(custom[2] ?? '')}:" loading="lazy">`
     : escapeHtml(e.emojiLabel);
-  return `<li class="chip">${glyph}<small>${fmt(e.count)}</small></li>`;
+  return `<li>${glyph}<small>${fmt(e.count)}</small></li>`;
 }
 
 function embedRows(d: DashboardData): string {
@@ -234,11 +254,22 @@ export function dashboardPage(d: DashboardData): string {
     .map((c) => `<option value="${escapeHtml(c.id)}"${s.statsChannelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`)
     .join('');
   const embedChecks = d.channels
-    .map((c) => `<label class="pill"><input type="checkbox" name="embedChannels" value="${escapeHtml(c.id)}"${s.embedChannels.includes(c.id) ? ' checked' : ''}><span>#${escapeHtml(c.name)}</span></label>`)
+    .map((c) => `<label class="opt"><input type="checkbox" name="embedChannels" value="${escapeHtml(c.id)}"${s.embedChannels.includes(c.id) ? ' checked' : ''}><span>#${escapeHtml(c.name)}</span></label>`)
     .join('');
+  const status = [
+    b.ping >= 0 ? `Online · ${b.ping} ms` : 'Connecting · Ping —',
+    `up ${uptime(b.uptimeSec)}`,
+    `${b.guilds} guild${b.guilds === 1 ? '' : 's'}`,
+    `${(b.dbBytes / 1024 / 1024).toFixed(2)} MB`,
+    `weekly stats last sent ${b.lastWeeklySent ?? 'never'}`,
+  ].join(' · ');
 
   const body = `
   ${d.saved ? '<div class="flash" role="status">Settings saved.</div>' : ''}
+  <div class="head">
+    <h1 class="title">Server overview</h1>
+    <p class="lede" aria-label="Bot health"><span class="dot${b.ping >= 0 ? ' ok' : ''}"></span>${escapeHtml(status)}</p>
+  </div>
   <div class="kpis">
     ${kpi(fmt(d.today), 'Messages today')}
     ${kpi(fmt(d.week.total), 'Last week')}
@@ -246,23 +277,15 @@ export function dashboardPage(d: DashboardData): string {
     ${kpi(fmt(d.reactions.total), 'Reactions')}
     ${kpi(fmt(b.embedsConverted), 'Embeds converted')}
   </div>
-  <div class="card health" aria-label="Bot health">
-    <span><span class="dot${b.ping >= 0 ? ' ok' : ''}"></span>${b.ping >= 0 ? 'Online' : 'Connecting'}</span>
-    <span>Ping <strong>${b.ping >= 0 ? `${b.ping} ms` : '—'}</strong></span>
-    <span>Uptime <strong>${uptime(b.uptimeSec)}</strong></span>
-    <span>Guilds <strong>${b.guilds}</strong></span>
-    <span>Database <strong>${(b.dbBytes / 1024 / 1024).toFixed(2)} MB</strong></span>
-    <span>Weekly stats last sent <strong>${escapeHtml(b.lastWeeklySent ?? 'never')}</strong></span>
-  </div>
   <div class="cols">
     <section aria-labelledby="h-week"><div class="sec-head"><h2 id="h-week">Last week</h2><span class="sub">${escapeHtml(weekLabel)} · ${fmt(d.week.total)} messages</span></div>${leaderboard(d.week.rows, d.week.total, d.members)}</section>
     <section aria-labelledby="h-all"><div class="sec-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members)}</section>
   </div>
   <section aria-labelledby="h-react"><div class="sec-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>
-    ${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="chips">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}
+    ${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}
   </section>
   <section aria-labelledby="h-settings"><div class="sec-head"><h2 id="h-settings">Settings</h2></div>
-    <form method="post" action="/settings">
+    <form class="panel" method="post" action="/settings">
       <fieldset>
         <legend>Weekly stats</legend>
         <p class="sub">Post last week's leaderboard to a channel on a schedule.</p>

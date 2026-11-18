@@ -74,27 +74,30 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
   if (interaction.commandName === 'leaderboard') {
     const limit = interaction.options.getInteger('limit') ?? 10;
     const total = db.countMessages(guildId);
+    const totalReactions = db.countReactions(guildId);
     const rows = db.topUsers(guildId, limit);
     const given = db.topReactionsGiven(guildId, limit);
     const received = db.topReactionsReceived(guildId, limit);
+    const medal = (i: number): string => ['🥇', '🥈', '🥉'][i] ?? `${i + 1}.`;
     const emojiList = (userId: string): string => {
       const top = db.topEmojiForUser(guildId, userId, 3);
-      return top.length > 0 ? top.map((e) => `${e.emojiLabel}×${e.count}`).join(' ') : '—';
+      return top.length > 0 ? top.map((e) => `${e.emojiLabel}${e.count}`).join(' ') : '';
     };
-    const description = [
-      '### 🏆 Messages (all time)',
-      ...leaderboardLines(rows, total),
-      '',
-      '### 😄 Most reactions given',
-      ...(given.length > 0 ? given.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmt(r.count)}** ${emojiList(r.userId)}`) : ['—']),
-      '',
-      '### 😍 Most reactions received',
-      ...(received.length > 0 ? received.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmt(r.count)}**`) : ['—']),
-    ].join('\n');
+    // Embed field values are capped at 1024 chars — drop trailing rows if needed.
+    const fit = (lines: string[]): string => {
+      while (lines.length > 1 && lines.join('\n').length > 1000) lines.pop();
+      return lines.join('\n') || '—';
+    };
     const embed = new EmbedBuilder()
-      .setTitle('🏆 Leaderboard (all time)')
-      .setDescription(description.slice(0, 4000))
-      .setFooter({ text: `${fmt(total)} messages · ${fmt(db.countReactions(guildId))} reactions tracked in total` })
+      .setTitle('🏆 Leaderboard — all time')
+      .addFields(
+        { name: `💬 Messages (${fmt(total)} total)`, value: fit(leaderboardLines(rows, total)) },
+        {
+          name: `😄 Reactions given (${fmt(totalReactions)} total)`,
+          value: fit(given.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}** ${emojiList(r.userId)}`.trimEnd())),
+        },
+        { name: '😍 Reactions received', value: fit(received.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**`)) },
+      )
       .setColor(0x5865f2)
       .setTimestamp();
     await interaction.reply({ embeds: [embed] });
