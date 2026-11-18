@@ -87,10 +87,19 @@ export class BotDatabase {
 
   constructor(path: string) {
     this.path = path;
-    this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL;');
-    this.db.exec('PRAGMA foreign_keys = ON;');
-    this.db.exec(SCHEMA);
+    try {
+      this.db = new DatabaseSync(path);
+      this.db.exec('PRAGMA journal_mode = WAL;');
+      this.db.exec('PRAGMA foreign_keys = ON;');
+      this.db.exec(SCHEMA);
+    } catch (err) {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 'unknown';
+      throw new Error(
+        `Cannot open SQLite database at "${path}" (process uid=${uid}). ` +
+          'If this runs in Docker with a bind-mounted ./data volume, the host directory must be writable by the container user (uid 1000): sudo chown -R 1000:1000 data',
+        { cause: err },
+      );
+    }
     // Migration for databases created before message_id existed.
     const cols = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'message_id')) {
