@@ -80,6 +80,9 @@ docker compose down                 # stop
 The SQLite database lives in `./data/` (mounted as a volume), so it survives
 container rebuilds. Run exactly one replica — SQLite is single-writer.
 
+After editing `.env`, use `docker compose up -d` (it recreates the container
+and reloads `env_file`); `docker compose restart` keeps the old environment.
+
 Without Docker, on any machine with Node >= 22.5:
 
 ```bash

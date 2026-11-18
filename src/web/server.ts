@@ -88,20 +88,36 @@ interface DiscordMember {
   permissions?: string;
 }
 
-async function checkGuildAdmin(accessToken: string): Promise<{ ok: boolean; user?: DiscordUser }> {
+const ADMINISTRATOR = 0x8n;
+
+async function checkGuildAdmin(accessToken: string): Promise<{ ok: boolean; user?: DiscordUser; reason?: string }> {
   const headers = { authorization: `Bearer ${accessToken}` };
   const meRes = await fetch('https://discord.com/api/users/@me', { headers });
-  if (!meRes.ok) return { ok: false };
+  if (!meRes.ok) return { ok: false, reason: `users/@me -> ${meRes.status}` };
   const user = (await meRes.json()) as DiscordUser;
 
+  // Preferred: member object of the configured guild (carries roles + permissions).
   const memberRes = await fetch(`https://discord.com/api/users/@me/guilds/${config.guildId}/member`, { headers });
-  if (!memberRes.ok) return { ok: false };
-  const member = (await memberRes.json()) as DiscordMember;
+  if (memberRes.ok) {
+    const member = (await memberRes.json()) as DiscordMember;
+    const perms = member.permissions ? BigInt(member.permissions) : 0n;
+    const isAdmin = (perms & ADMINISTRATOR) === ADMINISTRATOR || (config.adminRoleId !== null && member.roles.includes(config.adminRoleId));
+    return isAdmin
+      ? { ok: true, user }
+      : { ok: false, user, reason: `in guild but not admin: perms=${member.permissions ?? 'none'}, roles=${member.roles.join(',') || 'none'}, ADMIN_ROLE_ID=${config.adminRoleId ?? 'unset'}` };
+  }
 
-  const ADMINISTRATOR = 0x8n;
-  const perms = member.permissions ? BigInt(member.permissions) : 0n;
-  const isAdmin = (perms & ADMINISTRATOR) === ADMINISTRATOR || (config.adminRoleId !== null && member.roles.includes(config.adminRoleId));
-  return { ok: isAdmin, user };
+  // Fallback: /users/@me/guilds carries the user's permissions per guild (no roles).
+  const guildsRes = await fetch('https://discord.com/api/users/@me/guilds', { headers });
+  if (guildsRes.ok) {
+    const guilds = (await guildsRes.json()) as { id: string; permissions?: string; owner?: boolean }[];
+    const g = guilds.find((x) => x.id === config.guildId);
+    if (!g) return { ok: false, user, reason: `guild ${config.guildId} not among the user's guilds — GUILD_ID wrong?` };
+    const perms = g.permissions ? BigInt(g.permissions) : 0n;
+    if (g.owner || (perms & ADMINISTRATOR) === ADMINISTRATOR) return { ok: true, user };
+    return { ok: false, user, reason: `guild perms=${g.permissions ?? 'none'}, owner=${g.owner} (member endpoint -> ${memberRes.status})` };
+  }
+  return { ok: false, user, reason: `member endpoint -> ${memberRes.status}, guilds endpoint -> ${guildsRes.status}` };
 }
 
 export function createWebApp(client: Client, db: BotDatabase): Hono {
@@ -129,7 +145,10 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
     try {
       const token = await exchangeCode(code);
       const check = await checkGuildAdmin(token.access_token);
-      if (!check.ok || !check.user) return c.html(errorPage('You are not an administrator of this server.'), 403);
+      if (!check.ok || !check.user) {
+        console.error(`[web] access denied for user ${check.user?.id ?? 'unknown'}: ${check.reason ?? 'unknown reason'}`);
+        return c.html(errorPage('You are not an administrator of this server.'), 403);
+      }
 
       const sid = randomBytes(24).toString('hex');
       const avatar = check.user.avatar

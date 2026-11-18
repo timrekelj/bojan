@@ -17,7 +17,7 @@ export const config = {
   clientId: required('CLIENT_ID'),
   clientSecret: required('CLIENT_SECRET'),
   guildId: required('GUILD_ID'),
-  adminRoleId: process.env.ADMIN_ROLE_ID ?? null,
+  adminRoleId: process.env.ADMIN_ROLE_ID?.trim() || null,
   dashboardUrl: required('DASHBOARD_URL').replace(/\/+$/, ''),
   dashboardPort: Number(optional('DASHBOARD_PORT', '3000')),
   sessionSecret: required('SESSION_SECRET'),
