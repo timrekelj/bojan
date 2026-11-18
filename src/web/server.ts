@@ -25,6 +25,13 @@ const SID_COOKIE = 'sid';
 const STATE_COOKIE = 'oauth_state';
 const sessions = new Map<string, Session>(); // sid -> session
 const startedAt = Date.now();
+const EMBEDS_PAGE_SIZE = 10;
+
+// 1-based page from a query value; garbage or < 1 -> 1, past the end -> last page.
+export function parsePage(raw: string | undefined, pages: number): number {
+  const n = Number.parseInt(raw ?? '', 10);
+  return Math.min(Math.max(Number.isFinite(n) ? n : 1, 1), Math.max(pages, 1));
+}
 
 function sign(value: string): string {
   return createHmac('sha256', config.sessionSecret).update(value).digest('hex');
@@ -198,7 +205,10 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
     const total = db.countMessages(config.guildId);
     const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
     const allRows = db.topUsers(config.guildId, 10);
-    const recentEmbeds = db.recentEmbeds(config.guildId, 15);
+    const embedTotal = db.countEmbeds(config.guildId);
+    const embedPages = Math.max(1, Math.ceil(embedTotal / EMBEDS_PAGE_SIZE));
+    const embedPage = parsePage(c.req.query('embedsPage'), embedPages);
+    const recentEmbeds = db.recentEmbeds(config.guildId, EMBEDS_PAGE_SIZE, (embedPage - 1) * EMBEDS_PAGE_SIZE);
 
     // Cache-only lookups: guild member -> global user -> raw id (handled in the view).
     const members: Record<string, { name: string; avatar: string | null }> = {};
@@ -226,13 +236,14 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
           totalMessages: total,
           dbBytes: db.sizeBytes,
           lastWeeklySent: db.getState(`weekly:${config.guildId}`),
-          embedsConverted: db.recentEmbeds(config.guildId, 10_000).length,
+          embedsConverted: embedTotal,
         },
         today: db.countMessages(config.guildId, Date.now() - 86_400_000),
         week: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
         allTime: { total, rows: allRows },
         reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
         recentEmbeds,
+        embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: EMBEDS_PAGE_SIZE },
         members,
         channelNames,
         user: { username: session.username, avatar: session.avatar },

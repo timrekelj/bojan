@@ -75,10 +75,26 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const limit = interaction.options.getInteger('limit') ?? 10;
     const total = db.countMessages(guildId);
     const rows = db.topUsers(guildId, limit);
+    const given = db.topReactionsGiven(guildId, limit);
+    const received = db.topReactionsReceived(guildId, limit);
+    const emojiList = (userId: string): string => {
+      const top = db.topEmojiForUser(guildId, userId, 3);
+      return top.length > 0 ? top.map((e) => `${e.emojiLabel}×${e.count}`).join(' ') : '—';
+    };
+    const description = [
+      '### 🏆 Messages (all time)',
+      ...leaderboardLines(rows, total),
+      '',
+      '### 😄 Most reactions given',
+      ...(given.length > 0 ? given.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmt(r.count)}** ${emojiList(r.userId)}`) : ['—']),
+      '',
+      '### 😍 Most reactions received',
+      ...(received.length > 0 ? received.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmt(r.count)}**`) : ['—']),
+    ].join('\n');
     const embed = new EmbedBuilder()
-      .setTitle('🏆 Message leaderboard (all time)')
-      .setDescription(leaderboardLines(rows, total).join('\n'))
-      .setFooter({ text: `${fmt(total)} messages tracked in total` })
+      .setTitle('🏆 Leaderboard (all time)')
+      .setDescription(description.slice(0, 4000))
+      .setFooter({ text: `${fmt(total)} messages · ${fmt(db.countReactions(guildId))} reactions tracked in total` })
       .setColor(0x5865f2)
       .setTimestamp();
     await interaction.reply({ embeds: [embed] });
@@ -91,6 +107,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const total = db.countMessages(guildId);
     const reactions = db.reactionStats(guildId, user.id);
     const emojis = db.topEmojiForUser(guildId, user.id, 5);
+    const emojisOnTheirMessages = db.topEmojiReceived(guildId, user.id, 5);
 
     const embed = new EmbedBuilder()
       .setTitle(`Stats for ${user.username}`)
@@ -101,7 +118,10 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
         { name: 'Reactions received', value: `**${fmt(reactions.received)}**`, inline: true },
         { name: 'Last message seen', value: fmtDate(stats.lastTs, settings.timezone), inline: true },
         ...(emojis.length > 0
-          ? [{ name: 'Most used emoji', value: emojis.map((e) => `${e.emojiLabel} ×${fmt(e.count)}`).join('   '), inline: false }]
+          ? [{ name: 'Most used emoji (given)', value: emojis.map((e) => `${e.emojiLabel} ×${fmt(e.count)}`).join('   '), inline: false }]
+          : []),
+        ...(emojisOnTheirMessages.length > 0
+          ? [{ name: 'Most used emoji on their messages', value: emojisOnTheirMessages.map((e) => `${e.emojiLabel} ×${fmt(e.count)}`).join('   '), inline: false }]
           : []),
       )
       .setColor(0x5865f2)

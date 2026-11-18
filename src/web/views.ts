@@ -99,6 +99,12 @@ const CSS = `
   .btn.discord:hover { background: #4752c4; }
   .btn.ghost { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
   .btn.ghost:hover { background: var(--border); }
+  .pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .pager .muted, .pager-nav { font-variant-numeric: tabular-nums; }
+  .pager-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .pager-btn { display: inline-block; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; font-size: 13px; font-weight: 600; text-decoration: none; }
+  a.pager-btn:hover { background: var(--border); }
+  .pager-btn[aria-disabled=true] { color: var(--muted); opacity: .55; }
   .scroll { overflow-x: auto; max-width: 100%; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 9px 12px; border-top: 1px solid var(--border); white-space: nowrap; }
@@ -152,6 +158,7 @@ export interface DashboardData {
   allTime: { total: number; rows: UserRow[] };
   reactions: { total: number; top: EmojiRow[] };
   recentEmbeds: EmbedLogRow[];
+  embedPage: { page: number; pages: number; total: number; pageSize: number };
   members: Record<string, { name: string; avatar: string | null }>;
   channelNames: Record<string, string>;
   user: { username: string; avatar: string };
@@ -195,6 +202,19 @@ function embedRows(d: DashboardData): string {
     return `<tr><td>${escapeHtml(fmtDate(e.ts, d.settings.timezone))}</td><td>${channel ? '#' + escapeHtml(channel) : escapeHtml(e.channelId)}</td><td><span class="badge">${escapeHtml(e.provider)}</span></td><td class="url"><a href="${escapeHtml(e.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(e.url)}">${escapeHtml(e.url)}</a></td></tr>`;
   });
   return `<div class="scroll"><table><thead><tr><th scope="col">Time</th><th scope="col">Channel</th><th scope="col">Provider</th><th scope="col">URL</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+}
+
+function embedPager(d: DashboardData): string {
+  const { page, pages, total, pageSize } = d.embedPage;
+  const from = (page - 1) * pageSize + 1;
+  const to = Math.min(total, from + d.recentEmbeds.length - 1);
+  const showing = `<p class="muted">Showing ${fmt(from)}–${fmt(to)} of ${fmt(total)}</p>`;
+  if (pages <= 1) return `<div class="pager">${showing}</div>`;
+  const step = (label: string, target: number, enabled: boolean): string =>
+    enabled
+      ? `<a class="pager-btn" href="/dashboard?embedsPage=${target}#h-embeds">${label}</a>`
+      : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
+  return `<div class="pager">${showing}<nav class="pager-nav" aria-label="Embed conversions pages">${step('Previous', page - 1, page > 1)}<span>Page ${page} of ${pages}</span>${step('Next', page + 1, page < pages)}</nav></div>`;
 }
 
 function uptime(sec: number): string {

@@ -60,6 +60,10 @@ check('settings roundtrip', s2.statsChannelId === 'chan9' && s2.weeklyDay === 5 
 
 db.logEmbed({ guildId: G, channelId: 'c1', messageId: 'm1', url: 'https://x.com/a/status/1', provider: 'x', ts: now });
 check('embed log', db.recentEmbeds(G, 10).length === 1 && db.recentEmbeds(G, 10)[0]?.provider === 'x');
+for (let i = 2; i <= 5; i++) db.logEmbed({ guildId: G, channelId: 'c1', messageId: `m${i}`, url: `https://x.com/a/status/${i}`, provider: 'x', ts: now + i });
+check('embed count', db.countEmbeds(G) === 5 && db.countEmbeds('other-guild') === 0, `got ${db.countEmbeds(G)}`);
+const embedPage = db.recentEmbeds(G, 2, 2);
+check('embed offset', embedPage.length === 2 && embedPage[0]?.messageId === 'm3' && embedPage[1]?.messageId === 'm2' && db.recentEmbeds(G, 2, 4)[0]?.messageId === 'm1', JSON.stringify(embedPage.map((e) => e.messageId)));
 
 // Reactions: alice's message gets 👍 x2 (bob, carol) and a custom emoji (dave); bob reacts to carol's message
 db.recordReaction({ guildId: G, channelId: 'c1', messageId: 'a0', authorId: 'alice', reactorId: 'bob', emojiKey: '👍', emojiLabel: '👍', ts: now - 1 * H });
@@ -95,10 +99,16 @@ db.recordReaction({ guildId: G, channelId: 'c2', messageId: 'w2-0', authorId: 'c
 
 const chans = db.topChannels(G, lwk.start, lwk.end, 5);
 check('top channels last week', chans[0]?.channelId === 'c1' && chans[0]?.count === 19 && chans[1]?.channelId === 'c2' && chans[1]?.count === 12, JSON.stringify(chans));
-const given = db.topReactionsGiven(G, lwk.start, lwk.end, 3);
-check('top reactions given', given[0]?.userId === 'bob' && given[0]?.count === 2 && given[1]?.userId === 'erin', JSON.stringify(given));
-const received = db.topReactionsReceived(G, lwk.start, lwk.end, 3);
-check('top reactions received', received[0]?.userId === 'carol' && received[0]?.count === 2, JSON.stringify(received));
+const given = db.topReactionsGiven(G, 3, lwk.start, lwk.end);
+check('top reactions given (week)', given[0]?.userId === 'bob' && given[0]?.count === 2 && given[1]?.userId === 'erin', JSON.stringify(given));
+const received = db.topReactionsReceived(G, 3, lwk.start, lwk.end);
+check('top reactions received (week)', received[0]?.userId === 'carol' && received[0]?.count === 2, JSON.stringify(received));
+const givenAll = db.topReactionsGiven(G, 10);
+check('top reactions given (all time)', givenAll[0]?.userId === 'bob' && givenAll[0]?.count === 4 && givenAll[1]?.userId === 'erin' && givenAll[1]?.count === 2, JSON.stringify(givenAll));
+const receivedAll = db.topReactionsReceived(G, 10);
+check('top reactions received (all time)', receivedAll[0]?.userId === 'alice' && receivedAll[0]?.count === 5 && receivedAll[1]?.userId === 'carol' && receivedAll[1]?.count === 3, JSON.stringify(receivedAll));
+const emojiOnAlice = db.topEmojiReceived(G, 'alice', 5);
+check('emoji most used on alice\'s messages', emojiOnAlice[0]?.emojiKey === '👍' && emojiOnAlice[0]?.count === 3 && emojiOnAlice.length === 3, JSON.stringify(emojiOnAlice));
 check('reaction count in range', db.countReactions(G, lwk.start, lwk.end) === 3, `got ${db.countReactions(G, lwk.start, lwk.end)}`);
 const perDay = db.messageCountsPerDay(G, lwk.start, lwk.end, 'UTC');
 check('per-day counts', perDay.length === 7 && perDay.reduce((s, d) => s + d.count, 0) === 31 && perDay[1]?.count === 5, JSON.stringify(perDay));

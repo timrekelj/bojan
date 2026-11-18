@@ -15,9 +15,11 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   channel: total messages and reactions, top-5 messagers, top-5 channels,
   top-3 reactions given / received, and a per-day message bar chart.
 - **Slash commands**
-  - `/leaderboard [limit]` — all-time top message senders
+  - `/leaderboard [limit]` — all-time boards: top message senders, top
+    reaction givers (with their 3 most used emoji), most reacted-to users
   - `/stats [user]` — all-time stats for a member: messages (total, share),
-    reactions given/received, most used emoji, last message seen
+    reactions given/received, their most used emoji, the emojis most used on
+    their messages, last message seen
   - `/setstats #channel` — (admin) choose the weekly stats channel
   - `/backfill [channel] [days]` — (admin) seed the database from channel
     history: messages **and** their reactions (it pages through the users who

@@ -32,8 +32,8 @@ export function startWeeklyScheduler(client: Client, db: BotDatabase): NodeJS.Ti
         const weekReactions = db.countReactions(guild.id, week.start, week.end);
         const topMessagers = db.topUsers(guild.id, 5, week.start, week.end);
         const topChannels = db.topChannels(guild.id, week.start, week.end, 5);
-        const topGiven = db.topReactionsGiven(guild.id, week.start, week.end, 3);
-        const topReceived = db.topReactionsReceived(guild.id, week.start, week.end, 3);
+        const topGiven = db.topReactionsGiven(guild.id, 3, week.start, week.end);
+        const topReceived = db.topReactionsReceived(guild.id, 3, week.start, week.end);
         const perDay = db.messageCountsPerDay(guild.id, week.start, week.end, settings.timezone);
 
         const channel = await guild.channels.fetch(settings.statsChannelId).catch(() => null);
