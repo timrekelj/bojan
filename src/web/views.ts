@@ -1,4 +1,4 @@
-import type { Settings, UserRow, EmbedLogRow } from '../db.js';
+import type { Settings, UserRow, EmbedLogRow, EmojiRow } from '../db.js';
 import { fmt, fmtDate, lastWeekBounds, weekRangeLabel } from '../stats.js';
 
 export function escapeHtml(s: string): string {
@@ -58,6 +58,7 @@ export interface DashboardData {
   today: number;
   week: { bounds: ReturnType<typeof lastWeekBounds>; total: number; rows: UserRow[] };
   allTime: { total: number; rows: UserRow[] };
+  reactions: { total: number; top: EmojiRow[] };
   recentEmbeds: EmbedLogRow[];
   user: { username: string; avatar: string };
   saved: boolean;
@@ -99,6 +100,9 @@ export function dashboardPage(d: DashboardData): string {
   <div class="grid2">
     <div class="card"><h2>This week (${escapeHtml(weekLabel)}) — ${fmt(d.week.total)} messages</h2>${topTable(d.week.rows, d.week.total)}</div>
     <div class="card"><h2>All time — ${fmt(d.allTime.total)} messages</h2>${topTable(d.allTime.rows, d.allTime.total)}</div>
+  </div>
+  <div class="card"><h2>Reactions — ${fmt(d.reactions.total)} tracked</h2>
+    ${d.reactions.top.length === 0 ? '<p class="muted">No reactions tracked yet.</p>' : `<p style="font-size:22px">${d.reactions.top.map((e) => `${escapeHtml(e.emojiLabel)} ×${fmt(e.count)}`).join(' &nbsp; ')}</p><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}
   </div>
   <div class="card"><h2>Settings</h2>
     <form method="post" action="/settings">

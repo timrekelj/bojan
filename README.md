@@ -5,15 +5,19 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
 
 ## Features
 
-- **Message stats in SQLite** — every message is recorded (guild, channel,
-  user, timestamp). Tables: `messages`, `settings`, `embed_log`, `bot_state`.
+- **Message + reaction stats in SQLite** — every message is recorded (guild,
+  channel, user, timestamp), and every reaction is recorded with both sides:
+  the message author (reactions *received*) and the reactor (reactions
+  *given*), plus the emoji. Tables: `messages`, `reactions`, `settings`,
+  `embed_log`, `bot_state`. Reactions are counted live only — there is no
+  history backfill for them.
 - **Weekly stats message** — on a configurable day/hour (per guild timezone,
   weeks run Monday–Sunday) the bot posts last week's top-10 to a configured
   channel.
 - **Slash commands**
   - `/leaderboard [limit]` — all-time top message senders
-  - `/stats [user]` — all-time stats for a member (total, share, last week +
-    rank, first/last message seen)
+  - `/stats [user]` — all-time stats for a member: messages (total, share),
+    reactions given/received, most used emoji, last message seen
   - `/setstats #channel` — (admin) choose the weekly stats channel
   - `/backfill [channel] [days]` — (admin) seed the database from channel
     history (all text channels by default; `days` limits how far back).
@@ -36,8 +40,9 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
 ## Setup
 
 1. Create an application at <https://discord.com/developers/applications>:
-   - Bot tab: add a bot, copy the token; enable **Message Content**, **Server
-     Members** and **Guild Messages** privileged intents.
+   - Bot tab: add a bot, copy the token; enable the privileged intents
+     **Message Content**, **Server Members**, **Guild Messages**, plus the
+     regular **Guild Message Reactions** intent (for reaction stats).
    - OAuth2 tab: add redirect URI `http://localhost:3000/auth/callback`
      (use your public `DASHBOARD_URL` in production), scopes
      `identify guilds guilds.member`.

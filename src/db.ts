@@ -33,6 +33,28 @@ export interface EmbedLogRow {
   ts: number;
 }
 
+export interface ReactionRow {
+  guildId: string;
+  channelId: string;
+  messageId: string;
+  authorId: string; // message author — counts as "received"
+  reactorId: string; // who reacted — counts as "given"
+  emojiKey: string; // custom emoji id, or the unicode char
+  emojiLabel: string; // display form: <:name:id> or the unicode char
+  ts: number;
+}
+
+export interface ReactionStats {
+  given: number;
+  received: number;
+}
+
+export interface EmojiRow {
+  emojiKey: string;
+  emojiLabel: string;
+  count: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +87,21 @@ CREATE TABLE IF NOT EXISTS embed_log (
   ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_embed_log_guild_ts ON embed_log (guild_id, ts);
+
+CREATE TABLE IF NOT EXISTS reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  author_id TEXT NOT NULL,
+  reactor_id TEXT NOT NULL,
+  emoji_key TEXT NOT NULL,
+  emoji_label TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reactions_guild_reactor ON reactions (guild_id, reactor_id);
+CREATE INDEX IF NOT EXISTS idx_reactions_guild_author ON reactions (guild_id, author_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reactions_unique ON reactions (guild_id, message_id, reactor_id, emoji_key);
 
 CREATE TABLE IF NOT EXISTS bot_state (
   key TEXT PRIMARY KEY,
@@ -176,6 +213,37 @@ export class BotDatabase {
   distinctActiveUsers(guildId: string): number {
     const row = this.db.prepare('SELECT COUNT(DISTINCT user_id) AS c FROM messages WHERE guild_id = ?').get(guildId) as { c: number };
     return row.c;
+  }
+
+  // ---- reactions --------------------------------------------------------
+
+  recordReaction(r: ReactionRow): void {
+    this.db
+      .prepare('INSERT OR IGNORE INTO reactions (guild_id, channel_id, message_id, author_id, reactor_id, emoji_key, emoji_label, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(r.guildId, r.channelId, r.messageId, r.authorId, r.reactorId, r.emojiKey, r.emojiLabel, r.ts);
+  }
+
+  reactionStats(guildId: string, userId: string): ReactionStats {
+    const given = this.db.prepare('SELECT COUNT(*) AS c FROM reactions WHERE guild_id = ? AND reactor_id = ?').get(guildId, userId) as { c: number };
+    const received = this.db.prepare('SELECT COUNT(*) AS c FROM reactions WHERE guild_id = ? AND author_id = ?').get(guildId, userId) as { c: number };
+    return { given: given.c, received: received.c };
+  }
+
+  countReactions(guildId: string): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS c FROM reactions WHERE guild_id = ?').get(guildId) as { c: number };
+    return row.c;
+  }
+
+  topEmojiForUser(guildId: string, userId: string, limit: number): EmojiRow[] {
+    return this.db
+      .prepare('SELECT emoji_key AS emojiKey, emoji_label AS emojiLabel, COUNT(*) AS count FROM reactions WHERE guild_id = ? AND reactor_id = ? GROUP BY emoji_key ORDER BY count DESC, emoji_key ASC LIMIT ?')
+      .all(guildId, userId, limit) as unknown as EmojiRow[];
+  }
+
+  topEmojiAll(guildId: string, limit: number): EmojiRow[] {
+    return this.db
+      .prepare('SELECT emoji_key AS emojiKey, emoji_label AS emojiLabel, COUNT(*) AS count FROM reactions WHERE guild_id = ? GROUP BY emoji_key ORDER BY count DESC, emoji_key ASC LIMIT ?')
+      .all(guildId, limit) as unknown as EmojiRow[];
   }
 
   // ---- settings -------------------------------------------------------

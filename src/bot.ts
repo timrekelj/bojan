@@ -14,7 +14,7 @@ import {
 } from 'discord.js';
 import type { BotDatabase } from './db.js';
 import { config } from './config.js';
-import { fmt, fmtDate, lastWeekBounds, leaderboardLines, weekRangeLabel } from './stats.js';
+import { fmt, fmtDate, leaderboardLines } from './stats.js';
 import { maybeConvert } from './embeds/converter.js';
 
 export function createClient(): Client {
@@ -24,6 +24,7 @@ export function createClient(): Client {
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessageReactions,
     ],
   });
 }
@@ -81,19 +82,20 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const user = interaction.options.getUser('user') ?? interaction.user;
     const stats = db.userStats(guildId, user.id);
     const total = db.countMessages(guildId);
-    const week = lastWeekBounds(settings.timezone);
-    const weekCount = db.countMessages(guildId, week.start, week.end);
-    const weekTop = db.topUsers(guildId, 1000, week.start, week.end);
-    const weekRank = weekCount > 0 ? weekTop.findIndex((r) => r.userId === user.id) + 1 : 0;
+    const reactions = db.reactionStats(guildId, user.id);
+    const emojis = db.topEmojiForUser(guildId, user.id, 5);
 
     const embed = new EmbedBuilder()
       .setTitle(`Stats for ${user.username}`)
       .setThumbnail(user.displayAvatarURL({ size: 128 }))
       .addFields(
         { name: 'All-time messages', value: `**${fmt(stats.messages)}**${total > 0 ? ` (${((stats.messages / total) * 100).toFixed(1)}% of server)` : ''}`, inline: true },
-        { name: `Last week (${weekRangeLabel(week, settings.timezone)})`, value: `**${fmt(weekCount)}** messages${weekRank > 0 ? ` — rank #${weekRank}` : ''}`, inline: true },
-        { name: 'First message seen', value: fmtDate(stats.firstTs, settings.timezone), inline: true },
+        { name: 'Reactions given', value: `**${fmt(reactions.given)}**`, inline: true },
+        { name: 'Reactions received', value: `**${fmt(reactions.received)}**`, inline: true },
         { name: 'Last message seen', value: fmtDate(stats.lastTs, settings.timezone), inline: true },
+        ...(emojis.length > 0
+          ? [{ name: 'Most used emoji', value: emojis.map((e) => `${e.emojiLabel} ×${fmt(e.count)}`).join('   '), inline: false }]
+          : []),
       )
       .setColor(0x5865f2)
       .setTimestamp();
@@ -197,6 +199,30 @@ export function registerEvents(client: Client, db: BotDatabase): void {
     if (settings.embedChannels.length > 0) {
       void maybeConvert(message, db, settings.embedChannels);
     }
+  });
+
+  client.on(Events.MessageReactionAdd, (reaction, user) => {
+    void (async () => {
+      try {
+        if (user.bot) return;
+        let message = reaction.message;
+        if (message.partial) message = await message.fetch();
+        if (!message.guildId || message.author?.bot || message.webhookId) return;
+        const emoji = reaction.emoji;
+        db.recordReaction({
+          guildId: message.guildId,
+          channelId: message.channelId,
+          messageId: message.id,
+          authorId: message.author.id,
+          reactorId: user.id,
+          emojiKey: emoji.id ?? emoji.name ?? '',
+          emojiLabel: emoji.id ? `<${emoji.animated ? 'a' : ''}:${emoji.name ?? 'emoji'}:${emoji.id}>` : (emoji.name ?? ''),
+          ts: Date.now(),
+        });
+      } catch {
+        // reaction tracking is best-effort (partials, deleted messages, ...)
+      }
+    })();
   });
 
   client.on(Events.InteractionCreate, (interaction) => {

@@ -61,6 +61,23 @@ check('settings roundtrip', s2.statsChannelId === 'chan9' && s2.weeklyDay === 5 
 db.logEmbed({ guildId: G, channelId: 'c1', messageId: 'm1', url: 'https://x.com/a/status/1', provider: 'x', ts: now });
 check('embed log', db.recentEmbeds(G, 10).length === 1 && db.recentEmbeds(G, 10)[0]?.provider === 'x');
 
+// Reactions: alice's message gets 👍 x2 (bob, carol) and a custom emoji (dave); bob reacts to carol's message
+db.recordReaction({ guildId: G, channelId: 'c1', messageId: 'a0', authorId: 'alice', reactorId: 'bob', emojiKey: '👍', emojiLabel: '👍', ts: now - 1 * H });
+db.recordReaction({ guildId: G, channelId: 'c1', messageId: 'a0', authorId: 'alice', reactorId: 'carol', emojiKey: '👍', emojiLabel: '👍', ts: now - 2 * H });
+db.recordReaction({ guildId: G, channelId: 'c1', messageId: 'a1', authorId: 'alice', reactorId: 'dave', emojiKey: '1234', emojiLabel: '<:party:1234>', ts: now - 3 * H });
+db.recordReaction({ guildId: G, channelId: 'c1', messageId: 'c0', authorId: 'carol', reactorId: 'bob', emojiKey: '👍', emojiLabel: '👍', ts: now - 4 * H });
+db.recordReaction({ guildId: G, channelId: 'c1', messageId: 'a0', authorId: 'alice', reactorId: 'bob', emojiKey: '👍', emojiLabel: '👍', ts: now }); // duplicate add
+check('reaction dedup', db.countReactions(G) === 4, `got ${db.countReactions(G)}`);
+const rs = db.reactionStats(G, 'alice');
+check('reactions received', rs.received === 3, `got ${rs.received}`);
+check('reactions given', db.reactionStats(G, 'bob').given === 2);
+const aliceEmoji = db.topEmojiForUser(G, 'alice', 5);
+check('top emoji per user', aliceEmoji.length === 0, 'alice gave none'); // alice received, gave none
+const bobEmoji = db.topEmojiForUser(G, 'bob', 5);
+check('top emoji for bob', bobEmoji[0]?.emojiKey === '👍' && bobEmoji[0]?.count === 2, JSON.stringify(bobEmoji));
+const allEmoji = db.topEmojiAll(G, 5);
+check('top emoji all', allEmoji[0]?.emojiKey === '👍' && allEmoji[0]?.count === 3 && allEmoji[1]?.emojiLabel === '<:party:1234>', JSON.stringify(allEmoji));
+
 db.setState('k', 'v');
 check('bot state', db.getState('k') === 'v');
 

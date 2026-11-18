@@ -192,6 +192,7 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
         today: db.countMessages(config.guildId, Date.now() - 86_400_000),
         week: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: db.topUsers(config.guildId, 10, week.start, week.end) },
         allTime: { total, rows: db.topUsers(config.guildId, 10) },
+        reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
         recentEmbeds: db.recentEmbeds(config.guildId, 15),
         user: { username: session.username, avatar: session.avatar },
         saved: c.req.query('saved') === '1',
