@@ -31,6 +31,7 @@ const CSS = `
   .topbar-in { max-width: 960px; margin: 0 auto; padding: 10px 20px; display: flex; align-items: center; gap: 12px; }
   .brand { flex: 1; display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 500; }
   .mark { display: block; flex: none; }
+  .auth .mark { margin: 0 auto; }
   .me { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .me img { width: 24px; height: 24px; border-radius: 50%; }
   .me span { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
@@ -39,6 +40,7 @@ const CSS = `
   .wrap { max-width: 960px; margin: 0 auto; padding: 40px 20px 64px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 36px; }
   .wrap > * { min-width: 0; }
   .wrap > section, .wrap > .cols { border-top: 1px solid var(--border); padding-top: 28px; }
+  .wrap > .kpis + .cols { border-top: 0; padding-top: 0; }
   h1 { margin: 0; font-weight: 400; }
   h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
   .title { font-size: 32px; line-height: 1.2; letter-spacing: -.02em; }
@@ -140,12 +142,12 @@ const CSS = `
   }
 `;
 
-// Chunky pixel "B" on a 5x7 grid, drawn as runs of <rect>s.
-const MARK_ROWS = ['XXXX.', 'X...X', 'X...X', 'XXXX.', 'X...X', 'X...X', 'XXXX.'];
+// Chunky pixel "B" on a 7x7 grid, drawn as runs of <rect>s.
+const MARK_ROWS = ['XXXXXX.', 'XX...XX', 'XX...XX', 'XXXXXX.', 'XX...XX', 'XX...XX', 'XXXXXX.'];
 
 function mark(px: number): string {
   const rects = MARK_ROWS.flatMap((row, y) => Array.from(row.matchAll(/X+/g), (m) => `<rect x="${m.index}" y="${y}" width="${m[0].length}" height="1"/>`));
-  return `<svg class="mark" width="${px * 5}" height="${px * 7}" viewBox="0 0 5 7" fill="#fa500f" shape-rendering="crispEdges" aria-hidden="true">${rects.join('')}</svg>`;
+  return `<svg class="mark" width="${px * 7}" height="${px * 7}" viewBox="0 0 7 7" fill="#fa500f" shape-rendering="crispEdges" aria-hidden="true">${rects.join('')}</svg>`;
 }
 
 function page(title: string, body: string): string {
