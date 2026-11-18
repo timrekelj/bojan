@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    container_name: bojan-discord-bot
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "3000:3000" # dashboard; put a reverse proxy with HTTPS in front for public access
+    restart: unless-stopped

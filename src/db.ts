@@ -1,0 +1,201 @@
+import { DatabaseSync } from 'node:sqlite';
+import { statSync } from 'node:fs';
+
+export interface Settings {
+  guildId: string;
+  statsChannelId: string | null;
+  weeklyEnabled: boolean;
+  weeklyDay: number; // 0 = Sunday ... 6 = Saturday
+  weeklyHour: number; // 0-23, local time
+  timezone: string;
+  embedChannels: string[];
+}
+
+export interface UserRow {
+  userId: string;
+  messages: number;
+}
+
+export interface UserStats {
+  userId: string;
+  messages: number;
+  firstTs: number | null;
+  lastTs: number | null;
+}
+
+export interface EmbedLogRow {
+  id: number;
+  guildId: string;
+  channelId: string;
+  messageId: string;
+  url: string;
+  provider: string;
+  ts: number;
+}
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_guild_ts ON messages (guild_id, ts);
+CREATE INDEX IF NOT EXISTS idx_messages_guild_user ON messages (guild_id, user_id);
+
+CREATE TABLE IF NOT EXISTS settings (
+  guild_id TEXT PRIMARY KEY,
+  stats_channel_id TEXT,
+  weekly_enabled INTEGER NOT NULL DEFAULT 1,
+  weekly_day INTEGER NOT NULL DEFAULT 1,
+  weekly_hour INTEGER NOT NULL DEFAULT 9,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  embed_channels TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS embed_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embed_log_guild_ts ON embed_log (guild_id, ts);
+
+CREATE TABLE IF NOT EXISTS bot_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`;
+
+const DEFAULT_SETTINGS: Omit<Settings, 'guildId'> = {
+  statsChannelId: null,
+  weeklyEnabled: true,
+  weeklyDay: 1, // Monday
+  weeklyHour: 9,
+  timezone: 'UTC',
+  embedChannels: [],
+};
+
+export class BotDatabase {
+  private db: DatabaseSync;
+  private readonly path: string;
+
+  constructor(path: string) {
+    this.path = path;
+    this.db = new DatabaseSync(path);
+    this.db.exec('PRAGMA journal_mode = WAL;');
+    this.db.exec('PRAGMA foreign_keys = ON;');
+    this.db.exec(SCHEMA);
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  get sizeBytes(): number {
+    try {
+      return statSync(this.path).size;
+    } catch {
+      return 0;
+    }
+  }
+
+  // ---- messages -------------------------------------------------------
+
+  recordMessage(guildId: string, channelId: string, userId: string, ts: number): void {
+    this.db.prepare('INSERT INTO messages (guild_id, channel_id, user_id, ts) VALUES (?, ?, ?, ?)').run(guildId, channelId, userId, ts);
+  }
+
+  countMessages(guildId: string, fromTs?: number, toTs?: number): number {
+    if (fromTs !== undefined && toTs !== undefined) {
+      const row = this.db.prepare('SELECT COUNT(*) AS c FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ?').get(guildId, fromTs, toTs) as { c: number };
+      return row.c;
+    }
+    const row = this.db.prepare('SELECT COUNT(*) AS c FROM messages WHERE guild_id = ?').get(guildId) as { c: number };
+    return row.c;
+  }
+
+  topUsers(guildId: string, limit: number, fromTs?: number, toTs?: number): UserRow[] {
+    if (fromTs !== undefined && toTs !== undefined) {
+      return this.db
+        .prepare('SELECT user_id AS userId, COUNT(*) AS messages FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ? GROUP BY user_id ORDER BY messages DESC, user_id ASC LIMIT ?')
+        .all(guildId, fromTs, toTs, limit) as unknown as UserRow[];
+    }
+    return this.db
+      .prepare('SELECT user_id AS userId, COUNT(*) AS messages FROM messages WHERE guild_id = ? GROUP BY user_id ORDER BY messages DESC, user_id ASC LIMIT ?')
+      .all(guildId, limit) as unknown as UserRow[];
+  }
+
+  userStats(guildId: string, userId: string): UserStats {
+    const row = this.db
+      .prepare('SELECT user_id AS userId, COUNT(*) AS messages, MIN(ts) AS firstTs, MAX(ts) AS lastTs FROM messages WHERE guild_id = ? AND user_id = ?')
+      .get(guildId, userId) as unknown as UserStats | undefined;
+    return row ?? { userId, messages: 0, firstTs: null, lastTs: null };
+  }
+
+  distinctActiveUsers(guildId: string): number {
+    const row = this.db.prepare('SELECT COUNT(DISTINCT user_id) AS c FROM messages WHERE guild_id = ?').get(guildId) as { c: number };
+    return row.c;
+  }
+
+  // ---- settings -------------------------------------------------------
+
+  getSettings(guildId: string): Settings {
+    const row = this.db.prepare('SELECT * FROM settings WHERE guild_id = ?').get(guildId) as
+      | { stats_channel_id: string | null; weekly_enabled: number; weekly_day: number; weekly_hour: number; timezone: string; embed_channels: string }
+      | undefined;
+    if (!row) return { guildId, ...DEFAULT_SETTINGS };
+    return {
+      guildId,
+      statsChannelId: row.stats_channel_id,
+      weeklyEnabled: row.weekly_enabled === 1,
+      weeklyDay: row.weekly_day,
+      weeklyHour: row.weekly_hour,
+      timezone: row.timezone,
+      embedChannels: JSON.parse(row.embed_channels) as string[],
+    };
+  }
+
+  saveSettings(s: Settings): void {
+    this.db
+      .prepare(`INSERT INTO settings (guild_id, stats_channel_id, weekly_enabled, weekly_day, weekly_hour, timezone, embed_channels)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                  stats_channel_id = excluded.stats_channel_id,
+                  weekly_enabled = excluded.weekly_enabled,
+                  weekly_day = excluded.weekly_day,
+                  weekly_hour = excluded.weekly_hour,
+                  timezone = excluded.timezone,
+                  embed_channels = excluded.embed_channels`)
+      .run(s.guildId, s.statsChannelId, s.weeklyEnabled ? 1 : 0, s.weeklyDay, s.weeklyHour, s.timezone, JSON.stringify(s.embedChannels));
+  }
+
+  // ---- embed conversion log -------------------------------------------
+
+  logEmbed(row: Omit<EmbedLogRow, 'id'>): void {
+    this.db.prepare('INSERT INTO embed_log (guild_id, channel_id, message_id, url, provider, ts) VALUES (?, ?, ?, ?, ?, ?)').run(
+      row.guildId, row.channelId, row.messageId, row.url, row.provider, row.ts,
+    );
+  }
+
+  recentEmbeds(guildId: string, limit: number): EmbedLogRow[] {
+    return this.db
+      .prepare('SELECT * FROM embed_log WHERE guild_id = ? ORDER BY ts DESC LIMIT ?')
+      .all(guildId, limit) as unknown as EmbedLogRow[];
+  }
+
+  // ---- key/value bot state --------------------------------------------
+
+  getState(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM bot_state WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setState(key: string, value: string): void {
+    this.db.prepare('INSERT INTO bot_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  }
+}

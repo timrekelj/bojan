@@ -1,0 +1,102 @@
+import type { UserRow } from './db.js';
+
+// ---- timezone helpers ---------------------------------------------------
+
+/** Offset of `timeZone` from UTC, in ms, at the given instant. */
+export function tzOffsetMs(timeZone: string, date: Date): number {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const parts: Record<string, string> = {};
+  for (const p of dtf.formatToParts(date)) parts[p.type] = p.value;
+  const asUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour) % 24, Number(parts.minute), Number(parts.second));
+  return asUtc - date.getTime();
+}
+
+/** UTC timestamp of local wall-clock time in `timeZone`. */
+export function zonedToUtcMs(timeZone: string, y: number, mo: number, d: number, h = 0, mi = 0): number {
+  const guess = Date.UTC(y, mo - 1, d, h, mi);
+  let ts = guess - tzOffsetMs(timeZone, new Date(guess));
+  ts = guess - tzOffsetMs(timeZone, new Date(ts)); // refine across DST edge
+  return ts;
+}
+
+const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+/** Local (in `timeZone`) calendar date parts + weekday of an instant. */
+export function localParts(timeZone: string, date: Date): { y: number; mo: number; d: number; weekday: number } {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone, weekday: 'short',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  const parts: Record<string, string> = {};
+  for (const p of dtf.formatToParts(date)) parts[p.type] = p.value;
+  return { y: Number(parts.year), mo: Number(parts.month), d: Number(parts.day), weekday: WEEKDAY_INDEX[parts.weekday ?? ''] ?? 0 };
+}
+
+/** Monday (YYYY-MM-DD) of the week containing `date`, in `timeZone`. Weeks start Monday. */
+export function weekKey(timeZone: string, date: Date): string {
+  const { y, mo, d, weekday } = localParts(timeZone, date);
+  const daysSinceMonday = (weekday + 6) % 7;
+  const mondayUtc = Date.UTC(y, mo - 1, d - daysSinceMonday);
+  const m = new Date(mondayUtc);
+  return `${m.getUTCFullYear()}-${String(m.getUTCMonth() + 1).padStart(2, '0')}-${String(m.getUTCDate()).padStart(2, '0')}`;
+}
+
+export interface WeekBounds {
+  start: number; // inclusive, UTC ms
+  end: number; // exclusive, UTC ms
+  key: string; // YYYY-MM-DD of week start (local)
+}
+
+/** The most recently completed Monday-Sunday week in `timeZone`. */
+export function lastWeekBounds(timeZone: string, now = new Date()): WeekBounds {
+  const thisMonday = weekKey(timeZone, now);
+  const [y, mo, d] = thisMonday.split('-').map(Number) as [number, number, number];
+  const start = zonedToUtcMs(timeZone, y, mo, d) - 7 * 86_400_000;
+  const end = zonedToUtcMs(timeZone, y, mo, d);
+  const prev = new Date(start);
+  const key = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, '0')}-${String(prev.getUTCDate()).padStart(2, '0')}`;
+  return { start, end, key };
+}
+
+/** The current, in-progress week. */
+export function currentWeekBounds(timeZone: string, now = new Date()): WeekBounds {
+  const key = weekKey(timeZone, now);
+  const [y, mo, d] = key.split('-').map(Number) as [number, number, number];
+  const start = zonedToUtcMs(timeZone, y, mo, d);
+  return { start, end: start + 7 * 86_400_000, key };
+}
+
+// ---- formatting ---------------------------------------------------------
+
+export function fmt(n: number): string {
+  return n.toLocaleString('en-US');
+}
+
+export function fmtDate(ts: number | null, timeZone: string): string {
+  if (ts === null) return '—';
+  return new Intl.DateTimeFormat('en-GB', { timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ts));
+}
+
+export function weekRangeLabel(b: WeekBounds, timeZone: string): string {
+  const opts: Intl.DateTimeFormatOptions = { timeZone, month: 'short', day: 'numeric' };
+  const a = new Intl.DateTimeFormat('en-GB', opts).format(new Date(b.start));
+  const endMinus1 = new Date(b.end - 1);
+  const bb = new Intl.DateTimeFormat('en-GB', { ...opts, year: 'numeric' }).format(endMinus1);
+  return `${a} – ${bb}`;
+}
+
+/** Leaderboard lines, e.g. "**1.** <@123> — 1,234 messages". */
+export function leaderboardLines(rows: UserRow[], total: number): string[] {
+  if (rows.length === 0) return ['No messages recorded yet.'];
+  const medals = ['🥇', '🥈', '🥉'];
+  return rows.map((r, i) => {
+    const medal = medals[i] ?? `**${i + 1}.**`;
+    const share = total > 0 ? ` (${((r.messages / total) * 100).toFixed(1)}%)` : '';
+    return `${medal} <@${r.userId}> — **${fmt(r.messages)}** messages${share}`;
+  });
+}
