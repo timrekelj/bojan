@@ -50,8 +50,10 @@ function discordAuthUrl(state: string): string {
     client_id: config.clientId,
     redirect_uri: `${config.dashboardUrl}/auth/callback`,
     response_type: 'code',
-    scope: 'identify guilds guilds.member',
-    guild_id: config.guildId,
+    // Note: the guilds.member scope was removed by Discord; with the plain
+    // `guilds` scope we check membership via GET /users/@me/guilds/{id}/member
+    // after the token exchange (see checkGuildAdmin).
+    scope: 'identify guilds',
     state,
     prompt: 'consent',
   });

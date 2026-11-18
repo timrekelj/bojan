@@ -46,7 +46,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
      regular **Guild Message Reactions** intent (for reaction stats).
    - OAuth2 tab: add redirect URI `http://localhost:3000/auth/callback`
      (use your public `DASHBOARD_URL` in production), scopes
-     `identify guilds guilds.member`.
+     `identify guilds` (Discord removed the old `guilds.member` scope; admin is
+     checked via the `/users/@me/guilds/{id}/member` endpoint instead).
    - Invite the bot to your server with the `bot applications.commands` scope.
 2. Copy `.env.example` to `.env` and fill it in (`DISCORD_TOKEN`, `CLIENT_ID`,
    `CLIENT_SECRET`, `GUILD_ID`, `DASHBOARD_URL`, `SESSION_SECRET`, ...).
