@@ -9,8 +9,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   channel, user, timestamp), and every reaction is recorded with both sides:
   the message author (reactions *received*) and the reactor (reactions
   *given*), plus the emoji. Tables: `messages`, `reactions`, `settings`,
-  `embed_log`, `bot_state`, `activity_sessions`. Reactions can also be
-  backfilled with `/backfill`.
+  `embed_log`, `bot_state`, `activity_sessions`, `voice_sessions`. Reactions
+  can also be backfilled with `/backfill`.
 - **Presence / activity tracking** — with the privileged **Presence Intent**
   enabled, the bot records what members are playing/listening to/watching
   (e.g. "Playing World of Warcraft") as sessions in the `activity_sessions`
@@ -18,6 +18,11 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   member's current activity and their top activities by total time. Only
   visible while the bot is running and the member is not offline/invisible —
   Discord offers no presence history to backfill.
+- **Voice channel time tracking** — with the **Guild Voice States** intent the
+  bot records join/leave/channel-switch as sessions in the `voice_sessions`
+  table (start, end, channel), including members already in voice when the bot
+  starts (counted from startup). `/stats` shows total time in voice, "in voice
+  now" and the member's top voice channels.
 - **Weekly stats message** — on a configurable day/hour (per guild timezone,
   weeks run Monday–Sunday) the bot posts last week's recap to a configured
   channel: total messages and reactions, top-5 messagers, top-5 channels,
@@ -28,7 +33,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   - `/stats [user]` — all-time stats for a member: messages (total, share),
     reactions given/received, their most used emoji, the emojis most used on
     their messages, last message seen, currently played activity ("now
-    playing") and top activities by total tracked time
+    playing"), top activities by total tracked time, total time in voice
+    channels, "in voice now" and top voice channels
   - `/setstats #channel` — (admin) choose the weekly stats channel
   - `/backfill [channel] [days]` — (admin) seed the database from channel
     history: messages **and** their reactions (it pages through the users who

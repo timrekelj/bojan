@@ -26,6 +26,7 @@ export function createClient(): Client {
       GatewayIntentBits.GuildMembers,
       GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.GuildPresences, // privileged: needed to see what members are playing/listening to
+      GatewayIntentBits.GuildVoiceStates, // voice channel join/leave tracking
     ],
   });
 }
@@ -115,6 +116,9 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const nowPlaying = db.currentActivities(guildId, user.id);
     const topActivities = db.topActivities(guildId, user.id, 5);
     const totalActivityMs = db.totalActivityMs(guildId, user.id);
+    const voice = db.voiceStats(guildId, user.id);
+    const inVoiceNow = db.currentVoiceChannel(guildId, user.id);
+    const topVoiceChannels = db.topVoiceChannels(guildId, user.id, 3);
 
     const embed = new EmbedBuilder()
       .setTitle(`Stats for ${user.username}`)
@@ -124,6 +128,10 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
         { name: 'Reactions given', value: `**${fmt(reactions.given)}**`, inline: true },
         { name: 'Reactions received', value: `**${fmt(reactions.received)}**`, inline: true },
         { name: 'Last message seen', value: fmtDate(stats.lastTs, settings.timezone), inline: true },
+        { name: 'Time in voice', value: `**${fmtDuration(voice.totalMs)}**${voice.sessions > 0 ? ` across ${fmt(voice.sessions)} session${voice.sessions === 1 ? '' : 's'}` : ''}`, inline: true },
+        ...(inVoiceNow
+          ? [{ name: 'In voice now', value: `<#${inVoiceNow.channelId}> — for ${fmtDuration(Date.now() - inVoiceNow.startedAt)}`, inline: true }]
+          : []),
         ...(nowPlaying.length > 0
           ? [{
               name: 'Now playing',
@@ -139,6 +147,13 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
               value: topActivities
                 .map((a) => `${activityTypeLabel(a.type)} **${a.name}** — **${fmtDuration(a.totalMs)}** across ${fmt(a.sessions)} session${a.sessions === 1 ? '' : 's'}`)
                 .join('\n'),
+              inline: false,
+            }]
+          : []),
+        ...(topVoiceChannels.length > 0
+          ? [{
+              name: 'Top voice channels',
+              value: topVoiceChannels.map((c) => `<#${c.channelId}> — **${fmtDuration(c.totalMs)}** (${fmt(c.sessions)}×)`).join('\n'),
               inline: false,
             }]
           : []),
@@ -269,6 +284,19 @@ export function registerEvents(client: Client, db: BotDatabase): void {
   client.once(Events.ClientReady, async (ready) => {
     console.log(`[bot] logged in as ${ready.user.tag} (${ready.user.id})`);
     await registerCommands(client).catch((err) => console.error('[bot] command registration failed:', err));
+    // Seed voice sessions for members already in a voice channel when the bot
+    // (re)starts — their real join time is unknown, so it counts from now.
+    const now = Date.now();
+    for (const guild of ready.guilds.cache.values()) {
+      for (const vs of guild.voiceStates.cache.values()) {
+        if (!vs.channelId || vs.member?.user.bot) continue;
+        try {
+          db.recordVoiceState(guild.id, vs.id, vs.channelId, now);
+        } catch {
+          // best-effort seeding
+        }
+      }
+    }
   });
 
   client.on(Events.MessageCreate, (message: Message) => {
@@ -325,6 +353,16 @@ export function registerEvents(client: Client, db: BotDatabase): void {
       );
     } catch {
       // presence tracking is best-effort (uncached members, partials, ...)
+    }
+  });
+
+  client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+    try {
+      if (oldState.channelId === newState.channelId) return; // mute/deaf/move within same channel
+      if (newState.member?.user.bot) return;
+      db.recordVoiceState(newState.guild.id, newState.id, newState.channelId, Date.now());
+    } catch {
+      // voice tracking is best-effort
     }
   });
 

@@ -98,6 +98,24 @@ export interface CurrentActivityRow {
   lastSeenAt: number;
 }
 
+export interface VoiceStats {
+  totalMs: number; // SUM(ended_at ?? last_seen_at - started_at); open sessions count up to last_seen_at
+  sessions: number;
+}
+
+export interface VoiceChannelRow {
+  channelId: string;
+  sessions: number;
+  totalMs: number;
+  lastAt: number;
+}
+
+export interface CurrentVoiceRow {
+  channelId: string;
+  startedAt: number;
+  lastSeenAt: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,6 +184,18 @@ CREATE TABLE IF NOT EXISTS activity_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_guild_user ON activity_sessions (guild_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_open ON activity_sessions (guild_id, user_id, ended_at);
+
+CREATE TABLE IF NOT EXISTS voice_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_voice_guild_user ON voice_sessions (guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_voice_open ON voice_sessions (guild_id, user_id, ended_at);
 `;
 
 const DEFAULT_SETTINGS: Omit<Settings, 'guildId'> = {
@@ -438,6 +468,68 @@ export class BotDatabase {
     return this.db
       .prepare('SELECT name, type, details, state, started_at AS startedAt, last_seen_at AS lastSeenAt FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL ORDER BY last_seen_at DESC')
       .all(guildId, userId) as unknown as CurrentActivityRow[];
+  }
+
+  // ---- voice channel time -------------------------------------------------
+
+  /**
+   * Reconcile one member's voice state: `channelId = null` means they left
+   * voice (close the open session); a channel id means they joined it (open a
+   * session, closing any open session in a different channel first).
+   */
+  recordVoiceState(guildId: string, userId: string, channelId: string | null, ts: number): void {
+    this.db.exec('BEGIN');
+    try {
+      const openRows = this.db
+        .prepare('SELECT id, channel_id FROM voice_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL')
+        .all(guildId, userId) as unknown as { id: number; channel_id: string }[];
+      if (channelId === null) {
+        const closeStmt = this.db.prepare('UPDATE voice_sessions SET ended_at = ? WHERE id = ?');
+        for (const row of openRows) closeStmt.run(ts, row.id);
+      } else {
+        const closeStmt = this.db.prepare('UPDATE voice_sessions SET ended_at = ? WHERE id = ?');
+        const touchStmt = this.db.prepare('UPDATE voice_sessions SET last_seen_at = ? WHERE id = ?');
+        const insStmt = this.db.prepare('INSERT INTO voice_sessions (guild_id, user_id, channel_id, started_at, last_seen_at) VALUES (?, ?, ?, ?, ?)');
+        const same = openRows.find((r) => r.channel_id === channelId);
+        if (same) {
+          touchStmt.run(ts, same.id);
+          for (const row of openRows) if (row.id !== same.id) closeStmt.run(ts, row.id);
+        } else {
+          for (const row of openRows) closeStmt.run(ts, row.id); // switched channels
+          insStmt.run(guildId, userId, channelId, ts, ts);
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  voiceStats(guildId: string, userId: string): VoiceStats {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS sessions, COALESCE(SUM(COALESCE(ended_at, last_seen_at) - started_at), 0) AS totalMs FROM voice_sessions WHERE guild_id = ? AND user_id = ?')
+      .get(guildId, userId) as { sessions: number; totalMs: number };
+    return { totalMs: row.totalMs, sessions: row.sessions };
+  }
+
+  /** Voice channels ranked by total time for one user, all time. */
+  topVoiceChannels(guildId: string, userId: string, limit: number): VoiceChannelRow[] {
+    return this.db
+      .prepare(`SELECT channel_id AS channelId, COUNT(*) AS sessions,
+                       SUM(COALESCE(ended_at, last_seen_at) - started_at) AS totalMs,
+                       MAX(COALESCE(ended_at, last_seen_at)) AS lastAt
+                FROM voice_sessions WHERE guild_id = ? AND user_id = ?
+                GROUP BY channel_id ORDER BY totalMs DESC, channel_id ASC LIMIT ?`)
+      .all(guildId, userId, limit) as unknown as VoiceChannelRow[];
+  }
+
+  /** The voice channel the user is in right now, if any. */
+  currentVoiceChannel(guildId: string, userId: string): CurrentVoiceRow | null {
+    const row = this.db
+      .prepare('SELECT channel_id AS channelId, started_at AS startedAt, last_seen_at AS lastSeenAt FROM voice_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL ORDER BY last_seen_at DESC LIMIT 1')
+      .get(guildId, userId) as CurrentVoiceRow | undefined;
+    return row ?? null;
   }
 
   // ---- settings -------------------------------------------------------
