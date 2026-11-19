@@ -475,13 +475,14 @@ export class BotDatabase {
     }
   }
 
+  // Custom statuses (type 4) are recorded but never shown in stats.
   /** Activities ranked by total time for one user, all time. Open sessions count up to `now`. */
   topActivities(guildId: string, userId: string, limit: number, now = Date.now()): ActivityAggregateRow[] {
     return this.db
       .prepare(`SELECT name, MAX(type) AS type, COUNT(*) AS sessions,
                        SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at) AS totalMs,
                        MAX(CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) AS lastAt
-                FROM activity_sessions WHERE guild_id = ? AND user_id = ?
+                FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND type <> 4
                 GROUP BY name ORDER BY totalMs DESC, name ASC LIMIT ?`)
       .all(now, now, guildId, userId, limit) as unknown as ActivityAggregateRow[];
   }
@@ -489,7 +490,7 @@ export class BotDatabase {
   /** Total tracked activity time for one user, all time. Open sessions count up to `now`. */
   totalActivityMs(guildId: string, userId: string, now = Date.now()): number {
     const row = this.db
-      .prepare('SELECT COALESCE(SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at), 0) AS ms FROM activity_sessions WHERE guild_id = ? AND user_id = ?')
+      .prepare('SELECT COALESCE(SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at), 0) AS ms FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND type <> 4')
       .get(now, guildId, userId) as { ms: number };
     return row.ms;
   }
@@ -497,7 +498,7 @@ export class BotDatabase {
   /** Currently open (still running) activities for one user. */
   currentActivities(guildId: string, userId: string): CurrentActivityRow[] {
     return this.db
-      .prepare('SELECT name, type, details, state, started_at AS startedAt, last_seen_at AS lastSeenAt FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL ORDER BY last_seen_at DESC')
+      .prepare('SELECT name, type, details, state, started_at AS startedAt, last_seen_at AS lastSeenAt FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL AND type <> 4 ORDER BY last_seen_at DESC')
       .all(guildId, userId) as unknown as CurrentActivityRow[];
   }
 
