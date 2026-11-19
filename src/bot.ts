@@ -14,7 +14,7 @@ import {
 } from 'discord.js';
 import type { BotDatabase } from './db.js';
 import { config } from './config.js';
-import { fmt, fmtDate, leaderboardLines } from './stats.js';
+import { activityTypeLabel, fmt, fmtDate, fmtDuration, leaderboardLines } from './stats.js';
 import { maybeConvert } from './embeds/converter.js';
 
 export function createClient(): Client {
@@ -25,6 +25,7 @@ export function createClient(): Client {
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildMembers,
       GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildPresences, // privileged: needed to see what members are playing/listening to
     ],
   });
 }
@@ -111,6 +112,9 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const reactions = db.reactionStats(guildId, user.id);
     const emojis = db.topEmojiForUser(guildId, user.id, 5);
     const emojisOnTheirMessages = db.topEmojiReceived(guildId, user.id, 5);
+    const nowPlaying = db.currentActivities(guildId, user.id);
+    const topActivities = db.topActivities(guildId, user.id, 5);
+    const totalActivityMs = db.totalActivityMs(guildId, user.id);
 
     const embed = new EmbedBuilder()
       .setTitle(`Stats for ${user.username}`)
@@ -120,6 +124,24 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
         { name: 'Reactions given', value: `**${fmt(reactions.given)}**`, inline: true },
         { name: 'Reactions received', value: `**${fmt(reactions.received)}**`, inline: true },
         { name: 'Last message seen', value: fmtDate(stats.lastTs, settings.timezone), inline: true },
+        ...(nowPlaying.length > 0
+          ? [{
+              name: 'Now playing',
+              value: nowPlaying
+                .map((a) => `${activityTypeLabel(a.type)} **${a.name}** — for ${fmtDuration(Date.now() - a.startedAt)}`)
+                .join('\n'),
+              inline: false,
+            }]
+          : []),
+        ...(topActivities.length > 0
+          ? [{
+              name: `Top activities (all time, ${fmtDuration(totalActivityMs)} tracked)`,
+              value: topActivities
+                .map((a) => `${activityTypeLabel(a.type)} **${a.name}** — **${fmtDuration(a.totalMs)}** across ${fmt(a.sessions)} session${a.sessions === 1 ? '' : 's'}`)
+                .join('\n'),
+              inline: false,
+            }]
+          : []),
         ...(emojis.length > 0
           ? [{ name: 'Most used emoji (given)', value: emojis.map((e) => `${e.emojiLabel} ×${fmt(e.count)}`).join('   '), inline: false }]
           : []),
@@ -280,6 +302,30 @@ export function registerEvents(client: Client, db: BotDatabase): void {
         // reaction tracking is best-effort (partials, deleted messages, ...)
       }
     })();
+  });
+
+  client.on(Events.PresenceUpdate, (oldPresence, newPresence) => {
+    try {
+      const guildId = newPresence.guild?.id;
+      const userId = newPresence.userId;
+      if (!guildId || !userId) return;
+      if (newPresence.user?.bot || newPresence.member?.user.bot) return;
+      db.recordPresence(
+        guildId,
+        userId,
+        newPresence.activities.map((a) => ({
+          name: a.name,
+          type: a.type,
+          details: a.details ?? null,
+          state: a.state ?? null,
+          applicationId: a.applicationId ?? null,
+          startedAt: a.timestamps?.start?.getTime() ?? null,
+        })),
+        Date.now(),
+      );
+    } catch {
+      // presence tracking is best-effort (uncached members, partials, ...)
+    }
   });
 
   client.on(Events.InteractionCreate, (interaction) => {

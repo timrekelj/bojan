@@ -71,6 +71,33 @@ export interface DayCount {
   count: number;
 }
 
+/** One activity from a Discord presence (game, stream, custom status, ...). */
+export interface ActivityInput {
+  name: string;
+  type: number; // discord.js ActivityType
+  details: string | null;
+  state: string | null;
+  applicationId: string | null;
+  startedAt: number | null; // from activity.timestamps.start, if the app provides it
+}
+
+export interface ActivityAggregateRow {
+  name: string;
+  type: number;
+  sessions: number;
+  totalMs: number; // SUM(ended_at ?? last_seen_at - started_at); open sessions count up to last_seen_at
+  lastAt: number; // most recent session end (or last_seen_at if still open)
+}
+
+export interface CurrentActivityRow {
+  name: string;
+  type: number;
+  details: string | null;
+  state: string | null;
+  startedAt: number;
+  lastSeenAt: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,6 +150,22 @@ CREATE TABLE IF NOT EXISTS bot_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS activity_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  type INTEGER NOT NULL,
+  details TEXT,
+  state TEXT,
+  application_id TEXT,
+  started_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_activity_guild_user ON activity_sessions (guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_activity_open ON activity_sessions (guild_id, user_id, ended_at);
 `;
 
 const DEFAULT_SETTINGS: Omit<Settings, 'guildId'> = {
@@ -327,6 +370,74 @@ export class BotDatabase {
     return this.db
       .prepare('SELECT emoji_key AS emojiKey, emoji_label AS emojiLabel, COUNT(*) AS count FROM reactions WHERE guild_id = ? GROUP BY emoji_key ORDER BY count DESC, emoji_key ASC LIMIT ?')
       .all(guildId, limit) as unknown as EmojiRow[];
+  }
+
+  // ---- activities (Discord presences) -----------------------------------
+
+  /**
+   * Reconcile one member's presence with the open sessions in the DB:
+   * activities still present get their open session touched (or a new one
+   * opened), activities that disappeared get their session closed.
+   */
+  recordPresence(guildId: string, userId: string, activities: ActivityInput[], ts: number): void {
+    this.db.exec('BEGIN');
+    try {
+      const closeStmt = this.db.prepare('UPDATE activity_sessions SET ended_at = ? WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL AND name = ? AND type = ? AND application_id IS ?');
+      const touchStmt = this.db.prepare('UPDATE activity_sessions SET last_seen_at = ?, details = ?, state = ? WHERE id = ?');
+      const openStmt = this.db.prepare('SELECT id FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL AND name = ? AND type = ? AND application_id IS ? ORDER BY id DESC LIMIT 1');
+      const insStmt = this.db.prepare('INSERT INTO activity_sessions (guild_id, user_id, name, type, details, state, application_id, started_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+
+      const seen = new Set<string>();
+      for (const a of activities) {
+        const key = `${a.name}${a.type}${a.applicationId ?? ''}`;
+        seen.add(key);
+        const open = openStmt.get(guildId, userId, a.name, a.type, a.applicationId) as { id: number } | undefined;
+        if (open) {
+          touchStmt.run(ts, a.details, a.state, open.id);
+        } else {
+          insStmt.run(guildId, userId, a.name, a.type, a.details, a.state, a.applicationId, a.startedAt ?? ts, ts);
+        }
+      }
+      // Close every open session whose activity is no longer present.
+      const openRows = this.db
+        .prepare('SELECT id, name, type, application_id FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL')
+        .all(guildId, userId) as unknown as { id: number; name: string; type: number; application_id: string | null }[];
+      for (const row of openRows) {
+        if (!seen.has(`${row.name}${row.type}${row.application_id ?? ''}`)) {
+          closeStmt.run(ts, guildId, userId, row.name, row.type, row.application_id);
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  /** Activities ranked by total time for one user, all time. */
+  topActivities(guildId: string, userId: string, limit: number): ActivityAggregateRow[] {
+    return this.db
+      .prepare(`SELECT name, MAX(type) AS type, COUNT(*) AS sessions,
+                       SUM(COALESCE(ended_at, last_seen_at) - started_at) AS totalMs,
+                       MAX(COALESCE(ended_at, last_seen_at)) AS lastAt
+                FROM activity_sessions WHERE guild_id = ? AND user_id = ?
+                GROUP BY name ORDER BY totalMs DESC, name ASC LIMIT ?`)
+      .all(guildId, userId, limit) as unknown as ActivityAggregateRow[];
+  }
+
+  /** Total tracked activity time for one user, all time. */
+  totalActivityMs(guildId: string, userId: string): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(SUM(COALESCE(ended_at, last_seen_at) - started_at), 0) AS ms FROM activity_sessions WHERE guild_id = ? AND user_id = ?')
+      .get(guildId, userId) as { ms: number };
+    return row.ms;
+  }
+
+  /** Currently open (still running) activities for one user. */
+  currentActivities(guildId: string, userId: string): CurrentActivityRow[] {
+    return this.db
+      .prepare('SELECT name, type, details, state, started_at AS startedAt, last_seen_at AS lastSeenAt FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL ORDER BY last_seen_at DESC')
+      .all(guildId, userId) as unknown as CurrentActivityRow[];
   }
 
   // ---- settings -------------------------------------------------------

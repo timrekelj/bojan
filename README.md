@@ -9,7 +9,15 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   channel, user, timestamp), and every reaction is recorded with both sides:
   the message author (reactions *received*) and the reactor (reactions
   *given*), plus the emoji. Tables: `messages`, `reactions`, `settings`,
-  `embed_log`, `bot_state`. Reactions can also be backfilled with `/backfill`.
+  `embed_log`, `bot_state`, `activity_sessions`. Reactions can also be
+  backfilled with `/backfill`.
+- **Presence / activity tracking** — with the privileged **Presence Intent**
+  enabled, the bot records what members are playing/listening to/watching
+  (e.g. "Playing World of Warcraft") as sessions in the `activity_sessions`
+  table: each session gets a start, end and duration. `/stats` shows the
+  member's current activity and their top activities by total time. Only
+  visible while the bot is running and the member is not offline/invisible —
+  Discord offers no presence history to backfill.
 - **Weekly stats message** — on a configurable day/hour (per guild timezone,
   weeks run Monday–Sunday) the bot posts last week's recap to a configured
   channel: total messages and reactions, top-5 messagers, top-5 channels,
@@ -19,7 +27,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
     reaction givers (with their 3 most used emoji), most reacted-to users
   - `/stats [user]` — all-time stats for a member: messages (total, share),
     reactions given/received, their most used emoji, the emojis most used on
-    their messages, last message seen
+    their messages, last message seen, currently played activity ("now
+    playing") and top activities by total tracked time
   - `/setstats #channel` — (admin) choose the weekly stats channel
   - `/backfill [channel] [days]` — (admin) seed the database from channel
     history: messages **and** their reactions (it pages through the users who
@@ -55,8 +64,9 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
 
 1. Create an application at <https://discord.com/developers/applications>:
    - Bot tab: add a bot, copy the token; enable the privileged intents
-     **Message Content**, **Server Members**, **Guild Messages**, plus the
-     regular **Guild Message Reactions** intent (for reaction stats).
+     **Message Content**, **Server Members**, **Guild Messages**,
+     **Presences** (for activity/game tracking), plus the regular
+     **Guild Message Reactions** intent (for reaction stats).
    - OAuth2 tab: add redirect URI `http://localhost:3000/auth/callback`
      (use your public `DASHBOARD_URL` in production), scopes
      `identify guilds` (Discord removed the old `guilds.member` scope; admin is
@@ -107,7 +117,8 @@ npm ci && npm run build && npm start    # with .env in place
 
 1. <https://discord.com/developers/applications> → New Application → **Bot**
    tab: Add Bot, copy the token → `DISCORD_TOKEN`. Enable the privileged
-   intents **Server Members**, **Guild Messages** and **Message Content**.
+   intents **Server Members**, **Guild Messages**, **Message Content** and
+   **Presences** (needed to see what members are playing).
 2. **OAuth2 → General**: copy Application ID → `CLIENT_ID` and Client Secret →
    `CLIENT_SECRET`. Add redirect URI `<your DASHBOARD_URL>/auth/callback`
    (e.g. `http://localhost:3000/auth/callback` locally,

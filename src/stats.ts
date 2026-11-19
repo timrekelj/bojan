@@ -82,6 +82,31 @@ export function fmtDate(ts: number | null, timeZone: string): string {
   return new Intl.DateTimeFormat('en-GB', { timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ts));
 }
 
+/** Human duration for a millisecond span: "2d 4h", "3h 12m", "45m", "30s". */
+export function fmtDuration(ms: number): string {
+  if (ms < 1000) return '0s';
+  const totalMin = Math.floor(ms / 60_000);
+  const days = Math.floor(totalMin / (60 * 24));
+  const hours = Math.floor((totalMin % (60 * 24)) / 60);
+  const mins = totalMin % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  return `${mins}m`;
+}
+
+/** Label + emoji for a discord.js ActivityType (0=Playing … 5=Competing). */
+export function activityTypeLabel(type: number): string {
+  switch (type) {
+    case 0: return '🎮 Playing';
+    case 1: return '📺 Streaming';
+    case 2: return '🎧 Listening to';
+    case 3: return '👀 Watching';
+    case 4: return '💬';
+    case 5: return '🏆 Competing in';
+    default: return '📱';
+  }
+}
+
 export function weekRangeLabel(b: WeekBounds, timeZone: string): string {
   const opts: Intl.DateTimeFormatOptions = { timeZone, month: 'short', day: 'numeric' };
   const a = new Intl.DateTimeFormat('en-GB', opts).format(new Date(b.start));
