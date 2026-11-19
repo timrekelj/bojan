@@ -501,9 +501,9 @@ export class BotDatabase {
       .all(guildId, userId) as unknown as CurrentActivityRow[];
   }
 
-  /** Distinct activity names seen in a guild (for /activity autocomplete). */
+  /** Distinct non-custom-status activity names seen in a guild (for /activity autocomplete). */
   activityNames(guildId: string, prefix = '', limit = 25): string[] {
-    const rows = this.db.prepare('SELECT DISTINCT name FROM activity_sessions WHERE guild_id = ? ORDER BY name ASC').all(guildId) as unknown as { name: string }[];
+    const rows = this.db.prepare('SELECT DISTINCT name FROM activity_sessions WHERE guild_id = ? AND type <> 4 ORDER BY name ASC').all(guildId) as unknown as { name: string }[];
     const p = prefix.trim().toLowerCase();
     return rows
       .map((r) => r.name)
