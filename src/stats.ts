@@ -82,10 +82,10 @@ export function fmtDate(ts: number | null, timeZone: string): string {
   return new Intl.DateTimeFormat('en-GB', { timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ts));
 }
 
-/** Human duration for a millisecond span: "2d 4h", "3h 12m", "45m", "30s". */
+/** Human duration for a millisecond span: "2d 4h", "3h 12m", "45m", "<1m". */
 export function fmtDuration(ms: number): string {
-  if (ms < 1000) return '0s';
   const totalMin = Math.floor(ms / 60_000);
+  if (totalMin < 1) return '<1m';
   const days = Math.floor(totalMin / (60 * 24));
   const hours = Math.floor((totalMin % (60 * 24)) / 60);
   const mins = totalMin % 60;

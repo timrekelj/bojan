@@ -14,7 +14,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
 - **Presence / activity tracking** — with the privileged **Presence Intent**
   enabled, the bot records what members are playing/listening to/watching
   (e.g. "Playing World of Warcraft") as sessions in the `activity_sessions`
-  table: each session gets a start, end and duration. `/stats` shows the
+  table: each session gets a start, end and duration. Custom statuses are
+  tracked by their text (e.g. "Svoboda osvobaja"). `/stats` shows the
   member's current activity and their top activities by total time. Only
   visible while the bot is running and the member is not offline/invisible —
   Discord offers no presence history to backfill.

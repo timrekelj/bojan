@@ -85,8 +85,8 @@ export interface ActivityAggregateRow {
   name: string;
   type: number;
   sessions: number;
-  totalMs: number; // SUM(ended_at ?? last_seen_at - started_at); open sessions count up to last_seen_at
-  lastAt: number; // most recent session end (or last_seen_at if still open)
+  totalMs: number; // open sessions count up to "now"
+  lastAt: number; // most recent session end (or now if still open)
 }
 
 export interface CurrentActivityRow {
@@ -99,7 +99,7 @@ export interface CurrentActivityRow {
 }
 
 export interface VoiceStats {
-  totalMs: number; // SUM(ended_at ?? last_seen_at - started_at); open sessions count up to last_seen_at
+  totalMs: number; // open sessions count up to "now"
   sessions: number;
 }
 
@@ -234,6 +234,9 @@ export class BotDatabase {
     // Dedup key: the same Discord message must never be counted twice
     // (live tracking + backfill can overlap).
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_guild_msg ON messages (guild_id, message_id)');
+    // Custom statuses were first recorded under the literal name "Custom
+    // Status" — use the status text itself as the name (matches new rows).
+    this.db.exec(`UPDATE activity_sessions SET name = state WHERE type = 4 AND name = 'Custom Status' AND state IS NOT NULL AND state <> ''`);
   }
 
   close(): void {
@@ -444,22 +447,22 @@ export class BotDatabase {
     }
   }
 
-  /** Activities ranked by total time for one user, all time. */
-  topActivities(guildId: string, userId: string, limit: number): ActivityAggregateRow[] {
+  /** Activities ranked by total time for one user, all time. Open sessions count up to `now`. */
+  topActivities(guildId: string, userId: string, limit: number, now = Date.now()): ActivityAggregateRow[] {
     return this.db
       .prepare(`SELECT name, MAX(type) AS type, COUNT(*) AS sessions,
-                       SUM(COALESCE(ended_at, last_seen_at) - started_at) AS totalMs,
-                       MAX(COALESCE(ended_at, last_seen_at)) AS lastAt
+                       SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at) AS totalMs,
+                       MAX(CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) AS lastAt
                 FROM activity_sessions WHERE guild_id = ? AND user_id = ?
                 GROUP BY name ORDER BY totalMs DESC, name ASC LIMIT ?`)
-      .all(guildId, userId, limit) as unknown as ActivityAggregateRow[];
+      .all(now, now, guildId, userId, limit) as unknown as ActivityAggregateRow[];
   }
 
-  /** Total tracked activity time for one user, all time. */
-  totalActivityMs(guildId: string, userId: string): number {
+  /** Total tracked activity time for one user, all time. Open sessions count up to `now`. */
+  totalActivityMs(guildId: string, userId: string, now = Date.now()): number {
     const row = this.db
-      .prepare('SELECT COALESCE(SUM(COALESCE(ended_at, last_seen_at) - started_at), 0) AS ms FROM activity_sessions WHERE guild_id = ? AND user_id = ?')
-      .get(guildId, userId) as { ms: number };
+      .prepare('SELECT COALESCE(SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at), 0) AS ms FROM activity_sessions WHERE guild_id = ? AND user_id = ?')
+      .get(now, guildId, userId) as { ms: number };
     return row.ms;
   }
 
@@ -506,22 +509,23 @@ export class BotDatabase {
     }
   }
 
-  voiceStats(guildId: string, userId: string): VoiceStats {
+  /** Open sessions count up to `now`. */
+  voiceStats(guildId: string, userId: string, now = Date.now()): VoiceStats {
     const row = this.db
-      .prepare('SELECT COUNT(*) AS sessions, COALESCE(SUM(COALESCE(ended_at, last_seen_at) - started_at), 0) AS totalMs FROM voice_sessions WHERE guild_id = ? AND user_id = ?')
-      .get(guildId, userId) as { sessions: number; totalMs: number };
+      .prepare('SELECT COUNT(*) AS sessions, COALESCE(SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at), 0) AS totalMs FROM voice_sessions WHERE guild_id = ? AND user_id = ?')
+      .get(now, guildId, userId) as { sessions: number; totalMs: number };
     return { totalMs: row.totalMs, sessions: row.sessions };
   }
 
-  /** Voice channels ranked by total time for one user, all time. */
-  topVoiceChannels(guildId: string, userId: string, limit: number): VoiceChannelRow[] {
+  /** Voice channels ranked by total time for one user, all time. Open sessions count up to `now`. */
+  topVoiceChannels(guildId: string, userId: string, limit: number, now = Date.now()): VoiceChannelRow[] {
     return this.db
       .prepare(`SELECT channel_id AS channelId, COUNT(*) AS sessions,
-                       SUM(COALESCE(ended_at, last_seen_at) - started_at) AS totalMs,
-                       MAX(COALESCE(ended_at, last_seen_at)) AS lastAt
+                       SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at) AS totalMs,
+                       MAX(CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) AS lastAt
                 FROM voice_sessions WHERE guild_id = ? AND user_id = ?
                 GROUP BY channel_id ORDER BY totalMs DESC, channel_id ASC LIMIT ?`)
-      .all(guildId, userId, limit) as unknown as VoiceChannelRow[];
+      .all(now, now, guildId, userId, limit) as unknown as VoiceChannelRow[];
   }
 
   /** The voice channel the user is in right now, if any. */

@@ -1,4 +1,5 @@
 import {
+  ActivityType,
   ChannelType,
   Client,
   EmbedBuilder,
@@ -342,7 +343,9 @@ export function registerEvents(client: Client, db: BotDatabase): void {
         guildId,
         userId,
         newPresence.activities.map((a) => ({
-          name: a.name,
+          // Custom statuses arrive as name "Custom Status" with the text in
+          // `state` — track the text itself so statuses group by content.
+          name: a.type === ActivityType.Custom && a.state ? a.state : a.name,
           type: a.type,
           details: a.details ?? null,
           state: a.state ?? null,
