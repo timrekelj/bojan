@@ -15,7 +15,7 @@ import {
 } from 'discord.js';
 import type { BotDatabase } from './db.js';
 import { config } from './config.js';
-import { activityTypeLabel, fmt, fmtDate, fmtDuration, leaderboardLines } from './stats.js';
+import { activityTypeLabel, barChartLines, fmt, fmtDate, fmtDuration, leaderboardLines, localParts, zonedToUtcMs } from './stats.js';
 import { maybeConvert } from './embeds/converter.js';
 
 export function createClient(): Client {
@@ -46,6 +46,11 @@ const commands = [
     .setDescription('Set the channel where weekly stats are posted')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addChannelOption((o) => o.setName('channel').setDescription('Channel for weekly stats').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('activity')
+    .setDescription('Stats for one recorded activity/game (e.g. League of Legends, opencode)')
+    .addStringOption((o) => o.setName('name').setDescription('Activity name (autocomplete from recorded ones)').setRequired(true).setAutocomplete(true))
+    .addUserOption((o) => o.setName('user').setDescription('Member to look up (defaults to you)').setRequired(false)),
   new SlashCommandBuilder()
     .setName('backfill')
     .setDescription('(Admin) Record old messages and reactions from channel history into the stats database')
@@ -163,6 +168,56 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
           : []),
         ...(emojisOnTheirMessages.length > 0
           ? [{ name: 'Most used emoji on their messages', value: emojisOnTheirMessages.map((e) => `${e.emojiLabel} ×${fmt(e.count)}`).join('   '), inline: false }]
+          : []),
+      )
+      .setColor(0x5865f2)
+      .setTimestamp();
+    await interaction.reply({ embeds: [embed] });
+    return;
+  }
+
+  if (interaction.commandName === 'activity') {
+    const name = interaction.options.getString('name', true);
+    const user = interaction.options.getUser('user') ?? interaction.user;
+    const summary = db.activitySummary(guildId, user.id, name);
+    if (!summary) {
+      await interaction.reply({ content: `No recorded sessions for **${name}**${user.id === interaction.user.id ? '' : ` for ${user.username}`}. Start it while the bot is online and try again.`, ephemeral: true });
+      return;
+    }
+    const now = Date.now();
+    const tz = settings.timezone;
+    const breakdown = db.activityBreakdown(guildId, user.id, name, 5, now);
+    const recent = db.recentActivitySessions(guildId, user.id, name, 8, now);
+    // Last 7 local days, bucketed by session start day.
+    const p = localParts(tz, new Date(now - 6 * 86_400_000));
+    const dayStart = zonedToUtcMs(tz, p.y, p.mo, p.d);
+    const minutes = db.activityMinutesPerDay(guildId, user.id, name, dayStart, now + 1, tz, now);
+    const chart = barChartLines(minutes, { start: dayStart, end: now, key: '' }, tz);
+
+    // Embed field values are capped at 1024 chars — drop trailing lines if needed.
+    const fit = (lines: string[]): string => {
+      while (lines.length > 1 && lines.join('\n').length > 1000) lines.pop();
+      return lines.join('\n') || '—';
+    };
+    const embed = new EmbedBuilder()
+      .setTitle(`📊 ${name} — ${user.username}`)
+      .setThumbnail(user.displayAvatarURL({ size: 128 }))
+      .addFields(
+        { name: 'Total time', value: `**${fmtDuration(summary.totalMs)}**`, inline: true },
+        { name: 'Sessions', value: `**${fmt(summary.sessions)}**`, inline: true },
+        { name: 'Average session', value: `**${fmtDuration(summary.avgMs)}**`, inline: true },
+        { name: 'First seen', value: fmtDate(summary.firstAt, tz), inline: true },
+        { name: 'Last seen', value: fmtDate(summary.lastAt, tz), inline: true },
+        { name: 'Last 7 days (minutes)', value: '```\n' + fit(chart) + '\n```', inline: false },
+        ...(breakdown.length > 0
+          ? [{ name: 'Breakdown (details/status)', value: fit(breakdown.map((b) => `**${b.label}** — ${fmtDuration(b.totalMs)} (${fmt(b.sessions)}×)`)), inline: false }]
+          : []),
+        ...(recent.length > 0
+          ? [{
+              name: 'Recent sessions',
+              value: fit(recent.map((s) => `${fmtDate(s.startedAt, tz)} — **${fmtDuration(s.durationMs)}**${s.open ? ' (ongoing)' : ''}${s.details ? ` — ${s.details}` : ''}${!s.details && s.state ? ` — ${s.state}` : ''}`)),
+              inline: false,
+            }]
           : []),
       )
       .setColor(0x5865f2)
@@ -370,6 +425,16 @@ export function registerEvents(client: Client, db: BotDatabase): void {
   });
 
   client.on(Events.InteractionCreate, (interaction) => {
+    if (interaction.isAutocomplete()) {
+      if (interaction.commandName === 'activity' && interaction.guildId) {
+        const prefix = String(interaction.options.getFocused());
+        const names = db.activityNames(interaction.guildId, prefix, 25);
+        void interaction
+          .respond(names.map((n) => ({ name: n.length > 100 ? `${n.slice(0, 97)}…` : n, value: n })))
+          .catch(() => undefined);
+      }
+      return;
+    }
     if (!interaction.isChatInputCommand()) return;
     void handleCommand(interaction, db, client).catch((err) => {
       console.error('[bot] command error:', err);

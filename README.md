@@ -15,7 +15,9 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   enabled, the bot records what members are playing/listening to/watching
   (e.g. "Playing World of Warcraft") as sessions in the `activity_sessions`
   table: each session gets a start, end and duration. Custom statuses are
-  tracked by their text (e.g. "Svoboda osvobaja"). `/stats` shows the
+  tracked by their text (e.g. "Svoboda osvobaja"). A change in an activity's
+  details/state (e.g. a LoL game mode switch) starts a new session, so
+  `/activity <name>` can break time down by mode. `/stats` shows the
   member's current activity and their top activities by total time. Only
   visible while the bot is running and the member is not offline/invisible —
   Discord offers no presence history to backfill.
@@ -36,6 +38,10 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
     their messages, last message seen, currently played activity ("now
     playing"), top activities by total tracked time, total time in voice
     channels, "in voice now" and top voice channels
+  - `/activity <name> [user]` — per-activity stats card (total time, session
+    count, average session, per-day bar chart for the last 7 days, breakdown
+    by details/status e.g. LoL game mode, recent sessions). `name` autocompletes
+    from recorded activities (games, apps, custom statuses like `opencode`)
   - `/setstats #channel` — (admin) choose the weekly stats channel
   - `/backfill [channel] [days]` — (admin) seed the database from channel
     history: messages **and** their reactions (it pages through the users who

@@ -116,6 +116,30 @@ export interface CurrentVoiceRow {
   lastSeenAt: number;
 }
 
+export interface ActivitySummaryRow {
+  name: string;
+  sessions: number;
+  totalMs: number;
+  avgMs: number;
+  firstAt: number | null;
+  lastAt: number | null;
+}
+
+export interface ActivityBreakdownRow {
+  label: string; // details (e.g. game mode) or state, '—' if none
+  sessions: number;
+  totalMs: number;
+}
+
+export interface ActivitySessionRow {
+  startedAt: number;
+  endedAt: number | null;
+  durationMs: number;
+  details: string | null;
+  state: string | null;
+  open: number; // 1 if still running
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -415,29 +439,33 @@ export class BotDatabase {
   recordPresence(guildId: string, userId: string, activities: ActivityInput[], ts: number): void {
     this.db.exec('BEGIN');
     try {
-      const closeStmt = this.db.prepare('UPDATE activity_sessions SET ended_at = ? WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL AND name = ? AND type = ? AND application_id IS ?');
-      const touchStmt = this.db.prepare('UPDATE activity_sessions SET last_seen_at = ?, details = ?, state = ? WHERE id = ?');
-      const openStmt = this.db.prepare('SELECT id FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL AND name = ? AND type = ? AND application_id IS ? ORDER BY id DESC LIMIT 1');
+      const closeStmt = this.db.prepare('UPDATE activity_sessions SET ended_at = ? WHERE id = ?');
+      const touchStmt = this.db.prepare('UPDATE activity_sessions SET last_seen_at = ? WHERE id = ?');
+      const openStmt = this.db.prepare('SELECT id FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL AND name = ? AND type = ? AND application_id IS ? AND details IS ? AND state IS ? ORDER BY id DESC LIMIT 1');
       const insStmt = this.db.prepare('INSERT INTO activity_sessions (guild_id, user_id, name, type, details, state, application_id, started_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 
+      // A session is one continuous run of the same activity (name + type +
+      // app + details/state); a change in details/state (e.g. LoL game mode)
+      // closes the session and starts a new one.
+      const key = (name: string, type: number, appId: string | null, details: string | null, state: string | null): string =>
+        `${name}${type}${appId ?? ''}${details ?? ''}${state ?? ''}`;
       const seen = new Set<string>();
       for (const a of activities) {
-        const key = `${a.name}${a.type}${a.applicationId ?? ''}`;
-        seen.add(key);
-        const open = openStmt.get(guildId, userId, a.name, a.type, a.applicationId) as { id: number } | undefined;
+        seen.add(key(a.name, a.type, a.applicationId, a.details, a.state));
+        const open = openStmt.get(guildId, userId, a.name, a.type, a.applicationId, a.details, a.state) as { id: number } | undefined;
         if (open) {
-          touchStmt.run(ts, a.details, a.state, open.id);
+          touchStmt.run(ts, open.id);
         } else {
           insStmt.run(guildId, userId, a.name, a.type, a.details, a.state, a.applicationId, a.startedAt ?? ts, ts);
         }
       }
-      // Close every open session whose activity is no longer present.
+      // Close every open session whose activity is no longer present (or changed).
       const openRows = this.db
-        .prepare('SELECT id, name, type, application_id FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL')
-        .all(guildId, userId) as unknown as { id: number; name: string; type: number; application_id: string | null }[];
+        .prepare('SELECT id, name, type, application_id, details, state FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL')
+        .all(guildId, userId) as unknown as { id: number; name: string; type: number; application_id: string | null; details: string | null; state: string | null }[];
       for (const row of openRows) {
-        if (!seen.has(`${row.name}${row.type}${row.application_id ?? ''}`)) {
-          closeStmt.run(ts, guildId, userId, row.name, row.type, row.application_id);
+        if (!seen.has(key(row.name, row.type, row.application_id, row.details, row.state))) {
+          closeStmt.run(ts, row.id);
         }
       }
       this.db.exec('COMMIT');
@@ -471,6 +499,68 @@ export class BotDatabase {
     return this.db
       .prepare('SELECT name, type, details, state, started_at AS startedAt, last_seen_at AS lastSeenAt FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL ORDER BY last_seen_at DESC')
       .all(guildId, userId) as unknown as CurrentActivityRow[];
+  }
+
+  /** Distinct activity names seen in a guild (for /activity autocomplete). */
+  activityNames(guildId: string, prefix = '', limit = 25): string[] {
+    const rows = this.db.prepare('SELECT DISTINCT name FROM activity_sessions WHERE guild_id = ? ORDER BY name ASC').all(guildId) as unknown as { name: string }[];
+    const p = prefix.trim().toLowerCase();
+    return rows
+      .map((r) => r.name)
+      .filter((n) => (p === '' ? true : n.toLowerCase().includes(p)))
+      .slice(0, limit);
+  }
+
+  /** Totals for one activity name for one user. Open sessions count up to `now`. */
+  activitySummary(guildId: string, userId: string, name: string, now = Date.now()): ActivitySummaryRow | null {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS sessions,
+                       COALESCE(SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at), 0) AS totalMs,
+                       MIN(started_at) AS firstAt,
+                       MAX(CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) AS lastAt
+                FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND name = ?`)
+      .get(now, now, guildId, userId, name) as { sessions: number; totalMs: number; firstAt: number | null; lastAt: number | null } | undefined;
+    if (!row || row.sessions === 0) return null;
+    return { name, sessions: row.sessions, totalMs: row.totalMs, avgMs: row.totalMs / row.sessions, firstAt: row.firstAt, lastAt: row.lastAt };
+  }
+
+  /** Breakdown by details/state (game mode, song, status text, ...) for one activity. */
+  activityBreakdown(guildId: string, userId: string, name: string, limit: number, now = Date.now()): ActivityBreakdownRow[] {
+    return this.db
+      .prepare(`SELECT CASE
+                         WHEN NULLIF(details, '') IS NOT NULL AND NULLIF(state, '') IS NOT NULL THEN details || ' — ' || state
+                         ELSE COALESCE(NULLIF(details, ''), NULLIF(state, ''), '—')
+                       END AS label, COUNT(*) AS sessions,
+                       SUM((CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at) AS totalMs
+                FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND name = ?
+                GROUP BY label ORDER BY totalMs DESC, label ASC LIMIT ?`)
+      .all(now, guildId, userId, name, limit) as unknown as ActivityBreakdownRow[];
+  }
+
+  /** Most recent sessions for one activity. Open sessions count up to `now`. */
+  recentActivitySessions(guildId: string, userId: string, name: string, limit: number, now = Date.now()): ActivitySessionRow[] {
+    return this.db
+      .prepare(`SELECT started_at AS startedAt, ended_at AS endedAt,
+                       (CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) - started_at AS durationMs,
+                       details, state, ended_at IS NULL AS open
+                FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND name = ?
+                ORDER BY started_at DESC LIMIT ?`)
+      .all(now, guildId, userId, name, limit) as unknown as ActivitySessionRow[];
+  }
+
+  /** Minutes per local calendar day for one activity (session attributed to the day it started). */
+  activityMinutesPerDay(guildId: string, userId: string, name: string, fromTs: number, toTs: number, timeZone: string, now = Date.now()): DayCount[] {
+    const rows = this.db
+      .prepare(`SELECT started_at AS s, (CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) AS e
+                FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND name = ? AND started_at >= ? AND started_at < ?`)
+      .all(now, guildId, userId, name, fromTs, toTs) as unknown as { s: number; e: number }[];
+    const map = new Map<string, number>();
+    for (const r of rows) {
+      const p = localParts(timeZone, new Date(r.s));
+      const key = `${p.y}-${String(p.mo).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+      map.set(key, (map.get(key) ?? 0) + Math.round((r.e - r.s) / 60_000));
+    }
+    return [...map.entries()].map(([day, count]) => ({ day, count })).sort((a, b) => a.day.localeCompare(b.day));
   }
 
   // ---- voice channel time -------------------------------------------------
