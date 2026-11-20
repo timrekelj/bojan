@@ -140,13 +140,13 @@ export function barChartLines(counts: { day: string; count: number }[], week: We
   });
 }
 
-/** Leaderboard lines, e.g. "**1.** <@123> — 1,234 messages". */
+/** Leaderboard lines, e.g. "**1.** <@123> — **1,234** (35.5%)". */
 export function leaderboardLines(rows: UserRow[], total: number): string[] {
   if (rows.length === 0) return ['No messages recorded yet.'];
   const medals = ['🥇', '🥈', '🥉'];
   return rows.map((r, i) => {
     const medal = medals[i] ?? `**${i + 1}.**`;
     const share = total > 0 ? ` (${((r.messages / total) * 100).toFixed(1)}%)` : '';
-    return `${medal} <@${r.userId}> — **${fmt(r.messages)}** messages${share}`;
+    return `${medal} <@${r.userId}> — **${fmt(r.messages)}**${share}`;
   });
 }

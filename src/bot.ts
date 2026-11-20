@@ -87,6 +87,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const given = db.topReactionsGiven(guildId, limit);
     const received = db.topReactionsReceived(guildId, limit);
     const medal = (i: number): string => ['🥇', '🥈', '🥉'][i] ?? `${i + 1}.`;
+    const share = (count: number): string => (totalReactions > 0 ? ` (${((count / totalReactions) * 100).toFixed(1)}%)` : '');
     // Embed field values are capped at 1024 chars — drop trailing rows if needed.
     const fit = (lines: string[]): string => {
       while (lines.length > 1 && lines.join('\n').length > 1000) lines.pop();
@@ -98,9 +99,9 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
         { name: `💬 Messages (${fmt(total)} total)`, value: fit(leaderboardLines(rows, total)) },
         {
           name: `😄 Reactions given (${fmt(totalReactions)} total)`,
-          value: fit(given.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**`)),
+          value: fit(given.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**${share(r.count)}`)),
         },
-        { name: '😍 Reactions received', value: fit(received.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**`)) },
+        { name: '😍 Reactions received', value: fit(received.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**${share(r.count)}`)) },
       )
       .setColor(0x5865f2)
       .setTimestamp();
