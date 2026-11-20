@@ -87,10 +87,6 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const given = db.topReactionsGiven(guildId, limit);
     const received = db.topReactionsReceived(guildId, limit);
     const medal = (i: number): string => ['🥇', '🥈', '🥉'][i] ?? `${i + 1}.`;
-    const emojiList = (userId: string): string => {
-      const top = db.topEmojiForUser(guildId, userId, 3);
-      return top.length > 0 ? top.map((e) => `${e.emojiLabel}${e.count}`).join(' ') : '';
-    };
     // Embed field values are capped at 1024 chars — drop trailing rows if needed.
     const fit = (lines: string[]): string => {
       while (lines.length > 1 && lines.join('\n').length > 1000) lines.pop();
@@ -102,7 +98,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
         { name: `💬 Messages (${fmt(total)} total)`, value: fit(leaderboardLines(rows, total)) },
         {
           name: `😄 Reactions given (${fmt(totalReactions)} total)`,
-          value: fit(given.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}** ${emojiList(r.userId)}`.trimEnd())),
+          value: fit(given.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**`)),
         },
         { name: '😍 Reactions received', value: fit(received.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**`)) },
       )
