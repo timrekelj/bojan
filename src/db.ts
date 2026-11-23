@@ -354,6 +354,22 @@ export class BotDatabase {
       .all(guildId, limit) as unknown as UserRow[];
   }
 
+  /**
+   * 1-based leaderboard position of a user (same ordering as `topUsers`: messages DESC,
+   * user_id ASC) with their message count; null when they have no messages in the range.
+   */
+  userRank(guildId: string, userId: string, fromTs?: number, toTs?: number): { rank: number; messages: number } | null {
+    const ranged = fromTs !== undefined && toTs !== undefined;
+    const where = ranged ? 'guild_id = ? AND ts >= ? AND ts < ?' : 'guild_id = ?';
+    const args: (string | number)[] = ranged ? [guildId, fromTs, toTs] : [guildId];
+    const own = this.db.prepare(`SELECT COUNT(*) AS c FROM messages WHERE ${where} AND user_id = ?`).get(...args, userId) as { c: number };
+    if (own.c === 0) return null;
+    const ahead = this.db
+      .prepare(`SELECT COUNT(*) AS c FROM (SELECT user_id FROM messages WHERE ${where} GROUP BY user_id HAVING COUNT(*) > ? OR (COUNT(*) = ? AND user_id < ?))`)
+      .get(...args, own.c, own.c, userId) as { c: number };
+    return { rank: ahead.c + 1, messages: own.c };
+  }
+
   userStats(guildId: string, userId: string): UserStats {
     const row = this.db
       .prepare('SELECT user_id AS userId, COUNT(*) AS messages, MIN(ts) AS firstTs, MAX(ts) AS lastTs FROM messages WHERE guild_id = ? AND user_id = ?')

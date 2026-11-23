@@ -14,6 +14,7 @@ import { cleanGiveawayTitle, filterGames, isBetaTitle, mergeFreeGames, normalize
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { ALL_STORES, type FreeSettings } from './freegames/types.js';
 import { needsSeed, parseFreeForm } from './freegames/form.js';
+import { leaderboard, youSection } from './web/views.js';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { announceInGuild, markGamesPosted, titleDedupeKey, isGamePosted } from './freegames/actions.js';
 import { createReplayGuard, freeStuffTimestampValid, normalizeFreeStuffProduct, verifyFreeStuffSignature } from './freegames/freestuff.js';
@@ -558,6 +559,42 @@ rmSync(dir, { recursive: true, force: true });
   check('route: no public key configured -> 404', rOff.status === 404, `status=${rOff.status}`);
   wdb.close();
   rmSync(fsDir, { recursive: true, force: true });
+}
+
+// ---- userRank + dashboard "you" highlight --------------------------------
+{
+  const rdir = mkdtempSync(join(tmpdir(), 'bojan-rank-'));
+  const rdb = new BotDatabase(join(rdir, 'rank.db'));
+  const T0 = 1_000_000;
+  // zed 3, amy 3 (tie -> amy ranks before zed), bob 5, cat 1
+  for (let i = 0; i < 5; i++) rdb.recordMessage(G, 'c1', 'bob', T0 + i, `rb${i}`);
+  for (let i = 0; i < 3; i++) rdb.recordMessage(G, 'c1', 'zed', T0 + i, `rz${i}`);
+  for (let i = 0; i < 3; i++) rdb.recordMessage(G, 'c1', 'amy', T0 + i, `ra${i}`);
+  rdb.recordMessage(G, 'c1', 'cat', T0, 'rc0');
+  rdb.recordMessage(G, 'c1', 'cat', T0 + 500, 'rc1'); // cat: 2 total, 1 in [T0+100, T0+1000)
+  const order = rdb.topUsers(G, 10).map((u) => u.userId);
+  const ranks = order.map((u) => rdb.userRank(G, u)?.rank);
+  check('userRank: consistent with topUsers order', ranks.join() === '1,2,3,4,5'.split(',').slice(0, order.length).join() && order.join() === 'bob,amy,zed,cat', `${order.join()} -> ${ranks.join()}`);
+  check('userRank: tie broken by user_id ASC', rdb.userRank(G, 'amy')?.rank === 2 && rdb.userRank(G, 'zed')?.rank === 3 && rdb.userRank(G, 'zed')?.messages === 3);
+  check('userRank: null when no messages', rdb.userRank(G, 'nobody') === null);
+  check('userRank: ranged', rdb.userRank(G, 'cat', T0 + 100, T0 + 1000)?.rank === 1 && rdb.userRank(G, 'cat', T0 + 100, T0 + 1000)?.messages === 1 && rdb.userRank(G, 'bob', T0 + 100, T0 + 1000) === null && rdb.userRank(G, 'amy', T0, T0 + 2)?.rank === 1 && rdb.userRank(G, 'bob', T0, T0 + 2)?.rank === 2);
+  rdb.close();
+  rmSync(rdir, { recursive: true, force: true });
+
+  const rows = [{ userId: 'u1', messages: 10 }, { userId: 'u2', messages: 5 }, { userId: 'u3', messages: 1 }];
+  const mem = { u1: { name: 'One <b>', avatar: null }, u2: { name: 'Two', avatar: null }, u9: { name: 'Nine', avatar: null } };
+  const inTop = leaderboard(rows, 16, mem, { userId: 'u2', rank: { rank: 2, messages: 5 } });
+  check('leaderboard: user in top is highlighted once with badge + aria-current', (inTop.match(/class="top you"/g) ?? []).length === 1 && (inTop.match(/aria-current/g) ?? []).length === 1 && inTop.includes('aria-current="true"') && inTop.includes('>You</span>') && !inTop.includes('extra'));
+  const outTop = leaderboard(rows, 100, mem, { userId: 'u9', rank: { rank: 42, messages: 3 } });
+  check('leaderboard: user outside top gets extra row with real rank', outTop.includes('you extra') && outTop.includes('<span class="rank">42</span>') && outTop.includes('>Nine<') && outTop.includes('3.0%') && (outTop.match(/<li/g) ?? []).length === 4);
+  const noYou = leaderboard(rows, 16, mem, { userId: 'u9', rank: null });
+  check('leaderboard: no extra row when user has no messages; no highlight', !noYou.includes('you') && (noYou.match(/<li/g) ?? []).length === 3 && !leaderboard(rows, 16, mem).includes('aria-current'));
+  check('leaderboard: names escaped', inTop.includes('One &lt;b&gt;') && !inTop.includes('One <b>'));
+  const emptyYou = youSection(
+    { allRank: null, weekRank: null, stats: { userId: 'u9', messages: 0, firstTs: null, lastTs: null }, reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null },
+    { total: 10, timezone: 'UTC', channelNames: {}, username: 'Nine' },
+  );
+  check('youSection: empty state', emptyYou.includes('id="h-you"') && emptyYou.includes('No tracked activity'));
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

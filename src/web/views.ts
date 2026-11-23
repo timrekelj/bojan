@@ -1,5 +1,5 @@
-import type { Settings, UserRow, EmbedLogRow, EmojiRow } from '../db.js';
-import { fmt, fmtDate, lastWeekBounds, weekRangeLabel } from '../stats.js';
+import type { Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
+import { activityTypeLabel, fmt, fmtDate, fmtDuration, lastWeekBounds, weekRangeLabel } from '../stats.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 
 export function escapeHtml(s: string): string {
@@ -78,6 +78,24 @@ const CSS = `
   .lb { list-style: none; margin: 0; padding: 0; }
   .lb li { display: grid; grid-template-columns: 20px 24px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; padding: 9px 0; border-top: 1px solid var(--border); }
   .lb li:first-child { border-top: 0; }
+  .wrap > .kpis + section { border-top: 0; padding-top: 0; }
+  #you .kpis { margin-bottom: 14px; }
+  .kpi small { display: block; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .you-cols { margin-top: 18px; }
+  .you-cols > div { min-width: 0; }
+  .mini-h { margin: 0 0 8px; font-size: 13px; font-weight: 500; color: var(--muted); }
+  .mini { list-style: none; margin: 0; padding: 0; }
+  .mini li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid var(--border); }
+  .mini li:first-child { border-top: 0; }
+  .mini .name { flex: 1; min-width: 0; }
+  .mini .val { flex: none; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .lb li.you { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); border-radius: 6px; padding-left: 10px; padding-right: 10px; }
+  .lb li.you + li, .lb li.you:first-child { border-top-color: transparent; }
+  .lb li.you .name { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .lb li.you .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .you-tag { flex: none; background: var(--accent); color: #fff; border-radius: 6px; padding: 0 6px; font-size: 11px; font-weight: 600; line-height: 18px; }
+  .lb li.extra { grid-template-columns: 32px 24px minmax(0, 1fr) auto; margin-top: 10px; border-top: 0; }
+  .lb li.extra .rank { white-space: nowrap; }
   .rank { color: var(--muted); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
   .top .name { font-weight: 600; }
   .av { width: 24px; height: 24px; border-radius: 50%; background: var(--soft); object-fit: cover; display: grid; place-items: center; font-size: 11px; font-weight: 500; color: var(--muted); }
@@ -197,7 +215,8 @@ export interface DashboardData {
   embedPage: { page: number; pages: number; total: number; pageSize: number };
   members: Record<string, { name: string; avatar: string | null }>;
   channelNames: Record<string, string>;
-  user: { username: string; avatar: string };
+  user: { id: string; username: string; avatar: string };
+  you: YouData;
   saved: boolean;
   free: {
     settings: FreeSettings;
@@ -212,24 +231,95 @@ export interface DashboardData {
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-const kpi = (value: string, label: string): string => `<div class="kpi"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`;
+const kpi = (value: string, label: string, note?: string): string =>
+  `<div class="kpi"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b>${note ? `<small>${escapeHtml(note)}</small>` : ''}</div>`;
 
 function emptyState(text: string): string {
   return `<p class="empty">${escapeHtml(text)}</p>`;
 }
 
-function leaderboard(rows: UserRow[], total: number, members: DashboardData['members']): string {
+/** The logged-in user as seen by a leaderboard: their id and real rank (null = no messages in range). */
+export interface LeaderboardYou {
+  userId: string;
+  rank: { rank: number; messages: number } | null;
+}
+
+function lbRow(rank: number, userId: string, messages: number, total: number, members: DashboardData['members'], opts: { top: boolean; you: boolean; extra: boolean }): string {
+  const m = members[userId];
+  const name = m?.name ?? userId;
+  const avatar = m?.avatar
+    ? `<img class="av" src="${escapeHtml(m.avatar)}" alt="" loading="lazy">`
+    : `<span class="av" aria-hidden="true">${escapeHtml(Array.from(name)[0]?.toUpperCase() ?? '?')}</span>`;
+  const pct = total > 0 ? Math.min(100, (messages / total) * 100) : 0;
+  const classes = [opts.top ? 'top' : '', opts.you ? 'you' : '', opts.extra ? 'extra' : ''].filter(Boolean).join(' ');
+  const nameCell = opts.you
+    ? `<span class="name" title="${escapeHtml(name)}"><span class="nm">${escapeHtml(name)}</span><span class="you-tag">You</span></span>`
+    : `<span class="name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`;
+  return `<li${classes ? ` class="${classes}"` : ''}${opts.you ? ' aria-current="true"' : ''}><span class="rank">${rank}</span>${avatar}${nameCell}<span class="num">${fmt(messages)}</span><div class="share"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><span class="pct">${total > 0 ? pct.toFixed(1) + '%' : '—'}</span></div></li>`;
+}
+
+// Pure: plain data in, HTML out. The row of `you` is highlighted; when they rank
+// below the shown rows, their real position is appended as a separated extra row.
+export function leaderboard(rows: UserRow[], total: number, members: DashboardData['members'], you?: LeaderboardYou): string {
   if (rows.length === 0) return emptyState('No messages yet.');
-  const items = rows.map((r, i) => {
-    const m = members[r.userId];
-    const name = m?.name ?? r.userId;
-    const avatar = m?.avatar
-      ? `<img class="av" src="${escapeHtml(m.avatar)}" alt="" loading="lazy">`
-      : `<span class="av" aria-hidden="true">${escapeHtml(Array.from(name)[0]?.toUpperCase() ?? '?')}</span>`;
-    const pct = total > 0 ? Math.min(100, (r.messages / total) * 100) : 0;
-    return `<li${i < 3 ? ' class="top"' : ''}><span class="rank">${i + 1}</span>${avatar}<span class="name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="num">${fmt(r.messages)}</span><div class="share"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><span class="pct">${total > 0 ? pct.toFixed(1) + '%' : '—'}</span></div></li>`;
-  });
+  const items = rows.map((r, i) => lbRow(i + 1, r.userId, r.messages, total, members, { top: i < 3, you: you?.userId === r.userId, extra: false }));
+  if (you && you.rank && !rows.some((r) => r.userId === you.userId)) {
+    items.push(lbRow(you.rank.rank, you.userId, you.rank.messages, total, members, { top: false, you: true, extra: true }));
+  }
   return `<ol class="lb">${items.join('')}</ol>`;
+}
+
+export interface YouData {
+  allRank: { rank: number; messages: number } | null;
+  weekRank: { rank: number; messages: number } | null;
+  stats: UserStats;
+  reactions: ReactionStats;
+  voice: VoiceStats;
+  activityMs: number;
+  topActivities: ActivityAggregateRow[];
+  topVoice: VoiceChannelRow[];
+  emojiGiven: EmojiRow[];
+  emojiReceived: EmojiRow[];
+  nowPlaying: CurrentActivityRow[];
+  inVoice: CurrentVoiceRow | null;
+}
+
+const miniList = (items: { label: string; value: string }[]): string =>
+  `<ul class="mini">${items.map((i) => `<li><span class="name" title="${escapeHtml(i.label)}">${escapeHtml(i.label)}</span><span class="val">${escapeHtml(i.value)}</span></li>`).join('')}</ul>`;
+
+const miniBlock = (title: string, inner: string): string => `<div><h3 class="mini-h">${escapeHtml(title)}</h3>${inner}</div>`;
+
+// Pure: "Your stats" section for the logged-in user.
+export function youSection(y: YouData, ctx: { total: number; timezone: string; channelNames: Record<string, string>; username: string }): string {
+  const hasData = y.stats.messages > 0 || y.reactions.given > 0 || y.reactions.received > 0 || y.voice.sessions > 0 || y.activityMs > 0 || y.topActivities.length > 0;
+  const head = `<div class="sec-head"><h2 id="h-you">Your stats</h2><span class="sub">${escapeHtml(ctx.username)}</span></div>`;
+  if (!hasData) return `<section id="you" aria-labelledby="h-you">${head}${emptyState('No tracked activity for you yet.')}</section>`;
+
+  const allPct = ctx.total > 0 ? Math.min(100, (y.stats.messages / ctx.total) * 100) : 0;
+  const allNote = [y.allRank ? `#${fmt(y.allRank.rank)}` : null, ctx.total > 0 && y.stats.messages > 0 ? `${allPct.toFixed(1)}% of server` : null].filter(Boolean).join(' · ');
+  const chan = (id: string): string => (ctx.channelNames[id] ? '#' + ctx.channelNames[id] : id);
+
+  const kpis = [
+    kpi(fmt(y.stats.messages), 'Messages, all time', allNote || undefined),
+    kpi(fmt(y.weekRank?.messages ?? 0), 'Messages, last week', y.weekRank ? `#${fmt(y.weekRank.rank)}` : 'not ranked'),
+    kpi(fmt(y.reactions.given), 'Reactions given', `${fmt(y.reactions.received)} received`),
+    kpi(y.voice.totalMs > 0 ? fmtDuration(y.voice.totalMs) : '—', 'Time in voice', y.voice.totalMs > 0 ? `${fmt(y.voice.sessions)} session${y.voice.sessions === 1 ? '' : 's'}` : 'no voice time'),
+    kpi(y.activityMs > 0 ? fmtDuration(y.activityMs) : '—', 'Activity time', y.topActivities[0] ? `top: ${y.topActivities[0].name}` : 'none tracked'),
+  ].join('');
+
+  const range = `<p class="muted">First message ${escapeHtml(fmtDate(y.stats.firstTs, ctx.timezone))} · last message ${escapeHtml(fmtDate(y.stats.lastTs, ctx.timezone))}</p>`;
+  const live: string[] = [];
+  for (const a of y.nowPlaying) live.push(`${activityTypeLabel(a.type)} ${a.name}`);
+  if (y.inVoice) live.push(`🔊 In voice: ${chan(y.inVoice.channelId)}`);
+  const liveHtml = live.length > 0 ? `<p class="muted">Right now: ${escapeHtml(live.join(' · '))}</p>` : '';
+
+  const blocks: string[] = [];
+  if (y.topActivities.length > 0) blocks.push(miniBlock('Top activities', miniList(y.topActivities.slice(0, 5).map((a) => ({ label: a.name, value: `${fmtDuration(a.totalMs)} · ${fmt(a.sessions)} session${a.sessions === 1 ? '' : 's'}` })))));
+  if (y.topVoice.length > 0) blocks.push(miniBlock('Top voice channels', miniList(y.topVoice.slice(0, 3).map((v) => ({ label: chan(v.channelId), value: `${fmtDuration(v.totalMs)} · ${fmt(v.sessions)} session${v.sessions === 1 ? '' : 's'}` })))));
+  if (y.emojiGiven.length > 0) blocks.push(miniBlock('Emoji you give', `<ul class="emojis">${y.emojiGiven.map(emojiChip).join('')}</ul>`));
+  if (y.emojiReceived.length > 0) blocks.push(miniBlock('Emoji you receive', `<ul class="emojis">${y.emojiReceived.map(emojiChip).join('')}</ul>`));
+
+  return `<section id="you" aria-labelledby="h-you">${head}<div class="kpis">${kpis}</div>${range}${liveHtml}${blocks.length > 0 ? `<div class="cols you-cols">${blocks.join('')}</div>` : ''}</section>`;
 }
 
 // Custom emoji labels look like <:name:id> / <a:name:id>; render them as images.
@@ -339,9 +429,10 @@ export function dashboardPage(d: DashboardData): string {
     ${kpi(fmt(d.reactions.total), 'Reactions')}
     ${kpi(fmt(b.embedsConverted), 'Embeds converted')}
   </div>
+  ${youSection(d.you, { total: d.allTime.total, timezone: s.timezone, channelNames: d.channelNames, username: d.user.username })}
   <div class="cols">
-    <section aria-labelledby="h-week"><div class="sec-head"><h2 id="h-week">Last week</h2><span class="sub">${escapeHtml(weekLabel)} · ${fmt(d.week.total)} messages</span></div>${leaderboard(d.week.rows, d.week.total, d.members)}</section>
-    <section aria-labelledby="h-all"><div class="sec-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members)}</section>
+    <section aria-labelledby="h-week"><div class="sec-head"><h2 id="h-week">Last week</h2><span class="sub">${escapeHtml(weekLabel)} · ${fmt(d.week.total)} messages</span></div>${leaderboard(d.week.rows, d.week.total, d.members, { userId: d.user.id, rank: d.you.weekRank })}</section>
+    <section aria-labelledby="h-all"><div class="sec-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members, { userId: d.user.id, rank: d.you.allRank })}</section>
   </div>
   <section aria-labelledby="h-react"><div class="sec-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>
     ${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}

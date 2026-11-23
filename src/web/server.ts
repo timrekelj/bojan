@@ -263,7 +263,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
     // Cache-only lookups: guild member -> global user -> raw id (handled in the view).
     const members: Record<string, { name: string; avatar: string | null }> = {};
-    for (const { userId } of [...weekRows, ...allRows]) {
+    for (const userId of [session.userId, ...weekRows.map((r) => r.userId), ...allRows.map((r) => r.userId)]) {
       if (members[userId]) continue;
       const m = guild?.members.cache.get(userId);
       const u = m?.user ?? client.users.cache.get(userId);
@@ -276,8 +276,28 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       if (name) channelNames[channelId] = name;
     }
 
+    const you: DashboardData['you'] = {
+      allRank: db.userRank(config.guildId, session.userId),
+      weekRank: db.userRank(config.guildId, session.userId, week.start, week.end),
+      stats: db.userStats(config.guildId, session.userId),
+      reactions: db.reactionStats(config.guildId, session.userId),
+      voice: db.voiceStats(config.guildId, session.userId),
+      activityMs: db.totalActivityMs(config.guildId, session.userId),
+      topActivities: db.topActivities(config.guildId, session.userId, 5),
+      topVoice: db.topVoiceChannels(config.guildId, session.userId, 3),
+      emojiGiven: db.topEmojiForUser(config.guildId, session.userId, 5),
+      emojiReceived: db.topEmojiReceived(config.guildId, session.userId, 5),
+      nowPlaying: db.currentActivities(config.guildId, session.userId),
+      inVoice: db.currentVoiceChannel(config.guildId, session.userId),
+    };
+    for (const channelId of [...you.topVoice.map((v) => v.channelId), ...(you.inVoice ? [you.inVoice.channelId] : [])]) {
+      const name = guild?.channels.cache.get(channelId)?.name;
+      if (name) channelNames[channelId] = name;
+    }
+
     return c.html(
       dashboardPage({
+        you,
         settings,
         channels,
         botStatus: {
@@ -297,7 +317,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: EMBEDS_PAGE_SIZE },
         members,
         channelNames,
-        user: { username: session.username, avatar: session.avatar },
+        user: { id: session.userId, username: session.username, avatar: session.avatar },
         saved: c.req.query('saved') === '1',
         free: {
           settings: freeSettings,
@@ -382,10 +402,10 @@ export function startWebServer(client: Client, db: BotDatabase): void {
   const app = createWebApp(client, db);
   serve({ fetch: app.fetch, port: config.dashboardPort, hostname: '0.0.0.0' }, (info) => {
     console.log(`[web] dashboard on http://localhost:${info.port} (register ${config.dashboardUrl}/auth/callback as the OAuth redirect)`);
-  });
-}
     console.log(
       config.freestuffPublicKey
         ? `[web] FreeStuff webhook enabled at ${config.dashboardUrl}/webhooks/freestuff`
         : '[web] FreeStuff webhook disabled (set FREESTUFF_PUBLIC_KEY to enable)',
     );
+  });
+}
