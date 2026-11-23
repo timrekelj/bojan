@@ -44,11 +44,6 @@ const commands = [
     .setDescription('All-time stats for a member (defaults to you)')
     .addUserOption((o) => o.setName('user').setDescription('Member to look up').setRequired(false)),
   new SlashCommandBuilder()
-    .setName('setstats')
-    .setDescription('Set the channel where weekly stats are posted')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addChannelOption((o) => o.setName('channel').setDescription('Channel for weekly stats').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
-  new SlashCommandBuilder()
     .setName('activity')
     .setDescription('Stats for one recorded activity/game (e.g. League of Legends, opencode)')
     .addStringOption((o) => o.setName('name').setDescription('Activity name (autocomplete from recorded ones)').setRequired(true).setAutocomplete(true))
@@ -294,18 +289,6 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     } finally {
       backfillRunning = false;
     }
-    return;
-  }
-
-  if (interaction.commandName === 'setstats') {
-    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
-      await interaction.reply({ content: 'This command is admin-only.', ephemeral: true });
-      return;
-    }
-    const channel = interaction.options.getChannel('channel', true);
-    settings.statsChannelId = channel.id;
-    db.saveSettings(settings);
-    await interaction.reply({ content: `Weekly stats will be posted in <#${channel.id}>.`, ephemeral: true });
     return;
   }
 }

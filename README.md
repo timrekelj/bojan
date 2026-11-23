@@ -68,7 +68,6 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   - `/free [store]` — games that are free right now (filtered by the server's
     free-games settings, optionally narrowed to one store), with an "Up next
     on Epic" section
-  - `/setstats #channel` — (admin) choose the weekly stats channel
   - `/backfill [channel] [days]` — (admin) seed the database from channel
     history: messages **and** their reactions (it pages through the users who
     reacted to each message, so this is slower than a plain message backfill
@@ -76,6 +75,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
     All text channels by default. Safe to re-run — messages and reactions are
     deduplicated by Discord id, so anything already counted live is not
     counted twice. Progress is posted ephemerally while it runs.
+  - All settings (including weekly stats and free games) are configured in the
+    dashboard only; there are no settings slash commands.
 - **Admin dashboard** — a Hono web server (same process) with **Discord OAuth2
   login**; only server administrators (or a configured admin role) get in.
   Shows bot status (ping, uptime, DB size), this-week and all-time
@@ -125,8 +126,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
    ```
 
 4. Open the dashboard at `http://localhost:3000` and sign in with Discord.
-   Pick the weekly-stats channel and the channels for embed conversion there
-   (or with `/setstats`).
+   Pick the weekly-stats channel and the channels for embed conversion there.
 
 ## Run on a server (Docker)
 
