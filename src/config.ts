@@ -21,6 +21,8 @@ export const config = {
   dashboardUrl: required('DASHBOARD_URL').replace(/\/+$/, ''),
   dashboardPort: Number(optional('DASHBOARD_PORT', '3000')),
   sessionSecret: required('SESSION_SECRET'),
+  /** FreeStuff webhook signing key (base64 SPKI DER). null = webhook disabled. */
+  freestuffPublicKey: process.env.FREESTUFF_PUBLIC_KEY?.trim() || null,
   databasePath: resolve(optional('DATABASE_PATH', 'data/bot.db')),
 };
 

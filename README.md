@@ -39,7 +39,11 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   [GamerPower](https://www.gamerpower.com) giveaways API (Steam, GOG, itch.io,
   Ubisoft, EA, mobile, console, ...); cards and lists that include GamerPower
   items carry a "via GamerPower" attribution, as their terms ask. A source
-  failing never breaks the other one. Filters, per guild: PC full games only by
+  failing never breaks the other one. Optionally a third source,
+  [FreeStuff](https://freestuffbot.xyz) (API v2), pushes new giveaways to a
+  signed webhook (see "FreeStuff webhook" below); those cards say "via
+  FreeStuff". The same game arriving from several sources is announced only
+  once (matched by platform, store and normalized title). Filters, per guild: PC full games only by
   default with all stores enabled; DLC/loot, beta/playtest/demo keys (detected
   by title, e.g. "… Playtest Steam Key"; `includeBeta`), mobile and console are opt-in, and
   individual stores can be switched off (store toggles apply to PC games).
@@ -49,9 +53,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   (settings table `free_settings`, "Free games" section) — there is no Discord
   command to change them. Saving a new channel or a more permissive filter
   records the matching backlog silently too. The section also shows how many
-  games are free now / already announced. `/free [store]` is a public
-  read-only listing of what is free now (matching the guild's filters) plus
-  "Up next on Epic".
+  games are free now / already announced.
 - **Slash commands**
   - `/leaderboard [limit]` — all-time boards: top message senders, top
     reaction givers (with their 3 most used emoji), most reacted-to users
@@ -64,9 +66,6 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
     count, average session, per-day bar chart for the last 7 days, breakdown
     by details/status e.g. LoL game mode, recent sessions). `name` autocompletes
     from recorded activities (games, apps, custom statuses like `opencode`)
-  - `/free [store]` — games that are free right now (filtered by the server's
-    free-games settings, optionally narrowed to one store), with an "Up next
-    on Epic" section
   - `/backfill [channel] [days]` — (admin) seed the database from channel
     history: messages **and** their reactions (it pages through the users who
     reacted to each message, so this is slower than a plain message backfill
@@ -208,11 +207,11 @@ src/
   embeds/converter.ts webhook repost + delete original (embeddo-style)
   freegames/types.ts    FreeGame / FreeSettings types, store labels
   freegames/sources.ts  Epic + GamerPower fetch, normalizers, merge, filters, cache
-  freegames/cards.ts    Components V2 announcement card and /free list
+  freegames/cards.ts    Components V2 announcement card
   freegames/poller.ts   15-minute poller that announces new free games
-  freegames/actions.ts  seedFreeGames() for the dashboard
+  freegames/actions.ts  shared per-guild announce, title dedupe, seedFreeGames()
+  freegames/freestuff.ts FreeStuff webhook signature check + product normalizer
   freegames/form.ts     dashboard form parser + "needs backlog seed" diff
-  freegames/commands.ts /free command
   web/server.ts       Hono dashboard, Discord OAuth2, signed-cookie sessions
   web/views.ts        HTML templates
   smoke.ts            offline test
@@ -226,3 +225,20 @@ src/
 - The dashboard binds `0.0.0.0` on `DASHBOARD_PORT`; put it behind a reverse
   proxy with HTTPS if you expose it publicly, and set `DASHBOARD_URL` to the
   public https URL (it is used for the OAuth redirect).
+
+## FreeStuff webhook (optional)
+
+FreeStuff's free tier has no pull access, so it is webhook-only. To enable it:
+
+1. In the FreeStuff dashboard, create a webhook pointing at
+   `DASHBOARD_URL/webhooks/freestuff` (it must be reachable from the internet)
+   and copy its public key.
+2. Set `FREESTUFF_PUBLIC_KEY` (base64) in `.env` and restart. Unset = the route
+   returns 404 and the feature is off.
+
+The route verifies the Ed25519 signature (Standard Webhooks style), rejects
+stale timestamps and replayed `Webhook-Id`s, requires compatibility date
+`2026-11-15` (otherwise 409 so FreeStuff resends in that format), and answers
+204 immediately; announcements are sent afterwards through the same filters as
+the other sources. Timed free-weekends, subscription catalogs (Prime, Game
+Pass, PlayStation), assets and flagged products are ignored.

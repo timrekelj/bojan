@@ -1,7 +1,6 @@
-import type { Client, SendableChannels } from 'discord.js';
+import type { Client } from 'discord.js';
 import type { BotDatabase } from '../db.js';
-import { announceable, seedFreeGames, seedStateKey } from './actions.js';
-import { buildFreeGameMessage } from './cards.js';
+import { announceable, announceInGuild, markGamesPosted, seedStateKey } from './actions.js';
 import { filterGames, getFreeGames } from './sources.js';
 
 const POLL_MS = 15 * 60_000;
@@ -30,28 +29,13 @@ export async function pollFreeGames(client: Client, db: BotDatabase): Promise<vo
         if (!db.getState(seedStateKey(guild.id))) {
           // First poll for this guild: record the backlog silently.
           const matching = filterGames(games, settings);
-          db.markFreePosted(guild.id, matching.map((g) => g.key));
+          markGamesPosted(db, guild.id, matching);
           if (data.epicOk && data.gamerpowerOk) db.setState(seedStateKey(guild.id), String(Date.now()));
           console.log(`[freegames] first poll for guild ${guild.id}: seeded ${matching.length} without announcing`);
           continue;
         }
 
-        const fresh = filterGames(games, settings).filter((g) => !db.isFreePosted(guild.id, g.key));
-        if (fresh.length === 0) continue;
-        const channel = await guild.channels.fetch(settings.channelId).catch(() => null);
-        if (!channel || !channel.isSendable()) {
-          console.error(`[freegames] channel ${settings.channelId} unavailable in guild ${guild.id}`);
-          continue;
-        }
-        for (const game of fresh) {
-          try {
-            await (channel as SendableChannels).send(buildFreeGameMessage(game, { pingRoleId: settings.pingRoleId }));
-            db.markFreePosted(guild.id, [game.key]);
-            console.log(`[freegames] announced "${game.title}" (${game.key}) in guild ${guild.id}`);
-          } catch (err) {
-            console.error(`[freegames] failed to announce ${game.key} in guild ${guild.id}:`, err);
-          }
-        }
+        await announceInGuild(client, db, guild.id, settings, games);
       } catch (err) {
         console.error(`[freegames] guild ${guild.id} failed:`, err);
       }

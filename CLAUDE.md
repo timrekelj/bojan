@@ -12,7 +12,7 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 - `chart.ts`: SVG-to-PNG daily chart (resvg uses system fonts; the Dockerfile installs DejaVu).
 - `scheduler.ts`: 30s tick that posts last week's stats once per week (`weekly:<guild>` state key).
 - `embeds/`: `providers.ts` (pure link detection and rewriting), `converter.ts` (webhook repost of the converted link).
-- `freegames/`: `types.ts`, `sources.ts` (fetch, normalize, filter), `cards.ts`, `commands.ts` (`/free`), `form.ts` (dashboard form parsing, `needsSeed`), `actions.ts` (`seedFreeGames`), `poller.ts` (15 min poll).
+- `freegames/`: `types.ts`, `sources.ts` (fetch, normalize, filter), `freestuff.ts` (FreeStuff webhook verify + normalizer), `cards.ts`, `form.ts` (dashboard form parsing, `needsSeed`), `actions.ts` (`announceInGuild`, `titleDedupeKey`, `seedFreeGames`), `poller.ts` (15 min poll).
 - `web/server.ts`: Hono routes, OAuth, settings POST handlers. `web/views.ts`: server-rendered HTML and CSS.
 - `smoke.ts`: offline test script.
 
@@ -25,7 +25,7 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 - `npm start` runs `dist/index.js`. Docker: `docker compose up -d --build`; the `data/` volume holds the DB.
 
 ## Rules and conventions
-- **All settings are configured only in the dashboard** (`web/server.ts` and `web/views.ts`). Never add settings slash commands. Slash commands are read-only (`/free`, leaderboard, activity, ...); the one exception is the admin-only `/backfill` action.
+- **All settings are configured only in the dashboard** (`web/server.ts` and `web/views.ts`). Never add settings slash commands. Slash commands are read-only (leaderboard, activity, ...); the one exception is the admin-only `/backfill` action.
 - Single guild: use `config.guildId`. Commands are registered per guild by PUTting the full command array in `registerCommands` (`bot.ts`); a new command must be added to the `commands` array there, or it won't register.
 - Database: go through `BotDatabase`. The schema is in the `CREATE TABLE IF NOT EXISTS` block in `db.ts`. Add columns to existing tables via a migration: check `PRAGMA table_info(<table>)`, then `ALTER TABLE ... ADD COLUMN ... DEFAULT ...` (see `free_settings.include_beta`). Also update the `CREATE TABLE` so fresh DBs match. Use the `bot_state` key/value table (`getState`/`setState`) for flags such as "already sent" or "seeded".
 - Discord messages use Components V2: build a `ContainerBuilder` and return `flags: MessageFlags.IsComponentsV2`. Text across all TextDisplays is capped at 4000 chars (`TEXT_BUDGET = 3800` in `cards.ts`; trim lines, never the headings). Use no-mention `allowedMentions` by default (`NO_MENTIONS` / `{ parse: [] }`). The only exception is the free-games ping role, `{ roles: [role] }`.
@@ -36,7 +36,8 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 - Don't add dependencies without good reason; the dependency list is deliberately tiny.
 
 ## Free games
-- Sources: Epic's promotions endpoint and GamerPower's giveaways API (`sources.ts`). **GamerPower attribution is required**: cards show `-# via GamerPower` for GamerPower-sourced games. Keep it.
+- Sources: Epic's promotions endpoint and GamerPower's giveaways API (`sources.ts`), plus the optional FreeStuff webhook (`POST /webhooks/freestuff` in `web/server.ts`, logic in `freestuff.ts`, enabled by `FREESTUFF_PUBLIC_KEY`; push-only, no REST key). **GamerPower attribution is required**: cards show `-# via GamerPower` for GamerPower-sourced games. Keep it. FreeStuff cards show `-# via FreeStuff`.
+- **Cross-source dedupe**: every announce/seed marks both `g.key` and `titleDedupeKey(g)` (`t:<platform>:<store>:<normalized title>`) in `free_posted`, and skips a game if either is posted. Use `announceInGuild` / `markGamesPosted` / `isGamePosted` from `actions.ts`, not raw `markFreePosted`. The webhook is signature-verified (Ed25519), replay-guarded, answers 204 first and announces asynchronously.
 - Everything is normalized to `FreeGame` (`types.ts`): `key` is a stable source-prefixed id (`epic:<id>` / `gp:<id>`), `kind` is `game | dlc | beta`, `platform` is `pc | mobile | console`, and `store` is one of `ALL_STORES`. Beta/playtest/demo keys are detected by `isBetaTitle`; titles are cleaned with `cleanGiveawayTitle`.
 - `mergeFreeGames` combines the sources. `FreeData` carries `epicOk` / `gamerpowerOk`. `announceable()` holds back GamerPower copies of Epic PC games while Epic is down, to avoid double posts.
 - Filters (`FreeSettings`: `stores`, `includeDlc`, `includeBeta` (default off), `includeMobile`, `includeConsole`) are applied by `matchesFilters` / `filterGames`. A new filter needs: the type, a DB column plus migration, `form.ts` parsing, `needsSeed`, the dashboard view, and the smoke tests.

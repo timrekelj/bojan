@@ -8,7 +8,8 @@ import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
 import { dashboardPage, errorPage, loginPage, type DashboardData } from './views.js';
 import { filterGames, getFreeGames } from '../freegames/sources.js';
-import { seedFreeGames, seedStateKey } from '../freegames/actions.js';
+import { announceEverywhere, seedFreeGames, seedStateKey } from '../freegames/actions.js';
+import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from '../freegames/freestuff.js';
 import { needsSeed, parseFreeForm } from '../freegames/form.js';
 
 interface Session {
@@ -130,10 +131,29 @@ async function checkGuildAdmin(accessToken: string): Promise<{ ok: boolean; user
   return { ok: false, user, reason: `member endpoint -> ${memberRes.status}, guilds endpoint -> ${guildsRes.status}` };
 }
 
-export function createWebApp(client: Client, db: BotDatabase): Hono {
+export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffPublicKey?: string | null } = {}): Hono {
   const app = new Hono();
+  const freestuffKey = opts.freestuffPublicKey === undefined ? config.freestuffPublicKey : opts.freestuffPublicKey;
+  const freestuffReplay = createReplayGuard();
 
   app.get('/health', (c) => c.json({ ok: true, uptimeSec: Math.floor((Date.now() - startedAt) / 1000) }));
+
+  // FreeStuff webhook: public (authenticated by Ed25519 signature, not the dashboard session).
+  app.post('/webhooks/freestuff', async (c) => {
+    c.header('X-Set-Compatibility-Date', FREESTUFF_COMPAT_DATE);
+    const rawBody = await c.req.text();
+    const result = handleFreeStuffWebhook(
+      { getHeader: (name) => c.req.header(name), rawBody },
+      { publicKey: freestuffKey, replay: freestuffReplay },
+    );
+    if (result.status === 401) console.warn('[web] freestuff webhook rejected: bad signature or timestamp');
+    if (result.status === 409) console.warn('[web] freestuff webhook rejected: unsupported compatibility date');
+    if (result.games.length > 0) {
+      console.log(`[freegames] freestuff webhook: ${result.games.length} announceable product(s)`);
+      void announceEverywhere(client, db, result.games).catch((err) => console.error('[freegames] freestuff announce failed:', err));
+    }
+    return c.body(null, result.status);
+  });
 
   app.get('/', (c) => c.redirect(verifySessionCookie(getCookie(c)[SID_COOKIE]) ? '/dashboard' : '/login'));
 
@@ -364,3 +384,8 @@ export function startWebServer(client: Client, db: BotDatabase): void {
     console.log(`[web] dashboard on http://localhost:${info.port} (register ${config.dashboardUrl}/auth/callback as the OAuth redirect)`);
   });
 }
+    console.log(
+      config.freestuffPublicKey
+        ? `[web] FreeStuff webhook enabled at ${config.dashboardUrl}/webhooks/freestuff`
+        : '[web] FreeStuff webhook disabled (set FREESTUFF_PUBLIC_KEY to enable)',
+    );

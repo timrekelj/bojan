@@ -1,7 +1,7 @@
 export type Store = 'epic' | 'steam' | 'gog' | 'itch' | 'ubisoft' | 'ea' | 'other';
 export type Kind = 'game' | 'dlc' | 'beta';
 export type Platform = 'pc' | 'mobile' | 'console';
-export type Source = 'epic' | 'gamerpower';
+export type Source = 'epic' | 'gamerpower' | 'freestuff';
 
 export const ALL_STORES: Store[] = ['epic', 'steam', 'gog', 'itch', 'ubisoft', 'ea', 'other'];
 
@@ -16,7 +16,7 @@ export const STORE_LABELS: Record<Store, string> = {
 };
 
 export interface FreeGame {
-  /** Stable, source-prefixed id: "epic:<id>" or "gp:<id>". */
+  /** Stable, source-prefixed id: "epic:<id>", "gp:<id>" or "fs:<id>". */
   key: string;
   title: string;
   description: string;

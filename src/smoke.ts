@@ -11,9 +11,12 @@ import { BotDatabase } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { cleanGiveawayTitle, filterGames, isBetaTitle, mergeFreeGames, normalizeEpic, normalizeGamerPower } from './freegames/sources.js';
-import { buildFreeGameMessage, buildFreeListMessage, priceLine } from './freegames/cards.js';
+import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { ALL_STORES, type FreeSettings } from './freegames/types.js';
 import { needsSeed, parseFreeForm } from './freegames/form.js';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { announceInGuild, markGamesPosted, titleDedupeKey, isGamePosted } from './freegames/actions.js';
+import { createReplayGuard, freeStuffTimestampValid, normalizeFreeStuffProduct, verifyFreeStuffSignature } from './freegames/freestuff.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'bojan-smoke-'));
@@ -373,10 +376,6 @@ rmSync(dir, { recursive: true, force: true });
     card.flags === MessageFlags.IsComponentsV2 && cardJson.includes('<@&123>') && cardJson.includes('via GamerPower') && cardJson.includes('Open on Steam') && JSON.stringify(card.allowedMentions) === '{"roles":["123"]}');
   const plain = buildFreeGameMessage(epic.current[0]!);
   check('announcement card: no ping → no mentions, no attribution', !JSON.stringify(plain.components.map((c) => c.toJSON())).includes('GamerPower') && JSON.stringify(plain.allowedMentions) === '{"parse":[]}');
-  const many = Array.from({ length: 80 }, (_, i) => ({ ...cool, key: `gp:m${i}`, title: `Long title number ${i} `.repeat(3) }));
-  const list = buildFreeListMessage({ current: many, upcoming: epic.upcoming, storeFilter: null, showUpcoming: true });
-  const listText = list.components.map((c) => c.toJSON()).flatMap((c) => c.components).map((c) => ('content' in c ? String(c.content) : '')).join('');
-  check('free list stays within 4000-char text budget', listText.length <= 4000 && listText.includes('Up next on Epic'), `len ${listText.length}`);
 
   const fdir = mkdtempSync(join(tmpdir(), 'bojan-free-'));
   const fdb = new BotDatabase(join(fdir, 'free.db'));
@@ -411,7 +410,7 @@ rmSync(dir, { recursive: true, force: true });
   const betaKeys = (f: FreeSettings): string => filterGames(betaGp, f).map((g) => g.key).join(',');
   check('beta: excluded by default', betaKeys(defaults) === 'gp:105,gp:106,gp:107', betaKeys(defaults));
   check('beta: includeBeta admits them (platform rules still apply)', betaKeys({ ...defaults, includeBeta: true }).split(',').length === 8 && betaKeys({ ...defaults, includeBeta: true, stores: ['epic'] }) === '');
-  check('beta: label on card/list', buildFreeListMessage({ current: [bk.get('gp:101')!], upcoming: [], storeFilter: null, showUpcoming: false }).components.length > 0 && JSON.stringify(buildFreeGameMessage(bk.get('gp:101')!).components.map((c) => c.toJSON())).includes('Beta / playtest'));
+  check('beta: label on card', JSON.stringify(buildFreeGameMessage(bk.get('gp:101')!).components.map((c) => c.toJSON())).includes('Beta / playtest'));
 
   // migration: free_settings created before include_beta existed
   const mdir = mkdtempSync(join(tmpdir(), 'bojan-freemig-'));
@@ -447,6 +446,118 @@ rmSync(dir, { recursive: true, force: true });
   check('seed: store removed -> no', !needsSeed({ ...base, stores: ['epic', 'gog'] }, base));
   check('seed: include flag enabled -> yes', needsSeed(base, { ...base, includeBeta: true }) && needsSeed(base, { ...base, includeMobile: true }) && needsSeed(base, { ...base, includeConsole: true }) && needsSeed(base, { ...base, includeDlc: true }));
   check('seed: include flag disabled -> no', !needsSeed({ ...base, includeDlc: true }, base));
+}
+
+// ---- FreeStuff webhook ------------------------------------------------------
+{
+  const fsDir = mkdtempSync(join(tmpdir(), 'bojan-smoke-fs-'));
+  const kp = generateKeyPairSync('ed25519');
+  const pub = (kp.publicKey.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64');
+  const other = (generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64');
+  const mk = (id: string, ts: string, body: string): string => `v1a,${sign(null, Buffer.from(`${id}.${ts}.${body}`), kp.privateKey).toString('base64')}`;
+  const tsNow = String(Math.floor(Date.now() / 1000));
+  const tsCustom = String(Math.floor((Date.now() - 1735689600000) / 1000));
+  const body = '{"type":"fsb:event:ping","timestamp":1,"data":{}}';
+  const v = (o: Partial<Parameters<typeof verifyFreeStuffSignature>[0]> = {}): boolean =>
+    verifyFreeStuffSignature({ publicKey: pub, id: 'w1', timestamp: tsNow, signature: mk('w1', tsNow, body), rawBody: body, ...o });
+  check('freestuff sig: valid', v());
+  check('freestuff sig: valid among several entries', v({ signature: `v1,abc v1a,@@@ ${mk('w1', tsNow, body)}` }));
+  check('freestuff sig: tampered body', !v({ rawBody: body + ' ' }));
+  check('freestuff sig: wrong key', !v({ publicKey: other }));
+  check('freestuff sig: garbage key', !v({ publicKey: 'not-a-key' }));
+  check('freestuff sig: missing header', !v({ signature: undefined }) && !v({ id: undefined }) && !v({ timestamp: undefined }));
+  check('freestuff sig: garbled header', !v({ signature: 'garbage' }) && !v({ signature: 'v1a,' }) && !v({ signature: 'v1,' + mk('w1', tsNow, body).slice(4) }));
+  const stale = String(Math.floor(Date.now() / 1000) - 3600);
+  check('freestuff sig: stale timestamp rejected', !v({ timestamp: stale, signature: mk('w1', stale, body) }));
+  check('freestuff ts: unix seconds accepted', freeStuffTimestampValid(tsNow));
+  check('freestuff ts: custom-epoch seconds accepted', freeStuffTimestampValid(tsCustom) && v({ timestamp: tsCustom, signature: mk('w1', tsCustom, body) }));
+  check('freestuff ts: garbage rejected', !freeStuffTimestampValid('abc') && !freeStuffTimestampValid('') && !freeStuffTimestampValid(undefined));
+  const rg = createReplayGuard(1000);
+  check('freestuff replay guard', !rg.seen('a', 0) && rg.seen('a', 500) && !rg.seen('a', 2000));
+
+  const prod = (o: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 1, title: 'Cool Game', kind: 'game', type: 'keep', store: 'epic', flags: 0,
+    prices: [{ currency: 'EUR', oldValue: 599, newValue: 0 }, { currency: 'USD', oldValue: 499, newValue: 0 }],
+    images: [{ url: 'https://i/sq.png', flags: 0, priority: 9 }, { url: 'https://i/wide.png', flags: 2, priority: 1 }],
+    description: [{ lang: 'de', text: 'Hallo', priority: 9 }, { lang: 'en-US', text: 'Hello', priority: 1 }],
+    urls: [{ url: 'https://s/low', priority: 1 }, { url: 'https://s/high', priority: 5 }],
+    until: 1800000000000, ...o,
+  });
+  const g1 = normalizeFreeStuffProduct(prod());
+  check('freestuff normalize: keep game', !!g1 && g1.key === 'fs:1' && g1.source === 'freestuff' && g1.kind === 'game' && g1.store === 'epic' && g1.platform === 'pc' && g1.url === 'https://s/high' && g1.imageUrl === 'https://i/wide.png' && g1.worth === '$4.99' && g1.endsAt === 1800000000000 && g1.description === 'Hello', JSON.stringify(g1));
+  check('freestuff normalize: EUR worth when no USD', normalizeFreeStuffProduct(prod({ prices: [{ currency: 'EUR', oldValue: 599 }] }))?.worth === '€5.99');
+  check('freestuff normalize: no until / no wide image / no prices', (() => { const g = normalizeFreeStuffProduct(prod({ until: 0, images: [{ url: 'x', flags: 0 }], prices: [] })); return !!g && g.endsAt === null && g.imageUrl === null && g.worth === null; })());
+  check('freestuff normalize: dlc/loot/storeitem -> dlc', ['dlc', 'loot', 'storeitem'].every((k) => normalizeFreeStuffProduct(prod({ kind: k }))?.kind === 'dlc'));
+  check('freestuff normalize: bundle -> game, playtest -> beta', normalizeFreeStuffProduct(prod({ kind: 'bundle' }))?.kind === 'game' && normalizeFreeStuffProduct(prod({ title: 'X Playtest Steam Key' }))?.kind === 'beta');
+  check('freestuff normalize: mobile', normalizeFreeStuffProduct(prod({ type: 'mobile', store: 'gplay' }))?.platform === 'mobile' && normalizeFreeStuffProduct(prod({ urls: [{ url: 'u', platforms: ['ios'] }] }))?.platform === 'mobile');
+  check('freestuff normalize: console', normalizeFreeStuffProduct(prod({ store: 'playstation' }))?.platform === 'console' && normalizeFreeStuffProduct(prod({ urls: [{ url: 'u', platforms: ['xbox'] }] }))?.platform === 'console');
+  check('freestuff normalize: store mapping', normalizeFreeStuffProduct(prod({ store: 'ubi' }))?.store === 'ubisoft' && normalizeFreeStuffProduct(prod({ store: 'origin' }))?.store === 'ea' && normalizeFreeStuffProduct(prod({ store: 'humble' }))?.store === 'other' && normalizeFreeStuffProduct(prod({ store: 'gog' }))?.store === 'gog');
+  check('freestuff normalize: skips timed/prime/gamepass/assets/unknown type', ['timed', 'prime', 'gamepass', 'playstation', 'assets', 'news', 'unknown', 'debug', 'zzz'].every((t) => normalizeFreeStuffProduct(prod({ type: t })) === null));
+  check('freestuff normalize: skips TRASH / FIRSTPARTY flags', normalizeFreeStuffProduct(prod({ flags: 1 })) === null && normalizeFreeStuffProduct(prod({ flags: 16 })) === null);
+  check('freestuff normalize: skips unknown kind, missing url/title/id, junk', normalizeFreeStuffProduct(prod({ kind: 'software' })) === null && normalizeFreeStuffProduct(prod({ urls: [] })) === null && normalizeFreeStuffProduct(prod({ urls: undefined })) === null && normalizeFreeStuffProduct(prod({ title: '' })) === null && normalizeFreeStuffProduct(prod({ id: undefined })) === null && normalizeFreeStuffProduct(null) === null && normalizeFreeStuffProduct('x') === null);
+  const card = JSON.stringify(buildFreeGameMessage(g1!).components.map((c) => c.toJSON()));
+  check('freestuff card: via FreeStuff attribution (and none for epic)', card.includes('via FreeStuff') && !card.includes('via GamerPower') && !JSON.stringify(buildFreeGameMessage({ ...g1!, source: 'epic' }).components.map((c) => c.toJSON())).includes('via FreeStuff'));
+
+  // cross-source dedupe
+  const epicCopy = { ...g1!, key: 'epic:x', source: 'epic' as const, title: 'COOL game!' };
+  check('titleDedupeKey: same game across sources', titleDedupeKey(epicCopy) === titleDedupeKey(g1!) && titleDedupeKey(g1!) === 't:pc:epic:coolgame');
+  check('titleDedupeKey: differs by store/platform/title', titleDedupeKey({ ...g1!, store: 'steam' }) !== titleDedupeKey(g1!) && titleDedupeKey({ ...g1!, platform: 'mobile' }) !== titleDedupeKey(g1!) && titleDedupeKey({ ...g1!, title: 'Other' }) !== titleDedupeKey(g1!));
+  const ddb = new BotDatabase(join(fsDir, 'dedupe.db'));
+  markGamesPosted(ddb, 'gd', [epicCopy]);
+  check('dedupe: posted via epic -> freestuff copy counts as posted', isGamePosted(ddb, 'gd', g1!) && !isGamePosted(ddb, 'gd', { ...g1!, title: 'Another' }));
+
+  // announce helper with fake discord objects
+  const sent: unknown[] = [];
+  const fakeClient = {
+    guilds: { cache: new Map([['gd', { channels: { fetch: async () => ({ isSendable: () => true, send: async (m: unknown) => { sent.push(m); } }) } }]]) },
+  } as never;
+  const fs0: FreeSettings = { guildId: 'gd', channelId: 'ch', pingRoleId: null, stores: [...ALL_STORES], includeDlc: false, includeBeta: false, includeMobile: false, includeConsole: false };
+  const fresh2 = { ...g1!, key: 'fs:2', title: 'Brand New' };
+  const n = await announceInGuild(fakeClient, ddb, 'gd', fs0, [g1!, fresh2, { ...fresh2, key: 'gp:9', source: 'gamerpower' }]);
+  check('announceInGuild: skips title-posted game, sends new once, marks both keys', n === 1 && sent.length === 1 && ddb.isFreePosted('gd', 'fs:2') && ddb.isFreePosted('gd', titleDedupeKey(fresh2)), `n=${n}`);
+  check('announceInGuild: second run sends nothing', (await announceInGuild(fakeClient, ddb, 'gd', fs0, [fresh2])) === 0 && sent.length === 1);
+  ddb.close();
+
+  // real HTTP route through the Hono app
+  process.env.DISCORD_TOKEN ??= 't'; process.env.CLIENT_ID ??= 'c'; process.env.CLIENT_SECRET ??= 's'; process.env.GUILD_ID ??= 'gd';
+  process.env.DASHBOARD_URL ??= 'http://localhost:3000'; process.env.SESSION_SECRET ??= 'x';
+  const { createWebApp } = await import('./web/server.js');
+  const wdb = new BotDatabase(join(fsDir, 'web.db'));
+  wdb.saveFreeSettings(fs0);
+  const wsent: unknown[] = [];
+  const wClient = { guilds: { cache: new Map([['gd', { id: 'gd', channels: { fetch: async () => ({ isSendable: () => true, send: async (m: unknown) => { wsent.push(m); } }) } }]]) } } as never;
+  const app = createWebApp(wClient, wdb, { freestuffPublicKey: pub });
+  const post = (b: string, id: string, o: { ts?: string; sig?: string; compat?: string | null } = {}) => {
+    const ts = o.ts ?? tsNow;
+    const headers: Record<string, string> = { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': o.sig ?? mk(id, ts, b), 'content-type': 'application/json' };
+    if (o.compat !== null) headers['x-compatibility-date'] = o.compat ?? '2026-11-15';
+    return app.request('/webhooks/freestuff', { method: 'POST', body: b, headers });
+  };
+  const rPing = await post(body, 'p1');
+  check('route: valid ping -> 204, empty body, X-Set-Compatibility-Date', rPing.status === 204 && (await rPing.text()) === '' && rPing.headers.get('x-set-compatibility-date') === '2026-11-15', `status=${rPing.status}`);
+  const rBad = await post(body, 'p2', { sig: mk('p2', tsNow, body + 'x') });
+  check('route: bad signature -> 401', rBad.status === 401, `status=${rBad.status}`);
+  check('route: missing signature -> 401', (await app.request('/webhooks/freestuff', { method: 'POST', body })).status === 401);
+  const rCompat = await post(body, 'p3', { compat: '2025-01-01' });
+  check('route: wrong compatibility date -> 409 with header', rCompat.status === 409 && rCompat.headers.get('x-set-compatibility-date') === '2026-11-15', `status=${rCompat.status}`);
+  check('route: missing compatibility date -> 409', (await post(body, 'p3b', { compat: null })).status === 409);
+  const annBody = JSON.stringify({ type: 'fsb:event:announcement_created', timestamp: 1, data: { resolvedProducts: [prod({ id: 77, title: 'Webhook Game' }), prod({ id: 78, type: 'timed' })] } });
+  const rAnn = await post(annBody, 'a1');
+  await new Promise((r) => setTimeout(r, 100));
+  check('route: announcement -> 204 then announced once (timed skipped)', rAnn.status === 204 && wsent.length === 1 && wdb.isFreePosted('gd', 'fs:77'), `status=${rAnn.status} sent=${wsent.length}`);
+  const rRep = await post(annBody, 'a1');
+  await new Promise((r) => setTimeout(r, 100));
+  check('route: replayed Webhook-Id -> 204, nothing new sent', rRep.status === 204 && wsent.length === 1);
+  const rAnn2 = await post(annBody, 'a2');
+  await new Promise((r) => setTimeout(r, 100));
+  check('route: resend with new id -> deduped by key, still one message', rAnn2.status === 204 && wsent.length === 1);
+  const upd = JSON.stringify({ type: 'fsb:event:product_updated', timestamp: 1, data: {} });
+  check('route: product_updated / unknown / invalid JSON -> 204', (await post(upd, 'u1')).status === 204 && (await post('{"type":"x"}', 'u2')).status === 204 && (await post('not json', 'u3')).status === 204);
+  const off = createWebApp(wClient, wdb, { freestuffPublicKey: null });
+  const rOff = await off.request('/webhooks/freestuff', { method: 'POST', body, headers: { 'webhook-id': 'p1', 'webhook-timestamp': tsNow, 'webhook-signature': mk('p1', tsNow, body), 'x-compatibility-date': '2026-11-15' } });
+  check('route: no public key configured -> 404', rOff.status === 404, `status=${rOff.status}`);
+  wdb.close();
+  rmSync(fsDir, { recursive: true, force: true });
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);
