@@ -1,4 +1,4 @@
-import type { Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
+import type { LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, lastWeekBounds, weekRangeLabel } from '../stats.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 
@@ -153,6 +153,11 @@ const CSS = `
   td.url a { display: block; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
   td.url a:hover { text-decoration: underline; }
   .badge { display: inline-block; background: var(--soft); color: var(--text-2); border-radius: 6px; padding: 1px 8px; font-size: 12px; font-weight: 500; }
+  .badge.warn { background: rgba(245,158,11,.18); color: #f59e0b; }
+  .badge.error { background: rgba(239,68,68,.18); color: #ef4444; }
+  .logfilters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+  td.logmsg { white-space: normal; width: 100%; }
+  td.logmsg pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
   .center { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
   .auth { width: 100%; max-width: 380px; text-align: center; padding: 36px 28px; background: var(--raised); border-radius: 12px; box-shadow: var(--float); }
   .auth h1 { margin: 18px 0 8px; font-size: 24px; letter-spacing: -.02em; }
@@ -188,7 +193,7 @@ function page(title: string, body: string): string {
 }
 
 function layout(title: string, body: string, user: { username: string; avatar: string }): string {
-  const header = `<header class="topbar"><div class="topbar-in"><div class="brand">${mark(3)}Bojan</div><div class="me"><img src="${escapeHtml(user.avatar)}" alt=""><span>${escapeHtml(user.username)}</span><a href="/logout">Log out</a></div></div></header>`;
+  const header = `<header class="topbar"><div class="topbar-in"><div class="brand">${mark(3)}Bojan</div><div class="me"><img src="${escapeHtml(user.avatar)}" alt=""><span>${escapeHtml(user.username)}</span><a href="/dashboard/logs">Logs</a><a href="/logout">Log out</a></div></div></header>`;
   return page(title, `${header}<main class="wrap">${body}</main>`);
 }
 
@@ -207,7 +212,7 @@ export function errorPage(message: string): string {
 export interface DashboardData {
   settings: Settings;
   channels: { id: string; name: string }[];
-  botStatus: { ping: number; uptimeSec: number; guilds: number; totalMessages: number; dbBytes: number; lastWeeklySent: string | null; embedsConverted: number };
+  botStatus: { ping: number; uptimeSec: number; guilds: number; totalMessages: number; dbBytes: number; lastWeeklySent: string | null; embedsConverted: number; errors24h: number };
   today: number;
   week: { bounds: ReturnType<typeof lastWeekBounds>; total: number; rows: UserRow[] };
   allTime: { total: number; rows: UserRow[] };
@@ -219,6 +224,7 @@ export interface DashboardData {
   user: { id: string; username: string; avatar: string };
   you: YouData;
   saved: boolean;
+  weeklyFlash: { kind: 'sent' } | { kind: 'error'; reason: string } | null;
   free: {
     settings: FreeSettings;
     roles: { id: string; name: string }[];
@@ -393,7 +399,50 @@ function uptime(sec: number): string {
 
 // Strips the one-shot flash params so a refresh doesn't show the toast again.
 const CLEAR_FLASH_SCRIPT =
-  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('weekly');u.searchParams.delete('reason');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+
+export interface LogsPageData {
+  rows: LogRow[];
+  tags: string[];
+  level: 'all' | 'warn' | 'error';
+  tag: string | null;
+  timezone: string;
+  user: { username: string; avatar: string };
+}
+
+export function logsPage(d: LogsPageData): string {
+  const href = (level: string, tag: string | null): string => {
+    const q = new URLSearchParams();
+    if (level !== 'all') q.set('level', level);
+    if (tag) q.set('tag', tag);
+    const qs = q.toString();
+    return `/dashboard/logs${qs ? '?' + qs : ''}`;
+  };
+  const levelLinks = (['all', 'warn', 'error'] as const)
+    .map((l) => {
+      const label = l === 'all' ? 'All' : l === 'warn' ? 'Warnings + errors' : 'Errors';
+      return `<a class="pager-btn"${d.level === l ? ' aria-current="page"' : ''} href="${escapeHtml(href(l, d.tag))}">${label}</a>`;
+    })
+    .join('');
+  const tagOptions = [...new Set([...(d.tag ? [d.tag] : []), ...d.tags])]
+    .sort()
+    .map((t) => `<option value="${escapeHtml(t)}"${d.tag === t ? ' selected' : ''}>[${escapeHtml(t)}]</option>`)
+    .join('');
+  const tagForm = `<form method="get" action="/dashboard/logs" class="logfilters">${d.level !== 'all' ? `<input type="hidden" name="level" value="${escapeHtml(d.level)}">` : ''}<select name="tag" aria-label="Tag" onchange="this.form.submit()"><option value="">All tags</option>${tagOptions}</select><noscript><button class="btn ghost" type="submit">Apply</button></noscript></form>`;
+  const rows = d.rows.map(
+    (r) =>
+      `<tr><td>${escapeHtml(fmtDate(r.ts, d.timezone))}</td><td><span class="badge ${r.level === 'info' ? '' : escapeHtml(r.level)}">${escapeHtml(r.level)}</span></td><td>${r.tag ? escapeHtml(r.tag) : '—'}</td><td class="logmsg"><pre>${escapeHtml(r.message)}</pre></td></tr>`,
+  );
+  const table =
+    rows.length === 0
+      ? emptyState('No log entries match.')
+      : `<div class="scroll"><table><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Tag</th><th scope="col">Message</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+  const body = `<div class="head"><h1 class="title">Logs</h1><p class="lede"><a href="/dashboard">← Back to dashboard</a> · newest ${d.rows.length} entries</p></div>
+  <section aria-labelledby="h-logs"><div class="sec-head"><h2 id="h-logs">Console output</h2></div>
+    <div class="logfilters">${levelLinks}</div>${tagForm}${table}
+  </section>`;
+  return layout('Logs', body, d.user);
+}
 
 export function dashboardPage(d: DashboardData): string {
   const s = d.settings;
@@ -414,12 +463,15 @@ export function dashboardPage(d: DashboardData): string {
     `${(b.dbBytes / 1024 / 1024).toFixed(2)} MB`,
     `weekly stats last sent ${b.lastWeeklySent ?? 'never'}`,
   ].join(' · ');
+  const errorsNote = `${b.errors24h} error${b.errors24h === 1 ? '' : 's'} in 24h`;
 
   const body = `
   ${d.saved ? '<div class="flash" role="status">Settings saved.</div>' : ''}
+  ${d.weeklyFlash?.kind === 'sent' ? '<div class="flash" role="status">Weekly stats sent.</div>' : ''}
+  ${d.weeklyFlash?.kind === 'error' ? `<div class="flash" role="alert">Couldn't send weekly stats: ${escapeHtml(d.weeklyFlash.reason || 'unknown error')}</div>` : ''}
   <div class="head">
     <h1 class="title">Server overview</h1>
-    <p class="lede" aria-label="Bot health"><span class="dot${b.ping >= 0 ? ' ok' : ''}"></span>${escapeHtml(status)}</p>
+    <p class="lede" aria-label="Bot health"><span class="dot${b.ping >= 0 ? ' ok' : ''}"></span>${escapeHtml(status)} · <a href="/dashboard/logs?level=error">${escapeHtml(errorsNote)}</a></p>
   </div>
   <div class="kpis">
     ${kpi(fmt(d.today), 'Messages today')}
@@ -450,6 +502,8 @@ export function dashboardPage(d: DashboardData): string {
         </div>
         <div class="field"><label for="timezone">Timezone</label><span class="help">IANA name, e.g. Europe/Ljubljana. Day and hour use this.</span>
           <input type="text" id="timezone" name="timezone" value="${escapeHtml(s.timezone)}" autocomplete="off" spellcheck="false"></div>
+        <div class="field"><label>Test</label><span class="help">Posts last week's stats to the channel immediately. Doesn't affect the schedule. Uses the saved channel.</span>
+          <div><button type="submit" class="btn ghost" form="send-now-form" onclick="return confirm('Post last week\\'s stats to the channel now?')">Send now</button></div></div>
       </fieldset>
       <fieldset>
         <legend>Link embeds</legend>
@@ -458,11 +512,12 @@ export function dashboardPage(d: DashboardData): string {
       </fieldset>
       <div class="actions"><button type="submit">Save settings</button></div>
     </form>
+    <form id="send-now-form" method="post" action="/weekly/send-now"></form>
   </section>
   ${freeSection(d)}
   <section aria-labelledby="h-embeds"><div class="sec-head"><h2 id="h-embeds">Embed conversions</h2></div>
     ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}
   </section>
-  ${d.saved || d.free.flash ? CLEAR_FLASH_SCRIPT : ''}`;
+  ${d.saved || d.weeklyFlash || d.free.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout('Dashboard', body, d.user);
 }

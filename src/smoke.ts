@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { MessageFlags } from 'discord.js';
 import { renderDailyChart } from './chart.js';
 import { buildWeeklyStatsMessage } from './weekly.js';
+import { isWeeklyDue } from './scheduler.js';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
@@ -219,6 +220,20 @@ check('zonedToUtcMs', new Date(zonedToUtcMs('Europe/Ljubljana', 2026, 11, 9)).to
 const summer = zonedToUtcMs('Europe/Ljubljana', 2026, 7, 1);
 check('zonedToUtcMs DST', new Date(summer).toISOString() === '2026-06-30T22:00:00.000Z', new Date(summer).toISOString());
 check('currentWeekBounds', currentWeekBounds('UTC', new Date('2026-11-18T12:00:00Z')).key === '2026-11-16');
+// isWeeklyDue: Monday 10:00 Ljubljana (UTC+1 in Nov) == 09:00 UTC; weeklyDay 1 = Monday
+{
+  const tz = 'Europe/Ljubljana';
+  const d = (s: string): Date => new Date(s);
+  check('isWeeklyDue before time', !isWeeklyDue(tz, 1, 10, d('2026-11-23T08:59:00Z'), '2026-11-16'));
+  check('isWeeklyDue at hour', isWeeklyDue(tz, 1, 10, d('2026-11-23T09:00:00Z'), '2026-11-16'));
+  check('isWeeklyDue catch-up Wednesday', isWeeklyDue(tz, 1, 10, d('2026-11-25T15:00:00Z'), '2026-11-16'));
+  check('isWeeklyDue already sent', !isWeeklyDue(tz, 1, 10, d('2026-11-25T15:00:00Z'), '2026-11-23'));
+  check('isWeeklyDue never sent', isWeeklyDue(tz, 1, 10, d('2026-11-23T09:30:00Z'), null));
+  // Sunday schedule: last day of the Monday-based week (2026-11-29 10:00 local == 09:00 UTC)
+  check('isWeeklyDue Sunday before', !isWeeklyDue(tz, 0, 10, d('2026-11-29T08:59:00Z'), '2026-11-16'));
+  check('isWeeklyDue Sunday mid-week not due', !isWeeklyDue(tz, 0, 10, d('2026-11-25T15:00:00Z'), '2026-11-16'));
+  check('isWeeklyDue Sunday at hour', isWeeklyDue(tz, 0, 10, d('2026-11-29T09:00:00Z'), '2026-11-16'));
+}
 const sod = new Date(startOfDay('Europe/Ljubljana', new Date('2026-11-23T10:30:00Z'))).toISOString();
 check('startOfDay Ljubljana', sod === '2026-11-22T23:00:00.000Z', sod);
 

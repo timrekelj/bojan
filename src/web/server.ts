@@ -6,7 +6,8 @@ import { ChannelType, type Client } from 'discord.js';
 import type { BotDatabase, Settings } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { dashboardPage, errorPage, loginPage, type DashboardData } from './views.js';
+import { dashboardPage, errorPage, loginPage, logsPage, type DashboardData } from './views.js';
+import { postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
 import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from '../freegames/freestuff.js';
 import { parseFreeForm } from '../freegames/form.js';
@@ -296,6 +297,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
           dbBytes: db.sizeBytes,
           lastWeeklySent: db.getState(`weekly:${config.guildId}`),
           embedsConverted: embedTotal,
+          errors24h: db.countLogErrorsSince(Date.now() - 24 * 3600 * 1000),
         },
         today: db.countMessages(config.guildId, startOfDay(settings.timezone)),
         week: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
@@ -307,6 +309,12 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         channelNames,
         user: { id: session.userId, username: session.username, avatar: session.avatar },
         saved: c.req.query('saved') === '1',
+        weeklyFlash:
+          c.req.query('weekly') === 'sent'
+            ? { kind: 'sent' }
+            : c.req.query('weekly') === 'error'
+              ? { kind: 'error', reason: (c.req.query('reason') ?? '').slice(0, 200) }
+              : null,
         free: {
           settings: freeSettings,
           roles: listRoles(),
@@ -314,6 +322,24 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
           postedCount: db.countFreePosted(config.guildId),
           flash: freeFlash,
         },
+      }),
+    );
+  });
+
+  app.get('/dashboard/logs', requireAdmin, (c) => {
+    const session = c.get('session');
+    const settings = db.getSettings(config.guildId);
+    const levelQ = c.req.query('level');
+    const level = levelQ === 'warn' || levelQ === 'error' ? levelQ : 'all';
+    const tag = c.req.query('tag')?.trim().slice(0, 64) || null;
+    return c.html(
+      logsPage({
+        rows: db.recentLogs({ limit: 300, level, tag }),
+        tags: db.logTags(),
+        level,
+        tag,
+        timezone: settings.timezone,
+        user: { username: session.username, avatar: session.avatar },
       }),
     );
   });
@@ -357,6 +383,24 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     db.saveSettings(next);
     console.log(`[web] settings updated by ${c.get('session').username}`);
     return c.redirect('/dashboard?saved=1');
+  });
+
+  // Manual test send. Deliberately does not touch the `weekly:<guild>` state key,
+  // so it never suppresses the scheduled post. Same auth/CSRF model as /settings
+  // (admin session cookie, SameSite=Lax).
+  app.post('/weekly/send-now', requireAdmin, async (c) => {
+    const guild = client.guilds.cache.get(config.guildId);
+    if (!guild) {
+      console.error(`[web] weekly stats send-now failed: guild ${config.guildId} not in cache`);
+      return c.redirect(`/dashboard?weekly=error&reason=${encodeURIComponent('guild not available')}`);
+    }
+    const result = await postWeeklyStats(guild, db, db.getSettings(config.guildId));
+    if (!result.ok) {
+      console.error(`[web] weekly stats send-now failed: ${result.reason} (guild ${config.guildId})`);
+      return c.redirect(`/dashboard?weekly=error&reason=${encodeURIComponent(result.reason.slice(0, 200))}`);
+    }
+    console.log(`[web] weekly stats sent manually by ${c.get('session').username} to channel ${result.channelId} (guild ${config.guildId})`);
+    return c.redirect('/dashboard?weekly=sent');
   });
 
   app.get('/api/stats.json', requireAdmin, (c) => {

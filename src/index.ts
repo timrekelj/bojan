@@ -1,11 +1,13 @@
 import { BotDatabase } from './db.js';
 import { config } from './config.js';
+import { installLogCapture } from './logs.js';
 import { createClient, registerEvents } from './bot.js';
 import { startWeeklyScheduler } from './scheduler.js';
 import { startWebServer } from './web/server.js';
 
 async function main(): Promise<void> {
   const db = new BotDatabase(config.databasePath);
+  installLogCapture(db);
   console.log(`[db] sqlite database at ${config.databasePath}`);
 
   const client = createClient();

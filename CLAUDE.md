@@ -44,4 +44,4 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 
 ## Discord requirements
 - Gateway intents (`bot.ts`): regular intents Guilds, GuildMessages, GuildMessageReactions, GuildVoiceStates; privileged intents MessageContent, GuildMembers, GuildPresences. The privileged ones must be enabled in the developer portal.
-- Bot permissions: View Channels, Send Messages, Read Message History, Embed Links, Manage Messages (embed converter deletes or suppresses the original), Manage Webhooks (embed converter reposts). OAuth scopes `bot` + `applications.commands`. The dashboard allows Administrators or `ADMIN_ROLE_ID`. Setup details are in `README.md`; env vars are in `.env.example`.
+- Bot permissions: View Channels, Send Messages, Read Message History, Embed Links, Attach Files (weekly chart PNG), Manage Messages (embed converter deletes or suppresses the original), Manage Webhooks (embed converter reposts). OAuth scopes `bot` + `applications.commands`. The dashboard allows Administrators or `ADMIN_ROLE_ID`. Setup details are in `README.md`; env vars are in `.env.example`.

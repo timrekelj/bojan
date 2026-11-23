@@ -211,6 +211,15 @@ CREATE TABLE IF NOT EXISTS bot_state (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  level TEXT NOT NULL,
+  tag TEXT,
+  message TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs (ts);
+
 CREATE TABLE IF NOT EXISTS activity_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
@@ -239,6 +248,16 @@ CREATE TABLE IF NOT EXISTS voice_sessions (
 CREATE INDEX IF NOT EXISTS idx_voice_guild_user ON voice_sessions (guild_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_voice_open ON voice_sessions (guild_id, user_id, ended_at);
 `;
+
+export type LogLevel = 'info' | 'warn' | 'error';
+export interface LogRow {
+  id: number;
+  ts: number;
+  level: LogLevel;
+  tag: string | null;
+  message: string;
+}
+const MAX_LOG_ROWS = 5000;
 
 const DEFAULT_SETTINGS: Omit<Settings, 'guildId'> = {
   statsChannelId: null,
@@ -858,5 +877,43 @@ export class BotDatabase {
 
   setState(key: string, value: string): void {
     this.db.prepare('INSERT INTO bot_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  }
+
+  // ---- captured console logs ------------------------------------------
+
+  private logInserts = 0;
+
+  addLog(entry: { ts: number; level: LogLevel; tag: string | null; message: string }): void {
+    this.db.prepare('INSERT INTO logs (ts, level, tag, message) VALUES (?, ?, ?, ?)').run(entry.ts, entry.level, entry.tag, entry.message);
+    if (++this.logInserts % 100 === 0) this.pruneLogs(MAX_LOG_ROWS);
+  }
+
+  /** Newest first. `level` 'warn' means warn + error. */
+  recentLogs(opts: { limit: number; level?: 'all' | 'warn' | 'error'; tag?: string | null }): LogRow[] {
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+    if (opts.level === 'error') where.push(`level = 'error'`);
+    else if (opts.level === 'warn') where.push(`level IN ('warn', 'error')`);
+    if (opts.tag) {
+      where.push('tag = ?');
+      params.push(opts.tag);
+    }
+    const sql = `SELECT id, ts, level, tag, message FROM logs${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`;
+    return this.db.prepare(sql).all(...params, opts.limit) as unknown as LogRow[];
+  }
+
+  /** Distinct tags seen in the stored logs, for the filter UI. */
+  logTags(): string[] {
+    return (this.db.prepare('SELECT DISTINCT tag FROM logs WHERE tag IS NOT NULL ORDER BY tag').all() as { tag: string }[]).map((r) => r.tag);
+  }
+
+  countLogErrorsSince(since: number): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM logs WHERE level = 'error' AND ts >= ?`).get(since) as { n: number };
+    return row.n;
+  }
+
+  /** Keeps only the newest `keep` rows. */
+  pruneLogs(keep: number): void {
+    this.db.prepare('DELETE FROM logs WHERE id <= (SELECT COALESCE(MAX(id), 0) - ? FROM logs)').run(keep);
   }
 }
