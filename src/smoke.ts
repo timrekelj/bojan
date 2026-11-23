@@ -5,6 +5,7 @@ import { MessageFlags } from 'discord.js';
 import { renderDailyChart } from './chart.js';
 import { buildWeeklyStatsMessage } from './weekly.js';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
@@ -242,5 +243,51 @@ check('no transform for plain link', transformUrl('https://example.com/a') === n
 
 db.close();
 rmSync(dir, { recursive: true, force: true });
+// ---- activity session overlap fixes ----
+{
+  const dir2 = mkdtempSync(join(tmpdir(), 'bojan-smoke-act-'));
+  const db = new BotDatabase(join(dir2, 'test.db'));
+  const MIN = 60_000;
+  const T0 = Date.UTC(2026, 0, 10, 12, 0);
+  const act = (details: string): { name: string; type: number; details: string | null; state: string | null; applicationId: string | null; startedAt: number | null } =>
+    ({ name: 'OverlapGame', type: 0, details, state: null, applicationId: 'app1', startedAt: T0 });
+  db.recordPresence(G, 'ovl', [act('m0')], T0);
+  db.recordPresence(G, 'ovl', [act('m1')], T0 + 10 * MIN);
+  db.recordPresence(G, 'ovl', [act('m2')], T0 + 20 * MIN);
+  db.recordPresence(G, 'ovl', [act('m3')], T0 + 30 * MIN);
+  db.recordPresence(G, 'ovl', [], T0 + 40 * MIN);
+  const sum = db.activitySummary(G, 'ovl', 'OverlapGame', T0 + 50 * MIN);
+  check('split sessions do not overlap', sum?.totalMs === 40 * MIN && sum.sessions === 4, `totalMs=${sum?.totalMs} sessions=${sum?.sessions}`);
+
+  // Hand-inserted overlapping rows (legacy data), repaired idempotently
+  const raw = new DatabaseSync(join(dir2, 'test.db'));
+  const ins = raw.prepare('INSERT INTO activity_sessions (guild_id, user_id, name, type, details, state, application_id, started_at, ended_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  ins.run(G, 'rep', 'Legacy', 0, 'a', null, null, T0, T0 + 10 * MIN, T0 + 10 * MIN);
+  ins.run(G, 'rep', 'Legacy', 0, 'b', null, null, T0, T0 + 20 * MIN, T0 + 20 * MIN);
+  ins.run(G, 'rep', 'Legacy', 0, 'c', null, null, T0, T0 + 30 * MIN, T0 + 30 * MIN);
+  raw.close();
+  const before = db.activitySummary(G, 'rep', 'Legacy', T0 + H)?.totalMs ?? 0;
+  const fixed1 = db.repairActivityOverlaps();
+  const after = db.activitySummary(G, 'rep', 'Legacy', T0 + H)?.totalMs ?? 0;
+  const fixed2 = db.repairActivityOverlaps();
+  check('repair fixes overlaps', before === 60 * MIN && after === 30 * MIN && fixed1 === 2, `before=${before / MIN}m after=${after / MIN}m fixed=${fixed1}`);
+  check('repair is idempotent', fixed2 === 0, `second run changed ${fixed2}`);
+
+  // Per-day split across local midnight
+  const tz = 'UTC';
+  const mid = Date.UTC(2026, 0, 20);
+  db.recordPresence(G, 'day', [{ name: 'Night', type: 0, details: null, state: null, applicationId: null, startedAt: mid - 2 * H }], mid - 2 * H);
+  db.recordPresence(G, 'day', [], mid + 3 * H);
+  const days = db.activityMinutesPerDay(G, 'day', 'Night', mid - 2 * D, mid + 2 * D, tz);
+  check('session spanning midnight splits', days.length === 2 && days[0]?.count === 120 && days[1]?.count === 180, JSON.stringify(days));
+  const longStart = Date.UTC(2026, 1, 1, 0);
+  db.recordPresence(G, 'day', [{ name: 'Long', type: 0, details: null, state: null, applicationId: null, startedAt: longStart }], longStart);
+  db.recordPresence(G, 'day', [], longStart + 30 * H);
+  const longDays = db.activityMinutesPerDay(G, 'day', 'Long', longStart - D, longStart + 3 * D, tz);
+  check('30h session never exceeds 1440 min/day', longDays.length === 2 && longDays[0]?.count === 1440 && longDays[1]?.count === 360 && longDays.every((d) => d.count <= 1440) && longDays.reduce((s, d) => s + d.count, 0) === 1800, JSON.stringify(longDays));
+  db.close();
+  rmSync(dir2, { recursive: true, force: true });
+}
+
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

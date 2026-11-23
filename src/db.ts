@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { statSync } from 'node:fs';
-import { localParts } from './stats.js';
+import { localParts, zonedToUtcMs } from './stats.js';
 
 export interface Settings {
   guildId: string;
@@ -261,6 +261,9 @@ export class BotDatabase {
     // Custom statuses were first recorded under the literal name "Custom
     // Status" — use the status text itself as the name (matches new rows).
     this.db.exec(`UPDATE activity_sessions SET name = state WHERE type = 4 AND name = 'Custom Status' AND state IS NOT NULL AND state <> ''`);
+    // Split sessions used to restart at the original game start and overlap.
+    const repaired = this.repairActivityOverlaps();
+    if (repaired > 0) console.log(`[db] repaired ${repaired} overlapping activity session(s)`);
   }
 
   close(): void {
@@ -443,6 +446,7 @@ export class BotDatabase {
       const touchStmt = this.db.prepare('UPDATE activity_sessions SET last_seen_at = ? WHERE id = ?');
       const openStmt = this.db.prepare('SELECT id FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL AND name = ? AND type = ? AND application_id IS ? AND details IS ? AND state IS ? ORDER BY id DESC LIMIT 1');
       const insStmt = this.db.prepare('INSERT INTO activity_sessions (guild_id, user_id, name, type, details, state, application_id, started_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      const prevEndStmt = this.db.prepare('SELECT MAX(COALESCE(ended_at, ?)) AS e FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND name = ? AND type = ? AND application_id IS ?');
 
       // A session is one continuous run of the same activity (name + type +
       // app + details/state); a change in details/state (e.g. LoL game mode)
@@ -456,7 +460,12 @@ export class BotDatabase {
         if (open) {
           touchStmt.run(ts, open.id);
         } else {
-          insStmt.run(guildId, userId, a.name, a.type, a.details, a.state, a.applicationId, a.startedAt ?? ts, ts);
+          // Discord's start timestamp is the original launch; never let a split
+          // session start before the previous session of the same activity ended
+          // (an open one is about to be closed at `ts`).
+          const prev = prevEndStmt.get(ts, guildId, userId, a.name, a.type, a.applicationId) as { e: number | null } | undefined;
+          const startedAt = Math.min(Math.max(a.startedAt ?? ts, prev?.e ?? -Infinity), ts);
+          insStmt.run(guildId, userId, a.name, a.type, a.details, a.state, a.applicationId, startedAt, ts);
         }
       }
       // Close every open session whose activity is no longer present (or changed).
@@ -549,19 +558,73 @@ export class BotDatabase {
       .all(now, guildId, userId, name, limit) as unknown as ActivitySessionRow[];
   }
 
-  /** Minutes per local calendar day for one activity (session attributed to the day it started). */
+  /**
+   * Minutes per local calendar day for one activity. Sessions overlapping
+   * [fromTs, toTs) are clipped to the window and split across local midnights.
+   */
   activityMinutesPerDay(guildId: string, userId: string, name: string, fromTs: number, toTs: number, timeZone: string, now = Date.now()): DayCount[] {
     const rows = this.db
       .prepare(`SELECT started_at AS s, (CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) AS e
-                FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND name = ? AND started_at >= ? AND started_at < ?`)
-      .all(now, guildId, userId, name, fromTs, toTs) as unknown as { s: number; e: number }[];
-    const map = new Map<string, number>();
+                FROM activity_sessions WHERE guild_id = ? AND user_id = ? AND name = ?
+                  AND started_at < ? AND (CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) > ?`)
+      .all(now, guildId, userId, name, toTs, now, fromTs) as unknown as { s: number; e: number }[];
+    const ms = new Map<string, number>();
     for (const r of rows) {
-      const p = localParts(timeZone, new Date(r.s));
-      const key = `${p.y}-${String(p.mo).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
-      map.set(key, (map.get(key) ?? 0) + Math.round((r.e - r.s) / 60_000));
+      let cur = Math.max(r.s, fromTs);
+      const end = Math.min(r.e, toTs);
+      while (cur < end) {
+        const p = localParts(timeZone, new Date(cur));
+        const key = `${p.y}-${String(p.mo).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+        let next = zonedToUtcMs(timeZone, p.y, p.mo, p.d + 1); // Date.UTC normalises day overflow
+        if (!(next > cur)) next = end; // safety against helper oddities
+        const segEnd = Math.min(end, next);
+        ms.set(key, (ms.get(key) ?? 0) + (segEnd - cur));
+        cur = segEnd;
+      }
     }
-    return [...map.entries()].map(([day, count]) => ({ day, count })).sort((a, b) => a.day.localeCompare(b.day));
+    return [...ms.entries()]
+      .map(([day, v]) => ({ day, count: Math.min(1440, Math.round(v / 60_000)) }))
+      .sort((a, b) => a.day.localeCompare(b.day));
+  }
+
+  /**
+   * One-time/idempotent repair of overlapping activity sessions: within each
+   * (guild, user, name, type, app) group no session may start before an
+   * earlier one ended. Returns the number of rows adjusted.
+   */
+  repairActivityOverlaps(): number {
+    const rows = this.db
+      .prepare(`SELECT id, guild_id, user_id, name, type, application_id, started_at, ended_at, last_seen_at
+                FROM activity_sessions ORDER BY guild_id, user_id, name, type, application_id, started_at, id`)
+      .all() as unknown as { id: number; guild_id: string; user_id: string; name: string; type: number; application_id: string | null; started_at: number; ended_at: number | null; last_seen_at: number }[];
+    const upd = this.db.prepare('UPDATE activity_sessions SET started_at = ? WHERE id = ?');
+    let changed = 0;
+    let groupKey = '';
+    let maxEnd = -Infinity;
+    this.db.exec('BEGIN');
+    try {
+      for (const r of rows) {
+        const k = JSON.stringify([r.guild_id, r.user_id, r.name, r.type, r.application_id]);
+        if (k !== groupKey) {
+          groupKey = k;
+          maxEnd = -Infinity;
+        }
+        const end = r.ended_at ?? r.last_seen_at;
+        let s = r.started_at;
+        if (s < maxEnd) s = maxEnd;
+        if (s > end) s = end;
+        if (s !== r.started_at) {
+          upd.run(s, r.id);
+          changed++;
+        }
+        maxEnd = Math.max(maxEnd, r.ended_at ?? r.last_seen_at);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return changed;
   }
 
   // ---- voice channel time -------------------------------------------------
