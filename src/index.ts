@@ -2,6 +2,7 @@ import { BotDatabase } from './db.js';
 import { config } from './config.js';
 import { createClient, registerEvents } from './bot.js';
 import { startWeeklyScheduler } from './scheduler.js';
+import { startFreeGamesPoller } from './freegames/poller.js';
 import { startWebServer } from './web/server.js';
 
 async function main(): Promise<void> {
@@ -13,6 +14,7 @@ async function main(): Promise<void> {
 
   startWebServer(client, db);
   startWeeklyScheduler(client, db);
+  startFreeGamesPoller(client, db);
 
   await client.login(config.token);
 

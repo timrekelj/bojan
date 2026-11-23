@@ -30,6 +30,29 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   weeks run Monday–Sunday) the bot posts last week's recap to a configured
   channel: total messages and reactions, top-5 messagers, top-5 channels,
   top-3 reactions given / received, and a per-day message bar chart.
+- **Free games announcements** — the bot polls public sources every 15 minutes
+  for games that are temporarily 100% free and posts a Components V2 card
+  (title, short description, ~~price~~ **FREE** until the end time, store,
+  image, link button, optional role ping) for each new one to a configured
+  channel. Sources (no API keys): the **Epic Games Store** free-games
+  endpoint (authoritative for Epic) and the
+  [GamerPower](https://www.gamerpower.com) giveaways API (Steam, GOG, itch.io,
+  Ubisoft, EA, mobile, console, ...); cards and lists that include GamerPower
+  items carry a "via GamerPower" attribution, as their terms ask. A source
+  failing never breaks the other one. Filters, per guild: PC full games only by
+  default with all stores enabled; DLC/loot, beta/playtest/demo keys (detected
+  by title, e.g. "… Playtest Steam Key"; `includeBeta`), mobile and console are opt-in, and
+  individual stores can be switched off (store toggles apply to PC games).
+  Announced games are tracked in `free_posted`; when the channel is first set
+  the current backlog is recorded silently so nothing is spammed. Settings
+  (channel, ping role, stores, DLC/beta/mobile/console) live in the **dashboard**
+  (settings table `free_settings`, "Free games" section) — there is no Discord
+  command to change them. Saving a new channel or a more permissive filter
+  records the matching backlog silently too. The section also shows how many
+  games are free now / already announced and has a "Send test announcement"
+  button (posts one current game without recording it). `/free [store]` is a public
+  read-only listing of what is free now (matching the guild's filters) plus
+  "Up next on Epic".
 - **Slash commands**
   - `/leaderboard [limit]` — all-time boards: top message senders, top
     reaction givers (with their 3 most used emoji), most reacted-to users
@@ -42,6 +65,9 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
     count, average session, per-day bar chart for the last 7 days, breakdown
     by details/status e.g. LoL game mode, recent sessions). `name` autocompletes
     from recorded activities (games, apps, custom statuses like `opencode`)
+  - `/free [store]` — games that are free right now (filtered by the server's
+    free-games settings, optionally narrowed to one store), with an "Up next
+    on Epic" section
   - `/setstats #channel` — (admin) choose the weekly stats channel
   - `/backfill [channel] [days]` — (admin) seed the database from channel
     history: messages **and** their reactions (it pages through the users who
@@ -54,8 +80,10 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   login**; only server administrators (or a configured admin role) get in.
   Shows bot status (ping, uptime, DB size), this-week and all-time
   leaderboards, recent embed conversions, and a settings form (stats channel,
-  weekly day/hour/timezone, embed-conversion channels). JSON API at
-  `/api/stats.json`.
+  weekly day/hour/timezone, embed-conversion channels), and a separate
+  "Free games" section (announcement channel, ping role, stores, DLC / beta /
+  mobile / console, status line, test announcement). JSON API at
+  `/api/stats.json` (includes `freeGames` settings).
 - **URL converter (embeddo-style)** — in the channels you pick, messages
   containing a supported social link are reposted via a webhook **as the
   original user**, with the link rewritten to an embed-friendly mirror and
@@ -163,7 +191,8 @@ npm ci && npm run build && npm start    # with .env in place
 npm run smoke
 ```
 
-exercises the database layer, timezone/week math and URL detection without a
+exercises the database layer, timezone/week math, URL detection and the
+free-games normalizers/filters (inline fixtures) without a
 Discord token.
 
 ## Layout
@@ -178,6 +207,13 @@ src/
   scheduler.ts        weekly stats poster
   embeds/providers.ts oEmbed/OpenGraph metadata per platform
   embeds/converter.ts webhook repost + delete original (embeddo-style)
+  freegames/types.ts    FreeGame / FreeSettings types, store labels
+  freegames/sources.ts  Epic + GamerPower fetch, normalizers, merge, filters, cache
+  freegames/cards.ts    Components V2 announcement card and /free list
+  freegames/poller.ts   15-minute poller that announces new free games
+  freegames/actions.ts  seedFreeGames() / sendTestAnnouncement() for the dashboard
+  freegames/form.ts     dashboard form parser + "needs backlog seed" diff
+  freegames/commands.ts /free command
   web/server.ts       Hono dashboard, Discord OAuth2, signed-cookie sessions
   web/views.ts        HTML templates
   smoke.ts            offline test

@@ -1,5 +1,6 @@
 import type { Settings, UserRow, EmbedLogRow, EmojiRow } from '../db.js';
 import { fmt, fmtDate, lastWeekBounds, weekRangeLabel } from '../stats.js';
+import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -51,6 +52,8 @@ const CSS = `
   .muted { margin: 0; }
   .empty { margin: 0; padding: 4px 0; color: var(--muted); }
   .flash { display: flex; align-items: center; gap: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+  .flash.err::before { background: var(--accent); }
+  button[disabled] { opacity: .5; cursor: not-allowed; }
   .flash::before { content: ''; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
   .kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
   .kpi { padding: 18px 20px; border-left: 1px solid var(--border); }
@@ -185,6 +188,15 @@ export interface DashboardData {
   channelNames: Record<string, string>;
   user: { username: string; avatar: string };
   saved: boolean;
+  free: {
+    settings: FreeSettings;
+    roles: { id: string; name: string }[];
+    /** Games free now matching the filters; null when the sources couldn't be reached. */
+    currentCount: number | null;
+    postedCount: number;
+    lastSeed: string | null;
+    flash: { kind: 'saved' } | { kind: 'ok'; title: string } | { kind: 'err'; message: string } | null;
+  };
 }
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -237,6 +249,48 @@ function embedPager(d: DashboardData): string {
       ? `<a class="pager-btn" href="/dashboard?embedsPage=${target}#h-embeds">${label}</a>`
       : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
   return `<div class="pager">${showing}<nav class="pager-nav" aria-label="Embed conversions pages">${step('Previous', page - 1, page > 1)}<span>Page ${page} of ${pages}</span>${step('Next', page + 1, page < pages)}</nav></div>`;
+}
+
+function freeSection(d: DashboardData): string {
+  const f = d.free;
+  const s = f.settings;
+  const flash =
+    f.flash?.kind === 'saved'
+      ? '<div class="flash" role="status">Free games settings saved.</div>'
+      : f.flash?.kind === 'ok'
+        ? `<div class="flash" role="status">Test announcement sent: ${escapeHtml(f.flash.title)}.</div>`
+        : f.flash?.kind === 'err'
+          ? `<div class="flash err" role="alert">Test announcement failed: ${escapeHtml(f.flash.message)}</div>`
+          : '';
+  const channelOpts = d.channels.map((c) => `<option value="${escapeHtml(c.id)}"${s.channelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
+  const roleOpts = f.roles.map((r) => `<option value="${escapeHtml(r.id)}"${s.pingRoleId === r.id ? ' selected' : ''}>@${escapeHtml(r.name)}</option>`).join('');
+  const storeChecks = ALL_STORES.map((st) => `<label class="opt"><input type="checkbox" name="stores" value="${st}"${s.stores.includes(st) ? ' checked' : ''}><span>${escapeHtml(STORE_LABELS[st])}</span></label>`).join('');
+  const inc = (name: string, on: boolean, label: string, help: string): string =>
+    `<label class="opt"><input type="checkbox" name="${name}" value="1"${on ? ' checked' : ''}><span title="${escapeHtml(help)}">${escapeHtml(label)}</span></label>`;
+  const status = [
+    f.currentCount === null ? 'currently free: unavailable (sources unreachable)' : `${fmt(f.currentCount)} free now matching filters`,
+    `${fmt(f.postedCount)} recorded as announced`,
+    `last backlog seed ${f.lastSeed ? fmtDate(Number(f.lastSeed), d.settings.timezone) : 'never'}`,
+  ].join(' · ');
+  const canTest = s.channelId !== null;
+  return `<section id="free" aria-labelledby="h-free"><div class="sec-head"><h2 id="h-free">Free games</h2><span class="sub">${escapeHtml(status)}</span></div>
+    ${flash}
+    <form class="panel" method="post" action="/free-settings">
+      <p class="sub">Announces temporarily free games to a channel. Only new freebies are announced: games already free when you set the channel or widen the filters are recorded silently. These settings can only be changed here (there are no Discord commands).</p>
+      <div class="row">
+        <div class="field"><label for="freeChannel">Announcement channel</label><span class="help">Where new free games are posted.</span>
+          <select id="freeChannel" name="channel"><option value="">— disabled —</option>${channelOpts}</select></div>
+        <div class="field"><label for="freeRole">Ping role</label><span class="help">Mentioned with each announcement.</span>
+          <select id="freeRole" name="pingRole"><option value="">— none —</option>${roleOpts}</select></div>
+      </div>
+      <div class="field"><span class="lbl">Stores</span><span class="help">Applies to PC games.</span>
+        <div class="checks">${storeChecks}</div></div>
+      <div class="field"><span class="lbl">Also include</span>
+        <div class="checks">${inc('includeDlc', s.includeDlc, 'DLC / in-game loot', 'Add-ons and loot drops')}${inc('includeBeta', s.includeBeta, 'Betas / playtests', 'Beta, playtest and demo keys')}${inc('includeMobile', s.includeMobile, 'Mobile', 'Android / iOS games')}${inc('includeConsole', s.includeConsole, 'Console', 'PlayStation / Xbox / Switch')}</div></div>
+      <div class="actions"><button type="submit">Save free games settings</button></div>
+    </form>
+    <form method="post" action="/free-test" class="actions"><button type="submit" class="btn ghost"${canTest ? '' : ' disabled title="Set a channel and save first"'}>Send test announcement</button>${canTest ? '' : ' <span class="muted">Set a channel and save first.</span>'}</form>
+  </section>`;
 }
 
 function uptime(sec: number): string {
@@ -309,6 +363,7 @@ export function dashboardPage(d: DashboardData): string {
       <div class="actions"><button type="submit">Save settings</button></div>
     </form>
   </section>
+  ${freeSection(d)}
   <section aria-labelledby="h-embeds"><div class="sec-head"><h2 id="h-embeds">Embed conversions</h2></div>
     ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}
   </section>`;

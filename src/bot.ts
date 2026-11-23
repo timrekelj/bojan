@@ -18,6 +18,7 @@ import { config } from './config.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
+import { freeCommand, handleFreeCommand } from './freegames/commands.js';
 
 export function createClient(): Client {
   return new Client({
@@ -58,6 +59,7 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addChannelOption((o) => o.setName('channel').setDescription('Only this channel (default: all text channels)').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(false))
     .addIntegerOption((o) => o.setName('days').setDescription('Only messages from the last N days (default: all history)').setMinValue(1).setRequired(false)),
+  freeCommand,
 ];
 
 let backfillRunning = false;
@@ -79,6 +81,11 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
   if (!interaction.guildId) return;
   const guildId = interaction.guildId;
   const settings = db.getSettings(guildId);
+
+  if (interaction.commandName === 'free') {
+    await handleFreeCommand(interaction, db);
+    return;
+  }
 
   if (interaction.commandName === 'leaderboard') {
     const limit = interaction.options.getInteger('limit') ?? 10;

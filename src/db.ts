@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { statSync } from 'node:fs';
 import { localParts, zonedToUtcMs } from './stats.js';
+import { ALL_STORES, type FreeSettings, type Store } from './freegames/types.js';
 
 export interface Settings {
   guildId: string;
@@ -188,6 +189,24 @@ CREATE INDEX IF NOT EXISTS idx_reactions_guild_reactor ON reactions (guild_id, r
 CREATE INDEX IF NOT EXISTS idx_reactions_guild_author ON reactions (guild_id, author_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reactions_unique ON reactions (guild_id, message_id, reactor_id, emoji_key);
 
+CREATE TABLE IF NOT EXISTS free_settings (
+  guild_id TEXT PRIMARY KEY,
+  channel_id TEXT,
+  ping_role_id TEXT,
+  stores TEXT NOT NULL,
+  include_dlc INTEGER NOT NULL DEFAULT 0,
+  include_beta INTEGER NOT NULL DEFAULT 0,
+  include_mobile INTEGER NOT NULL DEFAULT 0,
+  include_console INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS free_posted (
+  guild_id TEXT NOT NULL,
+  game_key TEXT NOT NULL,
+  posted_at INTEGER NOT NULL,
+  PRIMARY KEY (guild_id, game_key)
+);
+
 CREATE TABLE IF NOT EXISTS bot_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -254,6 +273,11 @@ export class BotDatabase {
     const cols = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'message_id')) {
       this.db.exec('ALTER TABLE messages ADD COLUMN message_id TEXT');
+    }
+    // Migration for free_settings created before include_beta existed.
+    const freeCols = this.db.prepare('PRAGMA table_info(free_settings)').all() as { name: string }[];
+    if (!freeCols.some((c) => c.name === 'include_beta')) {
+      this.db.exec('ALTER TABLE free_settings ADD COLUMN include_beta INTEGER NOT NULL DEFAULT 0');
     }
     // Dedup key: the same Discord message must never be counted twice
     // (live tracking + backfill can overlap).
@@ -720,6 +744,65 @@ export class BotDatabase {
                   timezone = excluded.timezone,
                   embed_channels = excluded.embed_channels`)
       .run(s.guildId, s.statsChannelId, s.weeklyEnabled ? 1 : 0, s.weeklyDay, s.weeklyHour, s.timezone, JSON.stringify(s.embedChannels));
+  }
+
+  // ---- free games -----------------------------------------------------
+
+  getFreeSettings(guildId: string): FreeSettings {
+    const row = this.db.prepare('SELECT * FROM free_settings WHERE guild_id = ?').get(guildId) as
+      | { channel_id: string | null; ping_role_id: string | null; stores: string; include_dlc: number; include_beta: number; include_mobile: number; include_console: number }
+      | undefined;
+    if (!row) {
+      return { guildId, channelId: null, pingRoleId: null, stores: [...ALL_STORES], includeDlc: false, includeBeta: false, includeMobile: false, includeConsole: false };
+    }
+    let stores: Store[] = [...ALL_STORES];
+    try {
+      const parsed = JSON.parse(row.stores) as unknown;
+      if (Array.isArray(parsed)) stores = parsed.filter((x): x is Store => ALL_STORES.includes(x as Store));
+    } catch {
+      // keep defaults on corrupt JSON
+    }
+    return {
+      guildId,
+      channelId: row.channel_id,
+      pingRoleId: row.ping_role_id,
+      stores,
+      includeDlc: row.include_dlc === 1,
+      includeBeta: row.include_beta === 1,
+      includeMobile: row.include_mobile === 1,
+      includeConsole: row.include_console === 1,
+    };
+  }
+
+  saveFreeSettings(s: FreeSettings): void {
+    this.db
+      .prepare(`INSERT INTO free_settings (guild_id, channel_id, ping_role_id, stores, include_dlc, include_beta, include_mobile, include_console)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                  channel_id = excluded.channel_id,
+                  ping_role_id = excluded.ping_role_id,
+                  stores = excluded.stores,
+                  include_dlc = excluded.include_dlc,
+                  include_beta = excluded.include_beta,
+                  include_mobile = excluded.include_mobile,
+                  include_console = excluded.include_console`)
+      .run(s.guildId, s.channelId, s.pingRoleId, JSON.stringify(s.stores), s.includeDlc ? 1 : 0, s.includeBeta ? 1 : 0, s.includeMobile ? 1 : 0, s.includeConsole ? 1 : 0);
+  }
+
+  isFreePosted(guildId: string, gameKey: string): boolean {
+    return this.db.prepare('SELECT 1 FROM free_posted WHERE guild_id = ? AND game_key = ?').get(guildId, gameKey) !== undefined;
+  }
+
+  /** Record games as announced; returns how many were newly recorded. */
+  markFreePosted(guildId: string, gameKeys: string[], ts = Date.now()): number {
+    const stmt = this.db.prepare('INSERT OR IGNORE INTO free_posted (guild_id, game_key, posted_at) VALUES (?, ?, ?)');
+    let added = 0;
+    for (const key of gameKeys) added += Number(stmt.run(guildId, key, ts).changes);
+    return added;
+  }
+
+  countFreePosted(guildId: string): number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM free_posted WHERE guild_id = ?').get(guildId) as { n: number }).n;
   }
 
   // ---- embed conversion log -------------------------------------------

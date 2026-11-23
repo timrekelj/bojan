@@ -6,7 +6,10 @@ import { ChannelType, type Client } from 'discord.js';
 import type { BotDatabase, Settings } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, weekRangeLabel } from '../stats.js';
-import { dashboardPage, errorPage, loginPage } from './views.js';
+import { dashboardPage, errorPage, loginPage, type DashboardData } from './views.js';
+import { filterGames, getFreeGames } from '../freegames/sources.js';
+import { seedFreeGames, seedStateKey, sendTestAnnouncement } from '../freegames/actions.js';
+import { needsSeed, parseFreeForm } from '../freegames/form.js';
 
 interface Session {
   userId: string;
@@ -191,17 +194,53 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
     await next();
   };
 
-  app.get('/dashboard', requireAdmin, (c) => {
-    const session = c.get('session');
+  const listChannels = (): { id: string; name: string }[] => {
     const guild = client.guilds.cache.get(config.guildId);
-    const settings = db.getSettings(config.guildId);
-    const week = lastWeekBounds(settings.timezone);
-    const channels = guild
+    return guild
       ? guild.channels.cache
           .filter((ch) => ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildAnnouncement)
           .map((ch) => ({ id: ch.id, name: ch.name }))
           .sort((a, b) => a.name.localeCompare(b.name))
       : [];
+  };
+  // Pingable roles: not @everyone, not bot-managed; highest position first.
+  const listRoles = (): { id: string; name: string }[] => {
+    const guild = client.guilds.cache.get(config.guildId);
+    return guild
+      ? guild.roles.cache
+          .filter((r) => r.id !== guild.id && !r.managed)
+          .sort((a, b) => b.position - a.position)
+          .map((r) => ({ id: r.id, name: r.name }))
+      : [];
+  };
+
+  app.get('/dashboard', requireAdmin, async (c) => {
+    const session = c.get('session');
+    const guild = client.guilds.cache.get(config.guildId);
+    const settings = db.getSettings(config.guildId);
+    const week = lastWeekBounds(settings.timezone);
+    const channels = listChannels();
+    const freeSettings = db.getFreeSettings(config.guildId);
+    let freeCount: number | null = null;
+    try {
+      // Cached fetch; never let a slow/failed source break the page.
+      const data = await Promise.race([
+        getFreeGames(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000).unref()),
+      ]);
+      if (data.epicOk || data.gamerpowerOk) freeCount = filterGames(data.current, freeSettings).length;
+    } catch (err) {
+      console.error('[web] free games lookup failed:', err);
+    }
+    const freeTest = c.req.query('freeTest');
+    const freeFlash: DashboardData['free']['flash'] =
+      freeTest === 'ok'
+        ? { kind: 'ok', title: (c.req.query('title') ?? '').slice(0, 200) }
+        : freeTest === 'err'
+          ? { kind: 'err', message: (c.req.query('msg') ?? '').slice(0, 300) }
+          : c.req.query('freeSaved') === '1'
+            ? { kind: 'saved' }
+            : null;
     const total = db.countMessages(config.guildId);
     const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
     const allRows = db.topUsers(config.guildId, 10);
@@ -248,8 +287,44 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
         channelNames,
         user: { username: session.username, avatar: session.avatar },
         saved: c.req.query('saved') === '1',
+        free: {
+          settings: freeSettings,
+          roles: listRoles(),
+          currentCount: freeCount,
+          postedCount: db.countFreePosted(config.guildId),
+          lastSeed: db.getState(seedStateKey(config.guildId)),
+          flash: freeFlash,
+        },
       }),
     );
+  });
+
+  app.post('/free-settings', requireAdmin, async (c) => {
+    const form = await c.req.parseBody({ all: true });
+    const prev = db.getFreeSettings(config.guildId);
+    const next = parseFreeForm(form, config.guildId, new Set(listChannels().map((ch) => ch.id)), new Set(listRoles().map((r) => r.id)));
+    db.saveFreeSettings(next);
+    console.log(`[web] free games settings updated by ${c.get('session').username}`);
+    if (needsSeed(prev, next)) {
+      try {
+        await seedFreeGames(db, config.guildId);
+      } catch (err) {
+        console.error('[web] free games seed failed:', err);
+      }
+    }
+    return c.redirect('/dashboard?freeSaved=1#free');
+  });
+
+  app.post('/free-test', requireAdmin, async (c) => {
+    let qs: string;
+    try {
+      const res = await sendTestAnnouncement(client, db, config.guildId);
+      qs = res.ok ? `freeTest=ok&title=${encodeURIComponent(res.title)}` : `freeTest=err&msg=${encodeURIComponent(res.error)}`;
+    } catch (err) {
+      console.error('[web] free test failed:', err);
+      qs = `freeTest=err&msg=${encodeURIComponent('Unexpected error, see the bot log.')}`;
+    }
+    return c.redirect(`/dashboard?${qs}#free`);
   });
 
   app.post('/settings', requireAdmin, async (c) => {
@@ -295,6 +370,7 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
       currentWeek: currentWeekBounds(settings.timezone).key,
       allTimeTop: db.topUsers(config.guildId, 10),
       settings,
+      freeGames: db.getFreeSettings(config.guildId),
       bot: { ping: client.ws.ping, guilds: client.guilds.cache.size, uptimeSec: Math.floor((Date.now() - startedAt) / 1000) },
     });
   });
