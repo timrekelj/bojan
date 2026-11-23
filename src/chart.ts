@@ -35,7 +35,14 @@ function barPath(x: number, y: number, w: number, h: number, r: number): string 
   return `M${x},${y + h} L${x},${y + rr} Q${x},${y} ${x + rr},${y} L${x + w - rr},${y} Q${x + w},${y} ${x + w},${y + rr} L${x + w},${y + h} Z`;
 }
 
-export function renderDailyChartSvg(days: ChartDay[]): string {
+export interface ChartOptions {
+  title?: string;
+  formatValue?: (n: number) => string;
+}
+
+export function renderDailyChartSvg(days: ChartDay[], opts: ChartOptions = {}): string {
+  const title = opts.title ?? 'Messages per day';
+  const formatValue = opts.formatValue ?? ((n: number) => n.toLocaleString('en-US'));
   const left = 90;
   const right = 40;
   const top = 90;
@@ -49,7 +56,7 @@ export function renderDailyChartSvg(days: ChartDay[]): string {
   const parts: string[] = [];
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
   parts.push(`<rect width="${W}" height="${H}" rx="32" ry="32" fill="${BG}"/>`);
-  parts.push(`<text x="${left}" y="56" font-family="${FONT}" font-size="30" font-weight="bold" fill="${TEXT}">Messages per day</text>`);
+  parts.push(`<text x="${left}" y="56" font-family="${FONT}" font-size="30" font-weight="bold" fill="${TEXT}">${esc(title)}</text>`);
 
   for (let v = 0; v <= axisMax + 1e-9; v += step) {
     const y = yOf(v);
@@ -65,7 +72,7 @@ export function renderDailyChartSvg(days: ChartDay[]): string {
     const h = (d.count / axisMax) * plotH;
     const y = yOf(d.count);
     if (d.count > 0) parts.push(`<path d="${barPath(cx - barW / 2, y, barW, h, 14)}" fill="${BAR}"/>`);
-    parts.push(`<text x="${cx}" y="${y - 12}" text-anchor="middle" font-family="${FONT}" font-size="26" font-weight="bold" fill="${TEXT}">${esc(d.count.toLocaleString('en-US'))}</text>`);
+    parts.push(`<text x="${cx}" y="${y - 12}" text-anchor="middle" font-family="${FONT}" font-size="26" font-weight="bold" fill="${TEXT}">${esc(formatValue(d.count))}</text>`);
     parts.push(`<text x="${cx}" y="${H - bottom + 40}" text-anchor="middle" font-family="${FONT}" font-size="24" fill="${MUTED}">${esc(d.label)}</text>`);
   });
 
@@ -74,8 +81,8 @@ export function renderDailyChartSvg(days: ChartDay[]): string {
 }
 
 /** Render a dark-themed vertical bar chart (1200x600 PNG, rendered at 2x for crispness). */
-export function renderDailyChart(days: ChartDay[]): Buffer {
-  const resvg = new Resvg(renderDailyChartSvg(days), {
+export function renderDailyChart(days: ChartDay[], opts: ChartOptions = {}): Buffer {
+  const resvg = new Resvg(renderDailyChartSvg(days, opts), {
     fitTo: { mode: 'width', value: W * 2 },
     font: {
       loadSystemFonts: true,

@@ -128,18 +128,6 @@ export function daySeries(week: WeekBounds, timeZone: string): { key: string; la
   return out;
 }
 
-/** ASCII bar chart, one line per day of the week: "Mon 9  ██████ 12". */
-export function barChartLines(counts: { day: string; count: number }[], week: WeekBounds, timeZone: string, maxWidth = 24): string[] {
-  const map = new Map(counts.map((c) => [c.day, c.count]));
-  const days = daySeries(week, timeZone);
-  const max = Math.max(1, ...days.map((d) => map.get(d.key) ?? 0));
-  return days.map((d) => {
-    const c = map.get(d.key) ?? 0;
-    const bar = c === 0 ? '' : '█'.repeat(Math.max(1, Math.round((c / max) * maxWidth)));
-    return `${d.label}  ${bar} ${c}`;
-  });
-}
-
 /** Leaderboard lines, e.g. "**1.** <@123> — **1,234** (35.5%)". */
 export function leaderboardLines(rows: UserRow[], total: number): string[] {
   if (rows.length === 0) return ['No messages recorded yet.'];

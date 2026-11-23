@@ -15,7 +15,7 @@ import type { ChannelRow, ReactionCountRow, UserRow } from './db.js';
 import { daySeries, fmt, leaderboardLines, weekRangeLabel, type WeekBounds } from './stats.js';
 
 export const WEEKLY_CHART_NAME = 'weekly-chart.png';
-const BLURPLE = 0x5865f2;
+export const BLURPLE = 0x5865f2;
 
 export interface WeeklyStatsData {
   week: WeekBounds;
@@ -36,7 +36,7 @@ function ranked(rows: ReactionCountRow[]): string {
   return rows.length > 0 ? rows.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmt(r.count)}**`).join('\n') : '—';
 }
 
-function divider(): SeparatorBuilder {
+export function divider(): SeparatorBuilder {
   return new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small);
 }
 

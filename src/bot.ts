@@ -15,7 +15,8 @@ import {
 } from 'discord.js';
 import type { BotDatabase } from './db.js';
 import { config } from './config.js';
-import { activityTypeLabel, barChartLines, fmt, fmtDate, fmtDuration, leaderboardLines, localParts, zonedToUtcMs } from './stats.js';
+import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
+import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
 
 export function createClient(): Client {
@@ -81,31 +82,17 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
 
   if (interaction.commandName === 'leaderboard') {
     const limit = interaction.options.getInteger('limit') ?? 10;
-    const total = db.countMessages(guildId);
-    const totalReactions = db.countReactions(guildId);
-    const rows = db.topUsers(guildId, limit);
-    const given = db.topReactionsGiven(guildId, limit);
-    const received = db.topReactionsReceived(guildId, limit);
-    const medal = (i: number): string => ['🥇', '🥈', '🥉'][i] ?? `${i + 1}.`;
-    const share = (count: number): string => (totalReactions > 0 ? ` (${((count / totalReactions) * 100).toFixed(1)}%)` : '');
-    // Embed field values are capped at 1024 chars — drop trailing rows if needed.
-    const fit = (lines: string[]): string => {
-      while (lines.length > 1 && lines.join('\n').length > 1000) lines.pop();
-      return lines.join('\n') || '—';
-    };
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 Leaderboard — all time')
-      .addFields(
-        { name: `💬 Messages (${fmt(total)} total)`, value: fit(leaderboardLines(rows, total)) },
-        {
-          name: `😄 Reactions given (${fmt(totalReactions)} total)`,
-          value: fit(given.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**${share(r.count)}`)),
-        },
-        { name: '😍 Reactions received', value: fit(received.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**${share(r.count)}`)) },
-      )
-      .setColor(0x5865f2)
-      .setTimestamp();
-    await interaction.reply({ embeds: [embed] });
+    await interaction.reply(
+      buildLeaderboardMessage({
+        limit,
+        totalMessages: db.countMessages(guildId),
+        totalReactions: db.countReactions(guildId),
+        topUsers: db.topUsers(guildId, limit),
+        topGiven: db.topReactionsGiven(guildId, limit),
+        topReceived: db.topReactionsReceived(guildId, limit),
+        guildIconUrl: interaction.guild?.iconURL({ size: 128 }) ?? null,
+      }),
+    );
     return;
   }
 
@@ -189,37 +176,20 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const p = localParts(tz, new Date(now - 6 * 86_400_000));
     const dayStart = zonedToUtcMs(tz, p.y, p.mo, p.d);
     const minutes = db.activityMinutesPerDay(guildId, user.id, name, dayStart, now + 1, tz, now);
-    const chart = barChartLines(minutes, { start: dayStart, end: now, key: '' }, tz);
-
-    // Embed field values are capped at 1024 chars — drop trailing lines if needed.
-    const fit = (lines: string[]): string => {
-      while (lines.length > 1 && lines.join('\n').length > 1000) lines.pop();
-      return lines.join('\n') || '—';
-    };
-    const embed = new EmbedBuilder()
-      .setTitle(`📊 ${name} — ${user.username}`)
-      .setThumbnail(user.displayAvatarURL({ size: 128 }))
-      .addFields(
-        { name: 'Total time', value: `**${fmtDuration(summary.totalMs)}**`, inline: true },
-        { name: 'Sessions', value: `**${fmt(summary.sessions)}**`, inline: true },
-        { name: 'Average session', value: `**${fmtDuration(summary.avgMs)}**`, inline: true },
-        { name: 'First seen', value: fmtDate(summary.firstAt, tz), inline: true },
-        { name: 'Last seen', value: fmtDate(summary.lastAt, tz), inline: true },
-        { name: 'Last 7 days (minutes)', value: '```\n' + fit(chart) + '\n```', inline: false },
-        ...(breakdown.length > 0
-          ? [{ name: 'Breakdown (details/status)', value: fit(breakdown.map((b) => `**${b.label}** — ${fmtDuration(b.totalMs)} (${fmt(b.sessions)}×)`)), inline: false }]
-          : []),
-        ...(recent.length > 0
-          ? [{
-              name: 'Recent sessions',
-              value: fit(recent.map((s) => `${fmtDate(s.startedAt, tz)} — **${fmtDuration(s.durationMs)}**${s.open ? ' (ongoing)' : ''}${s.details ? ` — ${s.details}` : ''}${!s.details && s.state ? ` — ${s.state}` : ''}`)),
-              inline: false,
-            }]
-          : []),
-      )
-      .setColor(0x5865f2)
-      .setTimestamp();
-    await interaction.reply({ embeds: [embed] });
+    await interaction.reply(
+      buildActivityMessage({
+        name,
+        username: user.username,
+        avatarUrl: user.displayAvatarURL({ size: 128 }),
+        timeZone: tz,
+        summary,
+        breakdown,
+        recent,
+        minutes,
+        dayStart,
+        now,
+      }),
+    );
     return;
   }
 

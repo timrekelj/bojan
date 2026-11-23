@@ -7,7 +7,8 @@ import { buildWeeklyStatsMessage } from './weekly.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
-import { barChartLines, currentWeekBounds, lastWeekBounds, leaderboardLines, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
+import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
+import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'bojan-smoke-'));
@@ -115,8 +116,6 @@ check('emoji most used on alice\'s messages', emojiOnAlice[0]?.emojiKey === '�
 check('reaction count in range', db.countReactions(G, lwk.start, lwk.end) === 3, `got ${db.countReactions(G, lwk.start, lwk.end)}`);
 const perDay = db.messageCountsPerDay(G, lwk.start, lwk.end, 'UTC');
 check('per-day counts', perDay.length === 7 && perDay.reduce((s, d) => s + d.count, 0) === 31 && perDay[1]?.count === 5, JSON.stringify(perDay));
-const chart = barChartLines(perDay, lwk, 'UTC');
-check('bar chart', chart.length === 7 && chart[0]?.includes('Mon') === true && chart[6]?.trim().endsWith('7') === true && (chart[6]?.match(/█/g)?.length ?? 0) === 24, JSON.stringify(chart));
 
 // Weekly message (Components V2) + PNG chart
 const sampleDays = [0, 763, 1171, 639, 755, 164, 98].map((count, i) => ({ label: `${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][i]} ${16 + i}`, count }));
@@ -139,6 +138,63 @@ const weeklyEmpty = buildWeeklyStatsMessage({
   topMessagers: [], topChannels: [], topGiven: [], topReceived: [], perDay: [],
 });
 check('weekly empty data', JSON.stringify(weeklyEmpty.components[0]?.toJSON()).includes('—'));
+
+// Leaderboard + activity cards (Components V2)
+function textLength(json: unknown): number {
+  let n = 0;
+  const walk = (x: unknown): void => {
+    if (Array.isArray(x)) x.forEach(walk);
+    else if (x && typeof x === 'object') {
+      const o = x as Record<string, unknown>;
+      if (o.type === 10 && typeof o.content === 'string') n += o.content.length;
+      Object.values(o).forEach(walk);
+    }
+  };
+  walk(json);
+  return n;
+}
+const lb = buildLeaderboardMessage({
+  totalMessages: 21, totalReactions: 5, topUsers: db.topUsers(G, 10), topGiven: givenAll, topReceived: receivedAll,
+  guildIconUrl: 'https://example.com/icon.png',
+});
+const lbJson = lb.components.map((c) => c.toJSON());
+check('leaderboard is V2 with one container, no pings', (lb.flags & MessageFlags.IsComponentsV2) !== 0 && lb.components.length === 1 && lbJson[0]?.type === 17 && lb.allowedMentions.parse.length === 0 && !('embeds' in lb));
+const bigUsers = Array.from({ length: 50 }, (_, i) => ({ userId: `${'1'.repeat(18)}${i}`, messages: 100000 - i, firstTs: 0, lastTs: 0 })) as unknown as ReturnType<typeof db.topUsers>;
+const bigReactions = Array.from({ length: 50 }, (_, i) => ({ userId: `${'2'.repeat(18)}${i}`, count: 90000 - i }));
+const lbBig = buildLeaderboardMessage({ limit: 50, totalMessages: 9_999_999, totalReactions: 999_999, topUsers: bigUsers, topGiven: bigReactions, topReceived: bigReactions });
+const lbBigLen = textLength(lbBig.components.map((c) => c.toJSON()));
+check('leaderboard with 50 rows stays under 4000 chars', lbBigLen < 4000 && lbBigLen > 500, `${lbBigLen} chars`);
+
+const actNow = Date.now();
+const actDayStart = actNow - 6 * D;
+const actDays = daySeries({ start: actDayStart, end: actNow, key: '' }, 'UTC');
+const act = buildActivityMessage({
+  name: 'League of Legends', username: 'alice', avatarUrl: 'https://example.com/a.png', timeZone: 'UTC',
+  summary: { name: 'League of Legends', sessions: 42, totalMs: 723 * 60_000, avgMs: 17 * 60_000, firstAt: actNow - 30 * D, lastAt: actNow - H },
+  breakdown: [{ label: 'Ranked', sessions: 10, totalMs: 300 * 60_000 }],
+  recent: [{ startedAt: actNow - 2 * H, endedAt: actNow - H, durationMs: H, details: 'Ranked Solo', state: null, open: 0 }],
+  minutes: actDays.map((d, i) => ({ day: d.key, count: [0, 45, 120, 30, 90, 15, 60][i] ?? 0 })),
+  dayStart: actDayStart, now: actNow,
+});
+const actJson = JSON.stringify(act.components.map((c) => c.toJSON()));
+const actFile = act.files[0];
+writeFileSync('/tmp/bojan-activity-chart.png', (actFile as unknown as { attachment: Buffer }).attachment);
+check('activity is V2 with one container, no pings', (act.flags & MessageFlags.IsComponentsV2) !== 0 && act.components.length === 1 && actJson.includes('"type":17') && act.allowedMentions.parse.length === 0);
+check('activity references its chart attachment', actJson.includes('attachment://activity-chart.png') && actFile?.name === 'activity-chart.png');
+const actEmpty = buildActivityMessage({
+  name: 'x', username: 'u', timeZone: 'UTC', summary: { name: 'x', sessions: 1, totalMs: 0, avgMs: 0, firstAt: null, lastAt: null },
+  breakdown: [], recent: [], minutes: [], dayStart: actDayStart, now: actNow,
+});
+const actEmptyJson = JSON.stringify(actEmpty.components.map((c) => c.toJSON()));
+check('activity omits empty sections', !actEmptyJson.includes('Breakdown') && !actEmptyJson.includes('Recent sessions'));
+const actBig = buildActivityMessage({
+  name: 'x', username: 'u', timeZone: 'UTC', summary: { name: 'x', sessions: 1, totalMs: 0, avgMs: 0, firstAt: null, lastAt: null },
+  breakdown: Array.from({ length: 50 }, (_, i) => ({ label: `L${i} ${'y'.repeat(100)}`, sessions: 1, totalMs: 1000 })),
+  recent: Array.from({ length: 50 }, (_, i) => ({ startedAt: actNow - i * H, endedAt: null, durationMs: H, details: 'd'.repeat(200), state: null, open: 0 })),
+  minutes: [], dayStart: actDayStart, now: actNow,
+});
+const actBigLen = textLength(actBig.components.map((c) => c.toJSON()));
+check('activity with huge sections stays under 4000 chars', actBigLen < 4000, `${actBigLen} chars`);
 
 db.setState('k', 'v');
 check('bot state', db.getState('k') === 'v');
