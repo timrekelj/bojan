@@ -76,7 +76,7 @@ const CSS = `
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 48px; }
   .cols > section { min-width: 0; }
   .lb { list-style: none; margin: 0; padding: 0; }
-  .lb li { display: grid; grid-template-columns: 20px 24px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; padding: 9px 0; border-top: 1px solid var(--border); }
+  .lb li { display: grid; grid-template-columns: 28px 24px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; padding: 9px 0; border-top: 1px solid var(--border); }
   .lb li:first-child { border-top: 0; }
   .wrap > .kpis + section { border-top: 0; padding-top: 0; }
   #you .kpis { margin-bottom: 14px; }
@@ -89,13 +89,14 @@ const CSS = `
   .mini li:first-child { border-top: 0; }
   .mini .name { flex: 1; min-width: 0; }
   .mini .val { flex: none; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-  .lb li.you { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); border-radius: 6px; padding-left: 10px; padding-right: 10px; }
-  .lb li.you + li, .lb li.you:first-child { border-top-color: transparent; }
-  .lb li.you .name { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .lb li.you .av { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--accent); }
+  .lb li.you .name { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); }
   .lb li.you .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .you-tag { flex: none; background: var(--accent); color: #fff; border-radius: 6px; padding: 0 6px; font-size: 11px; font-weight: 600; line-height: 18px; }
-  .lb li.extra { grid-template-columns: 32px 24px minmax(0, 1fr) auto; margin-top: 10px; border-top: 0; }
-  .lb li.extra .rank { white-space: nowrap; }
+  .lb li.you .rank { color: var(--text); }
+  .you-tag { flex: none; color: var(--muted); font-size: 12px; font-weight: 400; }
+  .lb li.gap { border-top: 0; padding: 2px 0; }
+  .lb li.gap .rank { grid-column: 1; line-height: 1; }
+  .lb li.extra { border-top: 0; }
   .rank { color: var(--muted); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
   .top .name { font-weight: 600; }
   .av { width: 24px; height: 24px; border-radius: 50%; background: var(--soft); object-fit: cover; display: grid; place-items: center; font-size: 11px; font-weight: 500; color: var(--muted); }
@@ -264,6 +265,7 @@ export function leaderboard(rows: UserRow[], total: number, members: DashboardDa
   if (rows.length === 0) return emptyState('No messages yet.');
   const items = rows.map((r, i) => lbRow(i + 1, r.userId, r.messages, total, members, { top: i < 3, you: you?.userId === r.userId, extra: false }));
   if (you && you.rank && !rows.some((r) => r.userId === you.userId)) {
+    items.push('<li class="gap" aria-hidden="true"><span class="rank">⋯</span></li>');
     items.push(lbRow(you.rank.rank, you.userId, you.rank.messages, total, members, { top: false, you: true, extra: true }));
   }
   return `<ol class="lb">${items.join('')}</ol>`;

@@ -586,7 +586,7 @@ rmSync(dir, { recursive: true, force: true });
   const inTop = leaderboard(rows, 16, mem, { userId: 'u2', rank: { rank: 2, messages: 5 } });
   check('leaderboard: user in top is highlighted once with badge + aria-current', (inTop.match(/class="top you"/g) ?? []).length === 1 && (inTop.match(/aria-current/g) ?? []).length === 1 && inTop.includes('aria-current="true"') && inTop.includes('>You</span>') && !inTop.includes('extra'));
   const outTop = leaderboard(rows, 100, mem, { userId: 'u9', rank: { rank: 42, messages: 3 } });
-  check('leaderboard: user outside top gets extra row with real rank', outTop.includes('you extra') && outTop.includes('<span class="rank">42</span>') && outTop.includes('>Nine<') && outTop.includes('3.0%') && (outTop.match(/<li/g) ?? []).length === 4);
+  check('leaderboard: user outside top gets extra row with real rank', outTop.includes('you extra') && outTop.includes('<span class="rank">42</span>') && outTop.includes('>Nine<') && outTop.includes('3.0%') && (outTop.match(/<li/g) ?? []).length === 5 && outTop.includes('class="gap"'));
   const noYou = leaderboard(rows, 16, mem, { userId: 'u9', rank: null });
   check('leaderboard: no extra row when user has no messages; no highlight', !noYou.includes('you') && (noYou.match(/<li/g) ?? []).length === 3 && !leaderboard(rows, 16, mem).includes('aria-current'));
   check('leaderboard: names escaped', inTop.includes('One &lt;b&gt;') && !inTop.includes('One <b>'));
