@@ -52,6 +52,12 @@ export interface WeekBounds {
   key: string; // YYYY-MM-DD of week start (local)
 }
 
+/** UTC ms of local midnight (start of the calendar day containing `now`) in `timeZone`. */
+export function startOfDay(timeZone: string, now = new Date()): number {
+  const { y, mo, d } = localParts(timeZone, now);
+  return zonedToUtcMs(timeZone, y, mo, d);
+}
+
 /** The most recently completed Monday-Sunday week in `timeZone`. */
 export function lastWeekBounds(timeZone: string, now = new Date()): WeekBounds {
   const thisMonday = weekKey(timeZone, now);

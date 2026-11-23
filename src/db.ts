@@ -331,6 +331,14 @@ export class BotDatabase {
       const row = this.db.prepare('SELECT COUNT(*) AS c FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ?').get(guildId, fromTs, toTs) as { c: number };
       return row.c;
     }
+    if (fromTs !== undefined) {
+      const row = this.db.prepare('SELECT COUNT(*) AS c FROM messages WHERE guild_id = ? AND ts >= ?').get(guildId, fromTs) as { c: number };
+      return row.c;
+    }
+    if (toTs !== undefined) {
+      const row = this.db.prepare('SELECT COUNT(*) AS c FROM messages WHERE guild_id = ? AND ts < ?').get(guildId, toTs) as { c: number };
+      return row.c;
+    }
     const row = this.db.prepare('SELECT COUNT(*) AS c FROM messages WHERE guild_id = ?').get(guildId) as { c: number };
     return row.c;
   }

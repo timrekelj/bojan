@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
-import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
+import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { cleanGiveawayTitle, filterGames, isBetaTitle, mergeFreeGames, normalizeEpic, normalizeGamerPower } from './freegames/sources.js';
 import { buildFreeGameMessage, buildFreeListMessage, priceLine } from './freegames/cards.js';
 import { ALL_STORES, type FreeSettings } from './freegames/types.js';
@@ -215,6 +215,18 @@ check('zonedToUtcMs', new Date(zonedToUtcMs('Europe/Ljubljana', 2026, 11, 9)).to
 const summer = zonedToUtcMs('Europe/Ljubljana', 2026, 7, 1);
 check('zonedToUtcMs DST', new Date(summer).toISOString() === '2026-06-30T22:00:00.000Z', new Date(summer).toISOString());
 check('currentWeekBounds', currentWeekBounds('UTC', new Date('2026-11-18T12:00:00Z')).key === '2026-11-16');
+const sod = new Date(startOfDay('Europe/Ljubljana', new Date('2026-11-23T10:30:00Z'))).toISOString();
+check('startOfDay Ljubljana', sod === '2026-11-22T23:00:00.000Z', sod);
+
+// countMessages with a lone bound (deterministic: own guild, fixed timestamps)
+const GB = 'guild-bounds';
+db.recordMessage(GB, 'c1', 'u', 1000, 'x0');
+db.recordMessage(GB, 'c1', 'u', 2000, 'x1');
+db.recordMessage(GB, 'c1', 'u', 3000, 'x2');
+check('countMessages lone fromTs', db.countMessages(GB, 2000) === 2, `got ${db.countMessages(GB, 2000)}`);
+check('countMessages lone toTs', db.countMessages(GB, undefined, 2000) === 1, `got ${db.countMessages(GB, undefined, 2000)}`);
+check('countMessages both bounds', db.countMessages(GB, 1000, 3000) === 2, `got ${db.countMessages(GB, 1000, 3000)}`);
+check('countMessages no bounds', db.countMessages(GB) === 3, `got ${db.countMessages(GB)}`);
 
 check('extractUrl', extractUrl('check this https://x.com/foo/status/123 out') === 'https://x.com/foo/status/123');
 check('extractUrl strips punctuation', extractUrl('look https://youtu.be/abc123.') === 'https://youtu.be/abc123');

@@ -5,7 +5,7 @@ import { serve } from '@hono/node-server';
 import { ChannelType, type Client } from 'discord.js';
 import type { BotDatabase, Settings } from '../db.js';
 import { config } from '../config.js';
-import { currentWeekBounds, lastWeekBounds, weekRangeLabel } from '../stats.js';
+import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
 import { dashboardPage, errorPage, loginPage, type DashboardData } from './views.js';
 import { filterGames, getFreeGames } from '../freegames/sources.js';
 import { seedFreeGames, seedStateKey } from '../freegames/actions.js';
@@ -269,7 +269,7 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
           lastWeeklySent: db.getState(`weekly:${config.guildId}`),
           embedsConverted: embedTotal,
         },
-        today: db.countMessages(config.guildId, Date.now() - 86_400_000),
+        today: db.countMessages(config.guildId, startOfDay(settings.timezone)),
         week: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
         allTime: { total, rows: allRows },
         reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
