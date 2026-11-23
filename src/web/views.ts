@@ -51,7 +51,20 @@ const CSS = `
   .sub, .muted { color: var(--muted); font-size: 13px; }
   .muted { margin: 0; }
   .empty { margin: 0; padding: 4px 0; color: var(--muted); }
-  .flash { display: flex; align-items: center; gap: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+  .flash { position: fixed; right: 24px; bottom: 24px; z-index: 50; max-width: min(360px, calc(100vw - 32px)); display: flex; align-items: center; gap: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--float); padding: 12px 16px; font-weight: 500; animation: toast 4.4s ease forwards; }
+  @keyframes toast {
+    0% { opacity: 0; transform: translateY(8px); visibility: visible; pointer-events: auto; }
+    5%, 91% { opacity: 1; transform: translateY(0); visibility: visible; pointer-events: auto; }
+    100% { opacity: 0; transform: translateY(0); visibility: hidden; pointer-events: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    @keyframes toast {
+      0% { opacity: 0; visibility: visible; pointer-events: auto; }
+      5%, 91% { opacity: 1; visibility: visible; pointer-events: auto; }
+      100% { opacity: 0; visibility: hidden; pointer-events: none; }
+    }
+  }
+  @media (max-width: 480px) { .flash { left: 16px; right: 16px; bottom: 16px; max-width: none; } }
   .flash::before { content: ''; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
   .kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
   .kpi { padding: 18px 20px; border-left: 1px solid var(--border); }
