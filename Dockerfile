@@ -7,8 +7,10 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
-# Stage 2: runtime — no native modules, so a plain alpine image works
+# Stage 2: runtime — @resvg/resvg-js ships prebuilt musl binaries (no compiler needed),
+# but it renders chart text with system fonts, so install fontconfig + DejaVu
 FROM node:26-alpine
+RUN apk add --no-cache fontconfig ttf-dejavu
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./

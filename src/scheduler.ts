@@ -1,6 +1,7 @@
 import type { Client, TextChannel } from 'discord.js';
-import type { BotDatabase, ReactionCountRow } from './db.js';
-import { barChartLines, currentWeekBounds, fmt, lastWeekBounds, leaderboardLines, localParts, weekRangeLabel } from './stats.js';
+import type { BotDatabase } from './db.js';
+import { currentWeekBounds, lastWeekBounds, localParts } from './stats.js';
+import { buildWeeklyStatsMessage } from './weekly.js';
 
 const TICK_MS = 30_000;
 
@@ -39,27 +40,21 @@ export function startWeeklyScheduler(client: Client, db: BotDatabase): NodeJS.Ti
         const channel = await guild.channels.fetch(settings.statsChannelId).catch(() => null);
         if (!channel || !(channel.isTextBased() && 'send' in channel)) continue;
 
-        const fmtRanks = (rows: ReactionCountRow[]): string =>
-          rows.length > 0 ? rows.map((r, i) => `${i + 1}. <@${r.userId}> (**${r.count}**)`).join(' · ') : '—';
-
-        const content = [
-          `## 📊 Weekly stats — ${weekRangeLabel(week, settings.timezone)}`,
-          `**${fmt(weekTotal)}** messages · **${fmt(weekReactions)}** reactions · ${fmt(db.distinctActiveUsers(guild.id))} active members (${fmt(total)} messages all time)`,
-          '',
-          '### 🏆 Top messagers',
-          ...leaderboardLines(topMessagers, weekTotal).slice(0, 5),
-          '',
-          '### 💬 Most used channels',
-          topChannels.length > 0 ? topChannels.map((c, i) => `${i + 1}. <#${c.channelId}> — **${fmt(c.count)}**`).join('\n') : '—',
-          '',
-          '### 😄 Reactions',
-          `Given:    ${fmtRanks(topGiven)}`,
-          `Received: ${fmtRanks(topReceived)}`,
-          '',
-          '### 📈 Messages per day',
-          ...barChartLines(perDay, week, settings.timezone),
-        ].join('\n');
-        await (channel as TextChannel).send(content);
+        const payload = buildWeeklyStatsMessage({
+          week,
+          timeZone: settings.timezone,
+          weekTotal,
+          weekReactions,
+          activeMembers: db.distinctActiveUsers(guild.id),
+          total,
+          topMessagers,
+          topChannels,
+          topGiven,
+          topReceived,
+          perDay,
+          guildIconUrl: guild.iconURL({ size: 128 }),
+        });
+        await (channel as TextChannel).send(payload);
         db.setState(stateKey, currentWeek.key);
         console.log(`[scheduler] posted weekly stats for guild ${guild.id} (week ${week.key})`);
       } catch (err) {

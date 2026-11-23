@@ -1,6 +1,9 @@
 // Offline smoke test: exercises the DB layer, stats math and provider
 // detection without needing a Discord token. Run with: npm run smoke
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { MessageFlags } from 'discord.js';
+import { renderDailyChart } from './chart.js';
+import { buildWeeklyStatsMessage } from './weekly.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
@@ -114,6 +117,28 @@ const perDay = db.messageCountsPerDay(G, lwk.start, lwk.end, 'UTC');
 check('per-day counts', perDay.length === 7 && perDay.reduce((s, d) => s + d.count, 0) === 31 && perDay[1]?.count === 5, JSON.stringify(perDay));
 const chart = barChartLines(perDay, lwk, 'UTC');
 check('bar chart', chart.length === 7 && chart[0]?.includes('Mon') === true && chart[6]?.trim().endsWith('7') === true && (chart[6]?.match(/█/g)?.length ?? 0) === 24, JSON.stringify(chart));
+
+// Weekly message (Components V2) + PNG chart
+const sampleDays = [0, 763, 1171, 639, 755, 164, 98].map((count, i) => ({ label: `${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][i]} ${16 + i}`, count }));
+const png = renderDailyChart(sampleDays);
+writeFileSync('/tmp/bojan-weekly-chart.png', png);
+check('chart is PNG', png.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), `${png.length} bytes`);
+check('chart handles all-zero data', renderDailyChart(sampleDays.map((d) => ({ ...d, count: 0 }))).length > 0);
+const weekly = buildWeeklyStatsMessage({
+  week: lwk, timeZone: 'UTC', weekTotal: 31, weekReactions: 3, activeMembers: 4, total: 21,
+  topMessagers: db.topUsers(G, 5, lwk.start, lwk.end), topChannels: chans, topGiven: given, topReceived: received, perDay,
+  guildIconUrl: 'https://example.com/icon.png',
+});
+const weeklyJson = JSON.stringify(weekly.components.map((c) => c.toJSON()));
+writeFileSync('/tmp/bojan-weekly-payload.json', JSON.stringify(weekly.components.map((c) => c.toJSON()), null, 2));
+check('weekly is Components V2', (weekly.flags & MessageFlags.IsComponentsV2) !== 0 && !('content' in weekly));
+check('weekly has one container with chart gallery', weekly.components.length === 1 && weeklyJson.includes('attachment://weekly-chart.png') && weeklyJson.includes('"type":17'));
+check('weekly does not ping', weekly.allowedMentions.parse.length === 0 && weekly.files[0]?.name === 'weekly-chart.png');
+const weeklyEmpty = buildWeeklyStatsMessage({
+  week: lwk, timeZone: 'UTC', weekTotal: 0, weekReactions: 0, activeMembers: 0, total: 0,
+  topMessagers: [], topChannels: [], topGiven: [], topReceived: [], perDay: [],
+});
+check('weekly empty data', JSON.stringify(weeklyEmpty.components[0]?.toJSON()).includes('—'));
 
 db.setState('k', 'v');
 check('bot state', db.getState('k') === 'v');
