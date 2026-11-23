@@ -3,7 +3,7 @@
 Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 14, built-in `node:sqlite`). It tracks message/reaction/voice/activity stats, posts weekly stats, converts embed links, announces free games, and serves a Hono dashboard with Discord OAuth. Charts are rendered to PNG with `@resvg/resvg-js`. User-facing docs and setup live in `README.md`; this file covers working in the code.
 
 ## Module map (`src/`)
-- `index.ts`: startup wiring (db, client, web server, weekly scheduler, free-games poller) and shutdown.
+- `index.ts`: startup wiring (db, client, web server, weekly scheduler) and shutdown.
 - `config.ts`: env vars into `config` (required vars throw at import; `guildId`, `databasePath`, ...).
 - `bot.ts`: client and intents, slash command definitions, per-guild registration, event handlers, `/backfill`.
 - `db.ts`: `BotDatabase`, the only SQL access (schema, migrations, queries, key/value `bot_state` table).
@@ -12,7 +12,7 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 - `chart.ts`: SVG-to-PNG daily chart (resvg uses system fonts; the Dockerfile installs DejaVu).
 - `scheduler.ts`: 30s tick that posts last week's stats once per week (`weekly:<guild>` state key).
 - `embeds/`: `providers.ts` (pure link detection and rewriting), `converter.ts` (webhook repost of the converted link).
-- `freegames/`: `types.ts`, `sources.ts` (fetch, normalize, filter), `freestuff.ts` (FreeStuff webhook verify + normalizer), `cards.ts`, `form.ts` (dashboard form parsing, `needsSeed`), `actions.ts` (`announceInGuild`, `titleDedupeKey`, `seedFreeGames`), `poller.ts` (15 min poll).
+- `freegames/`: `types.ts`, `filters.ts` (`isBetaTitle`, `matchesFilters`, `filterGames`), `freestuff.ts` (FreeStuff webhook verify + normalizer), `cards.ts`, `form.ts` (dashboard form parsing), `actions.ts` (`announceInGuild`, `announceEverywhere`, `titleDedupeKey`).
 - `web/server.ts`: Hono routes, OAuth, settings POST handlers. `web/views.ts`: server-rendered HTML and CSS.
 - `smoke.ts`: offline test script.
 
@@ -36,12 +36,11 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 - Don't add dependencies without good reason; the dependency list is deliberately tiny.
 
 ## Free games
-- Sources: Epic's promotions endpoint and GamerPower's giveaways API (`sources.ts`), plus the optional FreeStuff webhook (`POST /webhooks/freestuff` in `web/server.ts`, logic in `freestuff.ts`, enabled by `FREESTUFF_PUBLIC_KEY`; push-only, no REST key). **GamerPower attribution is required**: cards show `-# via GamerPower` for GamerPower-sourced games. Keep it. FreeStuff cards show `-# via FreeStuff`.
-- **Cross-source dedupe**: every announce/seed marks both `g.key` and `titleDedupeKey(g)` (`t:<platform>:<store>:<normalized title>`) in `free_posted`, and skips a game if either is posted. Use `announceInGuild` / `markGamesPosted` / `isGamePosted` from `actions.ts`, not raw `markFreePosted`. The webhook is signature-verified (Ed25519), replay-guarded, answers 204 first and announces asynchronously.
-- Everything is normalized to `FreeGame` (`types.ts`): `key` is a stable source-prefixed id (`epic:<id>` / `gp:<id>`), `kind` is `game | dlc | beta`, `platform` is `pc | mobile | console`, and `store` is one of `ALL_STORES`. Beta/playtest/demo keys are detected by `isBetaTitle`; titles are cleaned with `cleanGiveawayTitle`.
-- `mergeFreeGames` combines the sources. `FreeData` carries `epicOk` / `gamerpowerOk`. `announceable()` holds back GamerPower copies of Epic PC games while Epic is down, to avoid double posts.
-- Filters (`FreeSettings`: `stores`, `includeDlc`, `includeBeta` (default off), `includeMobile`, `includeConsole`) are applied by `matchesFilters` / `filterGames`. A new filter needs: the type, a DB column plus migration, `form.ts` parsing, `needsSeed`, the dashboard view, and the smoke tests.
-- **Backlog seeding**: enabling the feature must never spam the channel. `needsSeed(prev, next)` returns true when the channel changed or a store/include switch was newly enabled. The dashboard POST then calls `seedFreeGames`, which marks everything currently free as posted without announcing. The poller does the same silently on its first run per guild (state key `freeseed:<guild>`). The key is only set when both sources answered. Announce dedupe uses `markFreePosted` / `isFreePosted`.
+- Source: the FreeStuff webhook only, no polling (Epic's free games arrive through it with store `epic`) (`POST /webhooks/freestuff` in `web/server.ts`, logic in `freestuff.ts`, enabled by `FREESTUFF_PUBLIC_KEY`; push-only, no REST key). FreeStuff cards show `-# via FreeStuff`. Console products from FreeStuff are skipped.
+- **Dedupe**: every announce marks both `g.key` and `titleDedupeKey(g)` (`t:<platform>:<store>:<normalized title>`) in `free_posted`, and skips a game if either is posted. Use `announceInGuild` / `markGamesPosted` / `isGamePosted` from `actions.ts`, not raw `markFreePosted`. The webhook is signature-verified (Ed25519), replay-guarded, answers 204 first and announces asynchronously.
+- Everything is normalized to `FreeGame` (`types.ts`): `key` is a stable id (`fs:<id>`), `kind` is `game | dlc | beta`, `platform` is `pc | mobile`, and `store` is one of `ALL_STORES`. Beta/playtest/demo keys are detected by `isBetaTitle`.
+- Filters (`FreeSettings`: `stores`, `includeDlc`, `includeBeta` (default off), `includeMobile`) are applied by `matchesFilters` / `filterGames`. A new filter needs: the type, a DB column plus migration, `form.ts` parsing, the dashboard view, and the smoke tests.
+- **No backlog**: webhooks only deliver new announcements, so nothing is seeded on enabling the feature or changing filters. Announce dedupe uses `markFreePosted` / `isFreePosted`. The dashboard status shows whether `FREESTUFF_PUBLIC_KEY` is set and the announced count.
 
 ## Discord requirements
 - Gateway intents (`bot.ts`): regular intents Guilds, GuildMessages, GuildMessageReactions, GuildVoiceStates; privileged intents MessageContent, GuildMembers, GuildPresences. The privileged ones must be enabled in the developer portal.

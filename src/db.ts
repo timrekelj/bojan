@@ -196,8 +196,7 @@ CREATE TABLE IF NOT EXISTS free_settings (
   stores TEXT NOT NULL,
   include_dlc INTEGER NOT NULL DEFAULT 0,
   include_beta INTEGER NOT NULL DEFAULT 0,
-  include_mobile INTEGER NOT NULL DEFAULT 0,
-  include_console INTEGER NOT NULL DEFAULT 0
+  include_mobile INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS free_posted (
@@ -278,6 +277,10 @@ export class BotDatabase {
     const freeCols = this.db.prepare('PRAGMA table_info(free_settings)').all() as { name: string }[];
     if (!freeCols.some((c) => c.name === 'include_beta')) {
       this.db.exec('ALTER TABLE free_settings ADD COLUMN include_beta INTEGER NOT NULL DEFAULT 0');
+    }
+    // Console support was removed: drop the now-unused column (after the include_beta migration above).
+    if (freeCols.some((c) => c.name === 'include_console')) {
+      this.db.exec('ALTER TABLE free_settings DROP COLUMN include_console');
     }
     // Dedup key: the same Discord message must never be counted twice
     // (live tracking + backfill can overlap).
@@ -774,10 +777,10 @@ export class BotDatabase {
 
   getFreeSettings(guildId: string): FreeSettings {
     const row = this.db.prepare('SELECT * FROM free_settings WHERE guild_id = ?').get(guildId) as
-      | { channel_id: string | null; ping_role_id: string | null; stores: string; include_dlc: number; include_beta: number; include_mobile: number; include_console: number }
+      | { channel_id: string | null; ping_role_id: string | null; stores: string; include_dlc: number; include_beta: number; include_mobile: number }
       | undefined;
     if (!row) {
-      return { guildId, channelId: null, pingRoleId: null, stores: [...ALL_STORES], includeDlc: false, includeBeta: false, includeMobile: false, includeConsole: false };
+      return { guildId, channelId: null, pingRoleId: null, stores: [...ALL_STORES], includeDlc: false, includeBeta: false, includeMobile: false };
     }
     let stores: Store[] = [...ALL_STORES];
     try {
@@ -794,23 +797,21 @@ export class BotDatabase {
       includeDlc: row.include_dlc === 1,
       includeBeta: row.include_beta === 1,
       includeMobile: row.include_mobile === 1,
-      includeConsole: row.include_console === 1,
     };
   }
 
   saveFreeSettings(s: FreeSettings): void {
     this.db
-      .prepare(`INSERT INTO free_settings (guild_id, channel_id, ping_role_id, stores, include_dlc, include_beta, include_mobile, include_console)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      .prepare(`INSERT INTO free_settings (guild_id, channel_id, ping_role_id, stores, include_dlc, include_beta, include_mobile)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                   channel_id = excluded.channel_id,
                   ping_role_id = excluded.ping_role_id,
                   stores = excluded.stores,
                   include_dlc = excluded.include_dlc,
                   include_beta = excluded.include_beta,
-                  include_mobile = excluded.include_mobile,
-                  include_console = excluded.include_console`)
-      .run(s.guildId, s.channelId, s.pingRoleId, JSON.stringify(s.stores), s.includeDlc ? 1 : 0, s.includeBeta ? 1 : 0, s.includeMobile ? 1 : 0, s.includeConsole ? 1 : 0);
+                  include_mobile = excluded.include_mobile`)
+      .run(s.guildId, s.channelId, s.pingRoleId, JSON.stringify(s.stores), s.includeDlc ? 1 : 0, s.includeBeta ? 1 : 0, s.includeMobile ? 1 : 0);
   }
 
   isFreePosted(guildId: string, gameKey: string): boolean {

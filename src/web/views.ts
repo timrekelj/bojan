@@ -223,9 +223,8 @@ export interface DashboardData {
     settings: FreeSettings;
     roles: { id: string; name: string }[];
     /** Games free now matching the filters; null when the sources couldn't be reached. */
-    currentCount: number | null;
+    webhookEnabled: boolean;
     postedCount: number;
-    lastSeed: string | null;
     flash: { kind: 'saved' } | null;
   };
 }
@@ -364,14 +363,12 @@ function freeSection(d: DashboardData): string {
   const inc = (name: string, on: boolean, label: string, help: string): string =>
     `<label class="opt"><input type="checkbox" name="${name}" value="1"${on ? ' checked' : ''}><span title="${escapeHtml(help)}">${escapeHtml(label)}</span></label>`;
   const status = [
-    f.currentCount === null ? 'currently free: unavailable (sources unreachable)' : `${fmt(f.currentCount)} free now matching filters`,
+    f.webhookEnabled ? 'FreeStuff webhook enabled' : 'FreeStuff webhook disabled (set FREESTUFF_PUBLIC_KEY)',
     `${fmt(f.postedCount)} recorded as announced`,
-    `last backlog seed ${f.lastSeed ? fmtDate(Number(f.lastSeed), d.settings.timezone) : 'never'}`,
   ].join(' · ');
   return `<section id="free" aria-labelledby="h-free"><div class="sec-head"><h2 id="h-free">Free games</h2><span class="sub">${escapeHtml(status)}</span></div>
     ${flash}
     <form class="panel" method="post" action="/free-settings">
-      <p class="sub">Announces temporarily free games to a channel. Only new freebies are announced: games already free when you set the channel or widen the filters are recorded silently. These settings can only be changed here (there are no Discord commands).</p>
       <div class="row">
         <div class="field"><label for="freeChannel">Announcement channel</label><span class="help">Where new free games are posted.</span>
           <select id="freeChannel" name="channel"><option value="">— disabled —</option>${channelOpts}</select></div>
@@ -381,7 +378,7 @@ function freeSection(d: DashboardData): string {
       <div class="field"><span class="lbl">Stores</span><span class="help">Applies to PC games.</span>
         <div class="checks">${storeChecks}</div></div>
       <div class="field"><span class="lbl">Also include</span>
-        <div class="checks">${inc('includeDlc', s.includeDlc, 'DLC / in-game loot', 'Add-ons and loot drops')}${inc('includeBeta', s.includeBeta, 'Betas / playtests', 'Beta, playtest and demo keys')}${inc('includeMobile', s.includeMobile, 'Mobile', 'Android / iOS games')}${inc('includeConsole', s.includeConsole, 'Console', 'PlayStation / Xbox / Switch')}</div></div>
+        <div class="checks">${inc('includeDlc', s.includeDlc, 'DLC / in-game loot', 'Add-ons and loot drops')}${inc('includeBeta', s.includeBeta, 'Betas / playtests', 'Beta, playtest and demo keys')}${inc('includeMobile', s.includeMobile, 'Mobile', 'Android / iOS games')}</div></div>
       <div class="actions"><button type="submit">Save free games settings</button></div>
     </form>
   </section>`;

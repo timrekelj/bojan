@@ -10,10 +10,10 @@ import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
-import { cleanGiveawayTitle, filterGames, isBetaTitle, mergeFreeGames, normalizeEpic, normalizeGamerPower } from './freegames/sources.js';
+import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
-import { ALL_STORES, type FreeSettings } from './freegames/types.js';
-import { needsSeed, parseFreeForm } from './freegames/form.js';
+import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
+import { parseFreeForm } from './freegames/form.js';
 import { leaderboard, youSection } from './web/views.js';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { announceInGuild, markGamesPosted, titleDedupeKey, isGamePosted } from './freegames/actions.js';
@@ -311,107 +311,62 @@ rmSync(dir, { recursive: true, force: true });
 
 // ---- free games (offline fixtures) ----------------------------------------
 {
-  const NOW = Date.UTC(2026, 10, 23, 12);
-  const iso = (ms: number): string => new Date(ms).toISOString();
-  const epicJson = {
-    data: { Catalog: { searchStore: { elements: [
-      {
-        id: 'e1', title: 'Free Epic Game', description: 'Desc', keyImages: [{ type: 'Thumbnail', url: 'https://img/t.jpg' }, { type: 'OfferImageWide', url: 'https://img/w.jpg' }],
-        price: { totalPrice: { fmtPrice: { originalPrice: '$19.99' } } },
-        offerMappings: [{ pageSlug: 'free-epic-game' }], catalogNs: { mappings: [] }, productSlug: null,
-        promotions: { promotionalOffers: [{ promotionalOffers: [{ startDate: iso(NOW - H), endDate: iso(NOW + D), discountSetting: { discountPercentage: 0 } }] }], upcomingPromotionalOffers: [] },
-      },
-      {
-        id: 'e2', title: 'Next Week Game', description: null, keyImages: [], price: null, offerMappings: null, catalogNs: { mappings: [{ pageSlug: '[]' }] }, productSlug: 'next-week',
-        promotions: { promotionalOffers: [], upcomingPromotionalOffers: [{ promotionalOffers: [{ startDate: iso(NOW + 2 * D), endDate: iso(NOW + 9 * D), discountSetting: { discountPercentage: 0 } }] }] },
-      },
-      { id: 'e3', title: 'Discounted 50%', promotions: { promotionalOffers: [{ promotionalOffers: [{ startDate: iso(NOW - H), endDate: iso(NOW + D), discountSetting: { discountPercentage: 50 } }] }], upcomingPromotionalOffers: [] } },
-      { id: 'e4', title: 'Mystery', promotions: null, keyImages: null },
-      null,
-    ] } } },
-  };
-  const epic = normalizeEpic(epicJson, NOW);
-  check('epic: one current free game', epic.current.length === 1 && epic.current[0]?.key === 'epic:e1', JSON.stringify(epic.current.map((g) => g.key)));
-  check('epic: url, image, worth', epic.current[0]?.url === 'https://store.epicgames.com/p/free-epic-game' && epic.current[0]?.imageUrl === 'https://img/w.jpg' && epic.current[0]?.worth === '$19.99');
-  check('epic: upcoming with junk slug falls back to productSlug', epic.upcoming.length === 1 && epic.upcoming[0]?.url === 'https://store.epicgames.com/p/next-week' && epic.upcoming[0]?.worth === null);
-  check('epic: handles garbage input', normalizeEpic(null).current.length === 0 && normalizeEpic({ data: null }).upcoming.length === 0);
-
-  const gpJson = [
-    { id: 1, title: 'Cool Game (Steam) Giveaway', worth: '$4.99', image: 'https://img/1.jpg', description: 'x', open_giveaway_url: 'https://gp/1', published_date: '2026-11-20 10:00:00', type: 'Game', platforms: 'PC, Steam', end_date: '2026-11-30 23:59:00', status: 'Active' },
-    { id: 2, title: 'Epic Dup Giveaway', worth: 'N/A', image: '', description: '', open_giveaway_url: 'https://gp/2', published_date: '2026-11-20 10:00:00', type: 'Game', platforms: 'PC, Epic Games Store', end_date: 'N/A', status: 'Active' },
-    { id: 3, title: 'Shiny DLC Giveaway', worth: '$9.99', image: '', description: '', open_giveaway_url: 'https://gp/3', published_date: '2026-11-20 10:00:00', type: 'DLC', platforms: 'PC, GOG', end_date: 'N/A', status: 'Active' },
-    { id: 4, title: 'Phone Game Giveaway', worth: '$1.99', image: '', description: '', open_giveaway_url: 'https://gp/4', published_date: '2026-11-20 10:00:00', type: 'Game', platforms: 'Android', end_date: 'N/A', status: 'Active' },
-    { id: 5, title: 'Console Game Giveaway', worth: 'N/A', image: '', description: '', open_giveaway_url: 'https://gp/5', published_date: '2026-11-20 10:00:00', type: 'Game', platforms: 'PS5, Xbox One', end_date: 'N/A', status: 'Active' },
-    { id: 6, title: 'Early Thing Giveaway', worth: 'N/A', image: '', description: '', open_giveaway_url: 'https://gp/6', published_date: '2026-11-20 10:00:00', type: 'Early Access', platforms: 'PC, Itch.io', end_date: 'N/A', status: 'Active' },
-    { id: 7, title: 'Expired Giveaway', worth: 'N/A', image: '', description: '', open_giveaway_url: 'https://gp/7', published_date: '2026-10-01 10:00:00', type: 'Game', platforms: 'PC, Steam', end_date: '2026-11-01 00:00:00', status: 'Active' },
-    { id: 8, title: 'Done Giveaway', worth: 'N/A', image: '', description: '', open_giveaway_url: 'https://gp/8', published_date: '2026-10-01 10:00:00', type: 'Game', platforms: 'PC, Steam', end_date: 'N/A', status: 'Expired' },
+  const mk = (key: string, title: string, o: Partial<FreeGame> = {}): FreeGame => ({
+    key, title, description: '', store: 'steam', kind: 'game', platform: 'pc', url: `https://x/${key}`, imageUrl: null, worth: null, endsAt: null, ...o,
+  });
+  const fixtures: FreeGame[] = [
+    mk('fs:e1', 'Free Epic Game', { store: 'epic', worth: '$19.99', imageUrl: 'https://img/w.jpg' }),
+    mk('fs:1', 'Cool Game', { worth: '$4.99', endsAt: Date.UTC(2026, 10, 30, 23, 59) }),
+    mk('fs:3', 'Shiny DLC', { store: 'gog', kind: 'dlc' }),
+    mk('fs:4', 'Phone Game', { store: 'other', platform: 'mobile' }),
+    mk('fs:6', 'Early Thing', { store: 'itch' }),
   ];
-  const gp = normalizeGamerPower(gpJson, NOW);
-  const byKey = new Map(gp.map((g) => [g.key, g]));
-  check('gamerpower: expired/inactive dropped', gp.length === 6 && !byKey.has('gp:7') && !byKey.has('gp:8'), `got ${gp.length}`);
-  check('gamerpower: title suffix stripped', byKey.get('gp:1')?.title === 'Cool Game' && cleanGiveawayTitle('Foo Giveaway') === 'Foo');
-  check('gamerpower: store/kind/platform classification',
-    byKey.get('gp:1')?.store === 'steam' && byKey.get('gp:2')?.store === 'epic' && byKey.get('gp:3')?.kind === 'dlc' && byKey.get('gp:3')?.store === 'gog' &&
-    byKey.get('gp:4')?.platform === 'mobile' && byKey.get('gp:5')?.platform === 'console' && byKey.get('gp:6')?.kind === 'game' && byKey.get('gp:6')?.store === 'itch');
-  check('gamerpower: worth/endsAt parsing', byKey.get('gp:1')?.worth === '$4.99' && byKey.get('gp:2')?.worth === null && byKey.get('gp:1')?.endsAt === Date.UTC(2026, 10, 30, 23, 59) && byKey.get('gp:2')?.endsAt === null);
-  check('gamerpower: non-array (empty 201 object) → []', normalizeGamerPower({ status: 0, status_message: 'No active giveaways' }, NOW).length === 0);
+  const byKey = new Map(fixtures.map((g) => [g.key, g]));
 
-  const merged = mergeFreeGames(epic.current, gp);
-  check('merge: epic authoritative drops GP epic PC game', !merged.some((g) => g.key === 'gp:2') && merged.some((g) => g.key === 'epic:e1'));
-  check('merge: epic down keeps GP epic game', mergeFreeGames(null, gp).some((g) => g.key === 'gp:2'));
-  const dupGp = normalizeGamerPower([{ ...gpJson[0], id: 99, title: 'cool game giveaway' }], NOW);
-  check('merge: dedupe by title+store', mergeFreeGames(null, [...gp, ...dupGp]).filter((g) => g.title.toLowerCase() === 'cool game').length === 1);
+  const defaults: FreeSettings = { guildId: G, channelId: null, pingRoleId: null, stores: [...ALL_STORES], includeDlc: false, includeBeta: false, includeMobile: false };
+  const keys = (f: FreeSettings): string => filterGames(fixtures, f).map((g) => g.key).sort().join(',');
+  check('filter: defaults = PC full games only', keys(defaults) === 'fs:1,fs:6,fs:e1', keys(defaults));
+  check('filter: includeDlc', keys({ ...defaults, includeDlc: true }) === 'fs:1,fs:3,fs:6,fs:e1');
+  check('filter: mobile', keys({ ...defaults, includeMobile: true }) === 'fs:1,fs:4,fs:6,fs:e1');
+  check('filter: store disabled', keys({ ...defaults, stores: ['epic'] }) === 'fs:e1', keys({ ...defaults, stores: ['epic'] }));
 
-  const defaults: FreeSettings = { guildId: G, channelId: null, pingRoleId: null, stores: [...ALL_STORES], includeDlc: false, includeBeta: false, includeMobile: false, includeConsole: false };
-  const keys = (f: FreeSettings): string => filterGames(merged, f).map((g) => g.key).sort().join(',');
-  check('filter: defaults = PC full games only', keys(defaults) === 'epic:e1,gp:1,gp:6', keys(defaults));
-  check('filter: includeDlc', keys({ ...defaults, includeDlc: true }) === 'epic:e1,gp:1,gp:3,gp:6');
-  check('filter: mobile + console', keys({ ...defaults, includeMobile: true, includeConsole: true }) === 'epic:e1,gp:1,gp:4,gp:5,gp:6');
-  check('filter: store disabled', keys({ ...defaults, stores: ['epic'] }) === 'epic:e1', keys({ ...defaults, stores: ['epic'] }));
-
-  const cool = byKey.get('gp:1')!;
+  const cool = byKey.get('fs:1')!;
   check('price line', priceLine(cool).startsWith('~~$4.99~~ **FREE** until <t:') && priceLine({ ...cool, worth: null, endsAt: null }) === '**FREE**');
   const card = buildFreeGameMessage(cool, { pingRoleId: '123' });
   const cardJson = JSON.stringify(card.components.map((c) => c.toJSON()));
   check('announcement card: V2 flag, role ping, attribution, link button',
-    card.flags === MessageFlags.IsComponentsV2 && cardJson.includes('<@&123>') && cardJson.includes('via GamerPower') && cardJson.includes('Open on Steam') && JSON.stringify(card.allowedMentions) === '{"roles":["123"]}');
-  const plain = buildFreeGameMessage(epic.current[0]!);
-  check('announcement card: no ping → no mentions, no attribution', !JSON.stringify(plain.components.map((c) => c.toJSON())).includes('GamerPower') && JSON.stringify(plain.allowedMentions) === '{"parse":[]}');
+    card.flags === MessageFlags.IsComponentsV2 && cardJson.includes('<@&123>') && cardJson.includes('via FreeStuff') && cardJson.includes('Open on Steam') && JSON.stringify(card.allowedMentions) === '{"roles":["123"]}');
+  const plain = buildFreeGameMessage(fixtures[0]!);
+  check('announcement card: no ping → no mentions', JSON.stringify(plain.allowedMentions) === '{"parse":[]}');
 
   const fdir = mkdtempSync(join(tmpdir(), 'bojan-free-'));
   const fdb = new BotDatabase(join(fdir, 'free.db'));
   const fs0 = fdb.getFreeSettings(G);
-  check('free settings defaults', fs0.channelId === null && fs0.stores.length === ALL_STORES.length && !fs0.includeDlc && !fs0.includeBeta && !fs0.includeMobile && !fs0.includeConsole);
+  check('free settings defaults', fs0.channelId === null && fs0.stores.length === ALL_STORES.length && !fs0.includeDlc && !fs0.includeBeta && !fs0.includeMobile);
   fdb.saveFreeSettings({ ...fs0, channelId: 'ch1', pingRoleId: 'r1', stores: ['epic', 'steam'], includeDlc: true, includeBeta: true });
   const fs1 = fdb.getFreeSettings(G);
   check('free settings round-trip', fs1.channelId === 'ch1' && fs1.pingRoleId === 'r1' && fs1.stores.join() === 'epic,steam' && fs1.includeDlc && fs1.includeBeta && !fs1.includeMobile);
   fdb.saveFreeSettings({ ...fs1, channelId: null, pingRoleId: null });
   check('free settings update/clear', fdb.getFreeSettings(G).channelId === null && fdb.getFreeSettings(G).pingRoleId === null);
-  check('free_posted: mark + dedupe', fdb.markFreePosted(G, ['epic:e1', 'gp:1']) === 2 && fdb.markFreePosted(G, ['epic:e1', 'gp:3']) === 1 && fdb.isFreePosted(G, 'gp:3') && !fdb.isFreePosted(G, 'gp:9') && !fdb.isFreePosted('other', 'gp:3') && fdb.countFreePosted(G) === 3);
+  check('free_posted: mark + dedupe', fdb.markFreePosted(G, ['fs:e1', 'fs:1']) === 2 && fdb.markFreePosted(G, ['fs:e1', 'fs:3']) === 1 && fdb.isFreePosted(G, 'fs:3') && !fdb.isFreePosted(G, 'fs:9') && !fdb.isFreePosted('other', 'fs:3') && fdb.countFreePosted(G) === 3);
   fdb.close();
 
   // beta classification
-  const gpBeta = (id: number, title: string, type = 'Game') => ({ id, title, worth: 'N/A', image: '', description: '', open_giveaway_url: `https://gp/${id}`, published_date: '2026-11-20 10:00:00', type, platforms: 'PC, Steam', end_date: 'N/A', status: 'Active' });
-  const betaGp = normalizeGamerPower([
-    gpBeta(101, 'Scallywags Playtest Steam Key'),
-    gpBeta(102, 'Chop Shop Playtest (Steam) Key'),
-    gpBeta(103, 'Zero King (Beta) Steam Key'),
-    gpBeta(104, 'DungeonLoot: Open Beta Has Arrived!'),
-    gpBeta(105, 'Cozy Farm Giveaway', 'Early Access'),
-    gpBeta(106, 'Betrayal at Club Low Giveaway'),
-    gpBeta(107, 'Alphabet Adventure Key'),
-    gpBeta(108, 'Fathom Reach Playtest Steam Key Giveaway', 'Early Access'),
-    gpBeta(109, 'Odd Bundle Beta', 'Other'),
-  ], NOW);
-  const bk = new Map(betaGp.map((g) => [g.key, g]));
-  check('beta: playtest/beta titles classified beta', ['gp:101', 'gp:102', 'gp:103', 'gp:104'].every((k) => bk.get(k)?.kind === 'beta'), betaGp.map((g) => `${g.key}=${g.kind}`).join(' '));
-  check('beta: Early Access normal title → game, Early Access playtest → beta, Other → dlc', bk.get('gp:105')?.kind === 'game' && bk.get('gp:108')?.kind === 'beta' && bk.get('gp:109')?.kind === 'dlc');
-  check('beta: word boundary false positives stay game', bk.get('gp:106')?.kind === 'game' && bk.get('gp:107')?.kind === 'game' && !isBetaTitle('Betrayal at Club Low') && isBetaTitle('Foo DEMO') && isBetaTitle('Bar Test Key') && isBetaTitle('Baz Closed Beta'));
-  check('beta: key suffix stripped from titles', bk.get('gp:101')?.title === 'Scallywags Playtest' && bk.get('gp:102')?.title === 'Chop Shop Playtest' && bk.get('gp:103')?.title === 'Zero King (Beta)' && cleanGiveawayTitle('Foo (Steam) Giveaway') === 'Foo' && cleanGiveawayTitle('Keyboard Hero') === 'Keyboard Hero');
-  const betaKeys = (f: FreeSettings): string => filterGames(betaGp, f).map((g) => g.key).join(',');
-  check('beta: excluded by default', betaKeys(defaults) === 'gp:105,gp:106,gp:107', betaKeys(defaults));
-  check('beta: includeBeta admits them (platform rules still apply)', betaKeys({ ...defaults, includeBeta: true }).split(',').length === 8 && betaKeys({ ...defaults, includeBeta: true, stores: ['epic'] }) === '');
-  check('beta: label on card', JSON.stringify(buildFreeGameMessage(bk.get('gp:101')!).components.map((c) => c.toJSON())).includes('Beta / playtest'));
+  const betaGames = [
+    mk('b:101', 'Scallywags Playtest', { kind: isBetaTitle('Scallywags Playtest') ? 'beta' : 'game' }),
+    mk('b:102', 'Zero King (Beta)', { kind: isBetaTitle('Zero King (Beta)') ? 'beta' : 'game' }),
+    mk('b:103', 'DungeonLoot: Open Beta Has Arrived!', { kind: isBetaTitle('DungeonLoot: Open Beta Has Arrived!') ? 'beta' : 'game' }),
+    mk('b:105', 'Cozy Farm'),
+    mk('b:106', 'Betrayal at Club Low', { kind: isBetaTitle('Betrayal at Club Low') ? 'beta' : 'game' }),
+    mk('b:107', 'Alphabet Adventure', { kind: isBetaTitle('Alphabet Adventure') ? 'beta' : 'game' }),
+  ];
+  const bk = new Map(betaGames.map((g) => [g.key, g]));
+  check('beta: playtest/beta titles classified beta', ['b:101', 'b:102', 'b:103'].every((k) => bk.get(k)?.kind === 'beta'), betaGames.map((g) => `${g.key}=${g.kind}`).join(' '));
+  check('beta: word boundary false positives stay game', bk.get('b:106')?.kind === 'game' && bk.get('b:107')?.kind === 'game' && !isBetaTitle('Betrayal at Club Low') && isBetaTitle('Foo DEMO') && isBetaTitle('Bar Test Key') && isBetaTitle('Baz Closed Beta'));
+  const betaKeys = (f: FreeSettings): string => filterGames(betaGames, f).map((g) => g.key).join(',');
+  check('beta: excluded by default', betaKeys(defaults) === 'b:105,b:106,b:107', betaKeys(defaults));
+  check('beta: includeBeta admits them (platform rules still apply)', betaKeys({ ...defaults, includeBeta: true }).split(',').length === 6 && betaKeys({ ...defaults, includeBeta: true, stores: ['epic'] }) === '');
+  check('beta: label on card', JSON.stringify(buildFreeGameMessage(bk.get('b:101')!).components.map((c) => c.toJSON())).includes('Beta / playtest'));
 
   // migration: free_settings created before include_beta existed
   const mdir = mkdtempSync(join(tmpdir(), 'bojan-freemig-'));
@@ -426,27 +381,21 @@ rmSync(dir, { recursive: true, force: true });
   mdb.saveFreeSettings({ ...ms, includeBeta: true });
   check('migration: includeBeta saves after migration', mdb.getFreeSettings(G).includeBeta);
   mdb.close();
+  const raw2 = new DatabaseSync(mpath);
+  const migCols = (raw2.prepare('PRAGMA table_info(free_settings)').all() as { name: string }[]).map((c) => c.name);
+  raw2.close();
+  check('migration: include_console dropped, include_beta present', !migCols.includes('include_console') && migCols.includes('include_beta'), migCols.join());
   rmSync(mdir, { recursive: true, force: true });
   rmSync(fdir, { recursive: true, force: true });
 
-  // dashboard form parsing + backlog-seed decision
+  // dashboard form parsing
   const chans = new Set(['c1', 'c2']);
   const roles = new Set(['r1']);
   const pf = parseFreeForm({ channel: 'c1', pingRole: 'r1', stores: ['steam', 'bogus', 'epic'], includeDlc: '1' }, G, chans, roles);
-  check('form: parses valid input', pf.channelId === 'c1' && pf.pingRoleId === 'r1' && pf.stores.join() === 'epic,steam' && pf.includeDlc && !pf.includeBeta && !pf.includeMobile && !pf.includeConsole);
+  check('form: parses valid input', pf.channelId === 'c1' && pf.pingRoleId === 'r1' && pf.stores.join() === 'epic,steam' && pf.includeDlc && !pf.includeBeta && !pf.includeMobile);
   const pbad = parseFreeForm({ channel: 'nope', pingRole: 'nope', stores: 'gog' }, G, chans, roles);
   check('form: unknown channel/role -> null, single store string ok', pbad.channelId === null && pbad.pingRoleId === null && pbad.stores.join() === 'gog');
   check('form: empty form = disabled, no stores', parseFreeForm({}, G, chans, roles).stores.length === 0 && parseFreeForm({}, G, chans, roles).channelId === null);
-  const base: FreeSettings = { guildId: G, channelId: 'c1', pingRoleId: null, stores: ['epic'], includeDlc: false, includeBeta: false, includeMobile: false, includeConsole: false };
-  check('seed: unchanged -> no', !needsSeed(base, { ...base }));
-  check('seed: ping role change only -> no', !needsSeed(base, { ...base, pingRoleId: 'r1' }));
-  check('seed: channel changed -> yes', needsSeed(base, { ...base, channelId: 'c2' }));
-  check('seed: disabled -> set -> yes', needsSeed({ ...base, channelId: null }, base));
-  check('seed: set -> disabled -> no', !needsSeed(base, { ...base, channelId: null }));
-  check('seed: store added -> yes', needsSeed(base, { ...base, stores: ['epic', 'gog'] }));
-  check('seed: store removed -> no', !needsSeed({ ...base, stores: ['epic', 'gog'] }, base));
-  check('seed: include flag enabled -> yes', needsSeed(base, { ...base, includeBeta: true }) && needsSeed(base, { ...base, includeMobile: true }) && needsSeed(base, { ...base, includeConsole: true }) && needsSeed(base, { ...base, includeDlc: true }));
-  check('seed: include flag disabled -> no', !needsSeed({ ...base, includeDlc: true }, base));
 }
 
 // ---- FreeStuff webhook ------------------------------------------------------
@@ -485,22 +434,22 @@ rmSync(dir, { recursive: true, force: true });
     until: 1800000000000, ...o,
   });
   const g1 = normalizeFreeStuffProduct(prod());
-  check('freestuff normalize: keep game', !!g1 && g1.key === 'fs:1' && g1.source === 'freestuff' && g1.kind === 'game' && g1.store === 'epic' && g1.platform === 'pc' && g1.url === 'https://s/high' && g1.imageUrl === 'https://i/wide.png' && g1.worth === '$4.99' && g1.endsAt === 1800000000000 && g1.description === 'Hello', JSON.stringify(g1));
+  check('freestuff normalize: keep game', !!g1 && g1.key === 'fs:1' && g1.kind === 'game' && g1.store === 'epic' && g1.platform === 'pc' && g1.url === 'https://s/high' && g1.imageUrl === 'https://i/wide.png' && g1.worth === '$4.99' && g1.endsAt === 1800000000000 && g1.description === 'Hello', JSON.stringify(g1));
   check('freestuff normalize: EUR worth when no USD', normalizeFreeStuffProduct(prod({ prices: [{ currency: 'EUR', oldValue: 599 }] }))?.worth === '€5.99');
   check('freestuff normalize: no until / no wide image / no prices', (() => { const g = normalizeFreeStuffProduct(prod({ until: 0, images: [{ url: 'x', flags: 0 }], prices: [] })); return !!g && g.endsAt === null && g.imageUrl === null && g.worth === null; })());
   check('freestuff normalize: dlc/loot/storeitem -> dlc', ['dlc', 'loot', 'storeitem'].every((k) => normalizeFreeStuffProduct(prod({ kind: k }))?.kind === 'dlc'));
   check('freestuff normalize: bundle -> game, playtest -> beta', normalizeFreeStuffProduct(prod({ kind: 'bundle' }))?.kind === 'game' && normalizeFreeStuffProduct(prod({ title: 'X Playtest Steam Key' }))?.kind === 'beta');
   check('freestuff normalize: mobile', normalizeFreeStuffProduct(prod({ type: 'mobile', store: 'gplay' }))?.platform === 'mobile' && normalizeFreeStuffProduct(prod({ urls: [{ url: 'u', platforms: ['ios'] }] }))?.platform === 'mobile');
-  check('freestuff normalize: console', normalizeFreeStuffProduct(prod({ store: 'playstation' }))?.platform === 'console' && normalizeFreeStuffProduct(prod({ urls: [{ url: 'u', platforms: ['xbox'] }] }))?.platform === 'console');
+  check('freestuff normalize: console -> null', normalizeFreeStuffProduct(prod({ store: 'playstation' })) === null && normalizeFreeStuffProduct(prod({ urls: [{ url: 'u', platforms: ['xbox'] }] })) === null && normalizeFreeStuffProduct(prod({ urls: [{ url: 'u', platforms: ['ps5'] }] })) === null);
   check('freestuff normalize: store mapping', normalizeFreeStuffProduct(prod({ store: 'ubi' }))?.store === 'ubisoft' && normalizeFreeStuffProduct(prod({ store: 'origin' }))?.store === 'ea' && normalizeFreeStuffProduct(prod({ store: 'humble' }))?.store === 'other' && normalizeFreeStuffProduct(prod({ store: 'gog' }))?.store === 'gog');
   check('freestuff normalize: skips timed/prime/gamepass/assets/unknown type', ['timed', 'prime', 'gamepass', 'playstation', 'assets', 'news', 'unknown', 'debug', 'zzz'].every((t) => normalizeFreeStuffProduct(prod({ type: t })) === null));
   check('freestuff normalize: skips TRASH / FIRSTPARTY flags', normalizeFreeStuffProduct(prod({ flags: 1 })) === null && normalizeFreeStuffProduct(prod({ flags: 16 })) === null);
   check('freestuff normalize: skips unknown kind, missing url/title/id, junk', normalizeFreeStuffProduct(prod({ kind: 'software' })) === null && normalizeFreeStuffProduct(prod({ urls: [] })) === null && normalizeFreeStuffProduct(prod({ urls: undefined })) === null && normalizeFreeStuffProduct(prod({ title: '' })) === null && normalizeFreeStuffProduct(prod({ id: undefined })) === null && normalizeFreeStuffProduct(null) === null && normalizeFreeStuffProduct('x') === null);
   const card = JSON.stringify(buildFreeGameMessage(g1!).components.map((c) => c.toJSON()));
-  check('freestuff card: via FreeStuff attribution (and none for epic)', card.includes('via FreeStuff') && !card.includes('via GamerPower') && !JSON.stringify(buildFreeGameMessage({ ...g1!, source: 'epic' }).components.map((c) => c.toJSON())).includes('via FreeStuff'));
+  check('freestuff card: via FreeStuff attribution', card.includes('via FreeStuff'));
 
   // cross-source dedupe
-  const epicCopy = { ...g1!, key: 'epic:x', source: 'epic' as const, title: 'COOL game!' };
+  const epicCopy = { ...g1!, key: 'fs:x', title: 'COOL game!' };
   check('titleDedupeKey: same game across sources', titleDedupeKey(epicCopy) === titleDedupeKey(g1!) && titleDedupeKey(g1!) === 't:pc:epic:coolgame');
   check('titleDedupeKey: differs by store/platform/title', titleDedupeKey({ ...g1!, store: 'steam' }) !== titleDedupeKey(g1!) && titleDedupeKey({ ...g1!, platform: 'mobile' }) !== titleDedupeKey(g1!) && titleDedupeKey({ ...g1!, title: 'Other' }) !== titleDedupeKey(g1!));
   const ddb = new BotDatabase(join(fsDir, 'dedupe.db'));
@@ -512,9 +461,9 @@ rmSync(dir, { recursive: true, force: true });
   const fakeClient = {
     guilds: { cache: new Map([['gd', { channels: { fetch: async () => ({ isSendable: () => true, send: async (m: unknown) => { sent.push(m); } }) } }]]) },
   } as never;
-  const fs0: FreeSettings = { guildId: 'gd', channelId: 'ch', pingRoleId: null, stores: [...ALL_STORES], includeDlc: false, includeBeta: false, includeMobile: false, includeConsole: false };
+  const fs0: FreeSettings = { guildId: 'gd', channelId: 'ch', pingRoleId: null, stores: [...ALL_STORES], includeDlc: false, includeBeta: false, includeMobile: false };
   const fresh2 = { ...g1!, key: 'fs:2', title: 'Brand New' };
-  const n = await announceInGuild(fakeClient, ddb, 'gd', fs0, [g1!, fresh2, { ...fresh2, key: 'gp:9', source: 'gamerpower' }]);
+  const n = await announceInGuild(fakeClient, ddb, 'gd', fs0, [g1!, fresh2, { ...fresh2, key: 'fs:9' }]);
   check('announceInGuild: skips title-posted game, sends new once, marks both keys', n === 1 && sent.length === 1 && ddb.isFreePosted('gd', 'fs:2') && ddb.isFreePosted('gd', titleDedupeKey(fresh2)), `n=${n}`);
   check('announceInGuild: second run sends nothing', (await announceInGuild(fakeClient, ddb, 'gd', fs0, [fresh2])) === 0 && sent.length === 1);
   ddb.close();

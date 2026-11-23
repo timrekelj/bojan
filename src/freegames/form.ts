@@ -21,23 +21,5 @@ export function parseFreeForm(
     includeDlc: form.includeDlc === '1',
     includeBeta: form.includeBeta === '1',
     includeMobile: form.includeMobile === '1',
-    includeConsole: form.includeConsole === '1',
   };
-}
-
-/**
- * True when saving `next` over `prev` could make already-free games newly
- * announceable: the channel changed (incl. disabled -> set), or a store /
- * include-* switch was newly enabled. Disabling the channel never needs a seed.
- */
-export function needsSeed(prev: FreeSettings, next: FreeSettings): boolean {
-  if (next.channelId === null) return false;
-  if (prev.channelId !== next.channelId) return true;
-  if (next.stores.some((s) => !prev.stores.includes(s))) return true;
-  return (
-    (next.includeDlc && !prev.includeDlc) ||
-    (next.includeBeta && !prev.includeBeta) ||
-    (next.includeMobile && !prev.includeMobile) ||
-    (next.includeConsole && !prev.includeConsole)
-  );
 }

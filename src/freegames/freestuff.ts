@@ -1,5 +1,5 @@
 import { createPublicKey, verify } from 'node:crypto';
-import { isBetaTitle } from './sources.js';
+import { isBetaTitle } from './filters.js';
 import type { FreeGame, Kind, Platform, Store } from './types.js';
 
 // FreeStuff (freestuffbot.xyz) API v2, webhook only. Standard Webhooks style
@@ -196,7 +196,7 @@ export function normalizeFreeStuffProduct(p: unknown): FreeGame | null {
   const urlPlatforms = urls.flatMap((u) => (Array.isArray(u.platforms) ? u.platforms.map((x) => str(x)) : []));
   let platform: Platform = 'pc';
   if (type === 'mobile' || rawStore === 'gplay' || urlPlatforms.some((x) => x === 'android' || x === 'ios')) platform = 'mobile';
-  else if (rawStore === 'playstation' || urlPlatforms.some((x) => x === 'xbox' || x === 'ps4' || x === 'ps5')) platform = 'console';
+  else if (rawStore === 'playstation' || urlPlatforms.some((x) => x === 'xbox' || x === 'ps4' || x === 'ps5')) return null; // console: not supported
 
   const images = byPriority(objs(p.images)).filter((i) => str(i.url));
   const wide = images.find((i) => (num(i.flags) & IMG_FLAG_AR_WIDE) !== 0);
@@ -217,7 +217,5 @@ export function normalizeFreeStuffProduct(p: unknown): FreeGame | null {
     imageUrl,
     worth: worthOf(objs(p.prices)),
     endsAt: until > 0 ? until : null,
-    startsAt: null,
-    source: 'freestuff',
   };
 }

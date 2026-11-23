@@ -33,7 +33,7 @@ export function priceLine(g: FreeGame): string {
 
 function kindPlatformLabel(g: FreeGame): string {
   const kind = g.kind === 'dlc' ? 'DLC / loot' : g.kind === 'beta' ? 'Beta / playtest' : 'Game';
-  const platform = g.platform === 'pc' ? 'PC' : g.platform === 'mobile' ? 'Mobile' : 'Console';
+  const platform = g.platform === 'pc' ? 'PC' : 'Mobile';
   return `${kind} · ${platform}`;
 }
 
@@ -48,8 +48,7 @@ export function buildFreeGameMessage(game: FreeGame, opts: { pingRoleId?: string
   const desc = truncate(game.description, 300);
   if (desc) lines.push(desc);
   lines.push('', priceLine(game), `-# ${STORE_LABELS[game.store]} · ${kindPlatformLabel(game)}`);
-  if (game.source === 'gamerpower') lines.push('-# via GamerPower');
-  if (game.source === 'freestuff') lines.push('-# via FreeStuff');
+  lines.push('-# via FreeStuff');
 
   const container = new ContainerBuilder().setAccentColor(BLURPLE).addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join('\n')));
   if (game.imageUrl) {

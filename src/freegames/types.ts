@@ -1,7 +1,6 @@
 export type Store = 'epic' | 'steam' | 'gog' | 'itch' | 'ubisoft' | 'ea' | 'other';
 export type Kind = 'game' | 'dlc' | 'beta';
-export type Platform = 'pc' | 'mobile' | 'console';
-export type Source = 'epic' | 'gamerpower' | 'freestuff';
+export type Platform = 'pc' | 'mobile';
 
 export const ALL_STORES: Store[] = ['epic', 'steam', 'gog', 'itch', 'ubisoft', 'ea', 'other'];
 
@@ -16,7 +15,7 @@ export const STORE_LABELS: Record<Store, string> = {
 };
 
 export interface FreeGame {
-  /** Stable, source-prefixed id: "epic:<id>", "gp:<id>" or "fs:<id>". */
+  /** Stable, source-prefixed id: "fs:<id>". */
   key: string;
   title: string;
   description: string;
@@ -28,8 +27,6 @@ export interface FreeGame {
   /** Original price as displayed (e.g. "$4.99"), null when unknown. */
   worth: string | null;
   endsAt: number | null;
-  startsAt: number | null;
-  source: Source;
 }
 
 export interface FreeSettings {
@@ -41,5 +38,4 @@ export interface FreeSettings {
   /** Beta / playtest / demo keys; off by default. */
   includeBeta: boolean;
   includeMobile: boolean;
-  includeConsole: boolean;
 }

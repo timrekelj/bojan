@@ -30,30 +30,23 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   weeks run Monday–Sunday) the bot posts last week's recap to a configured
   channel: total messages and reactions, top-5 messagers, top-5 channels,
   top-3 reactions given / received, and a per-day message bar chart.
-- **Free games announcements** — the bot polls public sources every 15 minutes
-  for games that are temporarily 100% free and posts a Components V2 card
-  (title, short description, ~~price~~ **FREE** until the end time, store,
-  image, link button, optional role ping) for each new one to a configured
-  channel. Sources (no API keys): the **Epic Games Store** free-games
-  endpoint (authoritative for Epic) and the
-  [GamerPower](https://www.gamerpower.com) giveaways API (Steam, GOG, itch.io,
-  Ubisoft, EA, mobile, console, ...); cards and lists that include GamerPower
-  items carry a "via GamerPower" attribution, as their terms ask. A source
-  failing never breaks the other one. Optionally a third source,
-  [FreeStuff](https://freestuffbot.xyz) (API v2), pushes new giveaways to a
-  signed webhook (see "FreeStuff webhook" below); those cards say "via
-  FreeStuff". The same game arriving from several sources is announced only
-  once (matched by platform, store and normalized title). Filters, per guild: PC full games only by
-  default with all stores enabled; DLC/loot, beta/playtest/demo keys (detected
-  by title, e.g. "… Playtest Steam Key"; `includeBeta`), mobile and console are opt-in, and
+- **Free games announcements** — [FreeStuff](https://freestuffbot.xyz) (API v2)
+  pushes new temporarily-free games (Epic, Steam, GOG, itch.io, Ubisoft, EA,
+  mobile, ...) to a signed webhook (see "FreeStuff webhook" below). For each
+  new one the bot posts a Components V2 card (title, short description,
+  ~~price~~ **FREE** until the end time, store, image, link button, optional
+  role ping, "via FreeStuff") to a configured channel. Only new announcements
+  are delivered, so there is no backlog to catch up on. The same game arriving
+  twice is announced only once (matched by platform, store and normalized
+  title). Filters, per guild: PC full games only by default with all stores
+  enabled; DLC/loot, beta/playtest/demo keys (detected by title, e.g.
+  "… Playtest Steam Key"; `includeBeta`), and mobile are opt-in, and
   individual stores can be switched off (store toggles apply to PC games).
-  Announced games are tracked in `free_posted`; when the channel is first set
-  the current backlog is recorded silently so nothing is spammed. Settings
-  (channel, ping role, stores, DLC/beta/mobile/console) live in the **dashboard**
-  (settings table `free_settings`, "Free games" section) — there is no Discord
-  command to change them. Saving a new channel or a more permissive filter
-  records the matching backlog silently too. The section also shows how many
-  games are free now / already announced.
+  Announced games are tracked in `free_posted`. Settings (channel, ping role,
+  stores, DLC/beta/mobile) live in the **dashboard** (settings table
+  `free_settings`, "Free games" section) — there is no Discord command to
+  change them. The section also shows whether the webhook is enabled and how
+  many games were already announced.
 - **Slash commands**
   - `/leaderboard [limit]` — all-time boards: top message senders, top
     reaction givers (with their 3 most used emoji), most reacted-to users
@@ -81,7 +74,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   leaderboards, recent embed conversions, and a settings form (stats channel,
   weekly day/hour/timezone, embed-conversion channels), and a separate
   "Free games" section (announcement channel, ping role, stores, DLC / beta /
-  mobile / console, status line). JSON API at
+  mobile, status line). JSON API at
   `/api/stats.json` (includes `freeGames` settings).
 - **URL converter (embeddo-style)** — in the channels you pick, messages
   containing a supported social link are reposted via a webhook **as the
@@ -206,12 +199,11 @@ src/
   embeds/providers.ts oEmbed/OpenGraph metadata per platform
   embeds/converter.ts webhook repost + delete original (embeddo-style)
   freegames/types.ts    FreeGame / FreeSettings types, store labels
-  freegames/sources.ts  Epic + GamerPower fetch, normalizers, merge, filters, cache
+  freegames/filters.ts  beta detection + per-guild filters
   freegames/cards.ts    Components V2 announcement card
-  freegames/poller.ts   15-minute poller that announces new free games
-  freegames/actions.ts  shared per-guild announce, title dedupe, seedFreeGames()
+  freegames/actions.ts  shared per-guild announce, title dedupe
   freegames/freestuff.ts FreeStuff webhook signature check + product normalizer
-  freegames/form.ts     dashboard form parser + "needs backlog seed" diff
+  freegames/form.ts     dashboard form parser
   web/server.ts       Hono dashboard, Discord OAuth2, signed-cookie sessions
   web/views.ts        HTML templates
   smoke.ts            offline test

@@ -7,10 +7,9 @@ import type { BotDatabase, Settings } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
 import { dashboardPage, errorPage, loginPage, type DashboardData } from './views.js';
-import { filterGames, getFreeGames } from '../freegames/sources.js';
-import { announceEverywhere, seedFreeGames, seedStateKey } from '../freegames/actions.js';
+import { announceEverywhere } from '../freegames/actions.js';
 import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from '../freegames/freestuff.js';
-import { needsSeed, parseFreeForm } from '../freegames/form.js';
+import { parseFreeForm } from '../freegames/form.js';
 
 interface Session {
   userId: string;
@@ -241,17 +240,6 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const week = lastWeekBounds(settings.timezone);
     const channels = listChannels();
     const freeSettings = db.getFreeSettings(config.guildId);
-    let freeCount: number | null = null;
-    try {
-      // Cached fetch; never let a slow/failed source break the page.
-      const data = await Promise.race([
-        getFreeGames(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000).unref()),
-      ]);
-      if (data.epicOk || data.gamerpowerOk) freeCount = filterGames(data.current, freeSettings).length;
-    } catch (err) {
-      console.error('[web] free games lookup failed:', err);
-    }
     const freeFlash: DashboardData['free']['flash'] = c.req.query('freeSaved') === '1' ? { kind: 'saved' } : null;
     const total = db.countMessages(config.guildId);
     const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
@@ -322,9 +310,8 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         free: {
           settings: freeSettings,
           roles: listRoles(),
-          currentCount: freeCount,
+          webhookEnabled: !!config.freestuffPublicKey,
           postedCount: db.countFreePosted(config.guildId),
-          lastSeed: db.getState(seedStateKey(config.guildId)),
           flash: freeFlash,
         },
       }),
@@ -333,17 +320,9 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
   app.post('/free-settings', requireAdmin, async (c) => {
     const form = await c.req.parseBody({ all: true });
-    const prev = db.getFreeSettings(config.guildId);
     const next = parseFreeForm(form, config.guildId, new Set(listChannels().map((ch) => ch.id)), new Set(listRoles().map((r) => r.id)));
     db.saveFreeSettings(next);
     console.log(`[web] free games settings updated by ${c.get('session').username}`);
-    if (needsSeed(prev, next)) {
-      try {
-        await seedFreeGames(db, config.guildId);
-      } catch (err) {
-        console.error('[web] free games seed failed:', err);
-      }
-    }
     return c.redirect('/dashboard?freeSaved=1#free');
   });
 
