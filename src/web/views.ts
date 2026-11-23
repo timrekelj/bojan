@@ -302,6 +302,10 @@ function uptime(sec: number): string {
   return days > 0 ? `${days}d ${h}h` : `${h}h ${m}m`;
 }
 
+// Strips the one-shot flash params so a refresh doesn't show the toast again.
+const CLEAR_FLASH_SCRIPT =
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+
 export function dashboardPage(d: DashboardData): string {
   const s = d.settings;
   const b = d.botStatus;
@@ -368,6 +372,7 @@ export function dashboardPage(d: DashboardData): string {
   ${freeSection(d)}
   <section aria-labelledby="h-embeds"><div class="sec-head"><h2 id="h-embeds">Embed conversions</h2></div>
     ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}
-  </section>`;
+  </section>
+  ${d.saved || d.free.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout('Dashboard', body, d.user);
 }
