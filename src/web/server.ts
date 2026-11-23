@@ -8,7 +8,7 @@ import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, weekRangeLabel } from '../stats.js';
 import { dashboardPage, errorPage, loginPage, type DashboardData } from './views.js';
 import { filterGames, getFreeGames } from '../freegames/sources.js';
-import { seedFreeGames, seedStateKey, sendTestAnnouncement } from '../freegames/actions.js';
+import { seedFreeGames, seedStateKey } from '../freegames/actions.js';
 import { needsSeed, parseFreeForm } from '../freegames/form.js';
 
 interface Session {
@@ -232,15 +232,7 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
     } catch (err) {
       console.error('[web] free games lookup failed:', err);
     }
-    const freeTest = c.req.query('freeTest');
-    const freeFlash: DashboardData['free']['flash'] =
-      freeTest === 'ok'
-        ? { kind: 'ok', title: (c.req.query('title') ?? '').slice(0, 200) }
-        : freeTest === 'err'
-          ? { kind: 'err', message: (c.req.query('msg') ?? '').slice(0, 300) }
-          : c.req.query('freeSaved') === '1'
-            ? { kind: 'saved' }
-            : null;
+    const freeFlash: DashboardData['free']['flash'] = c.req.query('freeSaved') === '1' ? { kind: 'saved' } : null;
     const total = db.countMessages(config.guildId);
     const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
     const allRows = db.topUsers(config.guildId, 10);
@@ -313,18 +305,6 @@ export function createWebApp(client: Client, db: BotDatabase): Hono {
       }
     }
     return c.redirect('/dashboard?freeSaved=1#free');
-  });
-
-  app.post('/free-test', requireAdmin, async (c) => {
-    let qs: string;
-    try {
-      const res = await sendTestAnnouncement(client, db, config.guildId);
-      qs = res.ok ? `freeTest=ok&title=${encodeURIComponent(res.title)}` : `freeTest=err&msg=${encodeURIComponent(res.error)}`;
-    } catch (err) {
-      console.error('[web] free test failed:', err);
-      qs = `freeTest=err&msg=${encodeURIComponent('Unexpected error, see the bot log.')}`;
-    }
-    return c.redirect(`/dashboard?${qs}#free`);
   });
 
   app.post('/settings', requireAdmin, async (c) => {

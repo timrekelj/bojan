@@ -52,8 +52,6 @@ const CSS = `
   .muted { margin: 0; }
   .empty { margin: 0; padding: 4px 0; color: var(--muted); }
   .flash { display: flex; align-items: center; gap: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
-  .flash.err::before { background: var(--accent); }
-  button[disabled] { opacity: .5; cursor: not-allowed; }
   .flash::before { content: ''; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
   .kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
   .kpi { padding: 18px 20px; border-left: 1px solid var(--border); }
@@ -195,7 +193,7 @@ export interface DashboardData {
     currentCount: number | null;
     postedCount: number;
     lastSeed: string | null;
-    flash: { kind: 'saved' } | { kind: 'ok'; title: string } | { kind: 'err'; message: string } | null;
+    flash: { kind: 'saved' } | null;
   };
 }
 
@@ -254,14 +252,7 @@ function embedPager(d: DashboardData): string {
 function freeSection(d: DashboardData): string {
   const f = d.free;
   const s = f.settings;
-  const flash =
-    f.flash?.kind === 'saved'
-      ? '<div class="flash" role="status">Free games settings saved.</div>'
-      : f.flash?.kind === 'ok'
-        ? `<div class="flash" role="status">Test announcement sent: ${escapeHtml(f.flash.title)}.</div>`
-        : f.flash?.kind === 'err'
-          ? `<div class="flash err" role="alert">Test announcement failed: ${escapeHtml(f.flash.message)}</div>`
-          : '';
+  const flash = f.flash?.kind === 'saved' ? '<div class="flash" role="status">Free games settings saved.</div>' : '';
   const channelOpts = d.channels.map((c) => `<option value="${escapeHtml(c.id)}"${s.channelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
   const roleOpts = f.roles.map((r) => `<option value="${escapeHtml(r.id)}"${s.pingRoleId === r.id ? ' selected' : ''}>@${escapeHtml(r.name)}</option>`).join('');
   const storeChecks = ALL_STORES.map((st) => `<label class="opt"><input type="checkbox" name="stores" value="${st}"${s.stores.includes(st) ? ' checked' : ''}><span>${escapeHtml(STORE_LABELS[st])}</span></label>`).join('');
@@ -272,7 +263,6 @@ function freeSection(d: DashboardData): string {
     `${fmt(f.postedCount)} recorded as announced`,
     `last backlog seed ${f.lastSeed ? fmtDate(Number(f.lastSeed), d.settings.timezone) : 'never'}`,
   ].join(' · ');
-  const canTest = s.channelId !== null;
   return `<section id="free" aria-labelledby="h-free"><div class="sec-head"><h2 id="h-free">Free games</h2><span class="sub">${escapeHtml(status)}</span></div>
     ${flash}
     <form class="panel" method="post" action="/free-settings">
@@ -289,7 +279,6 @@ function freeSection(d: DashboardData): string {
         <div class="checks">${inc('includeDlc', s.includeDlc, 'DLC / in-game loot', 'Add-ons and loot drops')}${inc('includeBeta', s.includeBeta, 'Betas / playtests', 'Beta, playtest and demo keys')}${inc('includeMobile', s.includeMobile, 'Mobile', 'Android / iOS games')}${inc('includeConsole', s.includeConsole, 'Console', 'PlayStation / Xbox / Switch')}</div></div>
       <div class="actions"><button type="submit">Save free games settings</button></div>
     </form>
-    <form method="post" action="/free-test" class="actions"><button type="submit" class="btn ghost"${canTest ? '' : ' disabled title="Set a channel and save first"'}>Send test announcement</button>${canTest ? '' : ' <span class="muted">Set a channel and save first.</span>'}</form>
   </section>`;
 }
 

@@ -49,8 +49,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   (settings table `free_settings`, "Free games" section) — there is no Discord
   command to change them. Saving a new channel or a more permissive filter
   records the matching backlog silently too. The section also shows how many
-  games are free now / already announced and has a "Send test announcement"
-  button (posts one current game without recording it). `/free [store]` is a public
+  games are free now / already announced. `/free [store]` is a public
   read-only listing of what is free now (matching the guild's filters) plus
   "Up next on Epic".
 - **Slash commands**
@@ -83,7 +82,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   leaderboards, recent embed conversions, and a settings form (stats channel,
   weekly day/hour/timezone, embed-conversion channels), and a separate
   "Free games" section (announcement channel, ping role, stores, DLC / beta /
-  mobile / console, status line, test announcement). JSON API at
+  mobile / console, status line). JSON API at
   `/api/stats.json` (includes `freeGames` settings).
 - **URL converter (embeddo-style)** — in the channels you pick, messages
   containing a supported social link are reposted via a webhook **as the
@@ -211,7 +210,7 @@ src/
   freegames/sources.ts  Epic + GamerPower fetch, normalizers, merge, filters, cache
   freegames/cards.ts    Components V2 announcement card and /free list
   freegames/poller.ts   15-minute poller that announces new free games
-  freegames/actions.ts  seedFreeGames() / sendTestAnnouncement() for the dashboard
+  freegames/actions.ts  seedFreeGames() for the dashboard
   freegames/form.ts     dashboard form parser + "needs backlog seed" diff
   freegames/commands.ts /free command
   web/server.ts       Hono dashboard, Discord OAuth2, signed-cookie sessions
