@@ -321,10 +321,10 @@ export function youSection(y: YouData, ctx: { total: number; timezone: string; c
   const liveHtml = live.length > 0 ? `<p class="muted">Right now: ${escapeHtml(live.join(' · '))}</p>` : '';
 
   const blocks: string[] = [];
-  if (y.topActivities.length > 0) blocks.push(miniBlock('Top activities', miniList(y.topActivities.slice(0, 5).map((a) => ({ label: a.name, value: `${fmtDuration(a.totalMs)} · ${fmt(a.sessions)} session${a.sessions === 1 ? '' : 's'}` })))));
-  if (y.topVoice.length > 0) blocks.push(miniBlock('Top voice channels', miniList(y.topVoice.slice(0, 3).map((v) => ({ label: chan(v.channelId), value: `${fmtDuration(v.totalMs)} · ${fmt(v.sessions)} session${v.sessions === 1 ? '' : 's'}` })))));
   if (y.emojiGiven.length > 0) blocks.push(miniBlock('Emoji you give', `<ul class="emojis">${y.emojiGiven.map(emojiChip).join('')}</ul>`));
   if (y.emojiReceived.length > 0) blocks.push(miniBlock('Emoji you receive', `<ul class="emojis">${y.emojiReceived.map(emojiChip).join('')}</ul>`));
+  if (y.topActivities.length > 0) blocks.push(miniBlock('Top activities', miniList(y.topActivities.slice(0, 5).map((a) => ({ label: a.name, value: `${fmtDuration(a.totalMs)} · ${fmt(a.sessions)} session${a.sessions === 1 ? '' : 's'}` })))));
+  if (y.topVoice.length > 0) blocks.push(miniBlock('Top voice channels', miniList(y.topVoice.slice(0, 3).map((v) => ({ label: chan(v.channelId), value: `${fmtDuration(v.totalMs)} · ${fmt(v.sessions)} session${v.sessions === 1 ? '' : 's'}` })))));
 
   return `<section id="you" aria-labelledby="h-you">${head}<div class="kpis">${kpis}</div>${range}${liveHtml}${blocks.length > 0 ? `<div class="cols you-cols">${blocks.join('')}</div>` : ''}</section>`;
 }
