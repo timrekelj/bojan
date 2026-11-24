@@ -165,7 +165,8 @@ const CSS = `
   .levelmeter { display: grid; gap: 6px; min-width: 0; }
   .levelnums { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .levelbar { height: 8px; border-radius: 999px; background: var(--card-2); overflow: hidden; }
-  .levelbar i { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+  .levelbar i { display: block; height: 100%; border-radius: 999px; background: var(--lv-from, var(--accent)); }
+  @media (prefers-color-scheme: light) { .levelbar i { background: var(--lv-to, var(--accent)); } }
   .you-cols { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); gap: 20px 40px; }
   .mini-h { margin: 0 0 8px; color: var(--muted); font-size: 12.5px; font-weight: 500; }
   .mini { list-style: none; margin: 0; padding: 0; }
@@ -750,8 +751,6 @@ export interface YouData {
   lastWeekRank: { rank: number; messages: number } | null;
   /** Total XP of the logged-in user, for the level progress row. */
   xp: number | null;
-  /** Highest colored role of the logged-in user (hex), for the level bar fill. */
-  roleColor?: string | null;
   stats: UserStats;
   reactions: ReactionStats;
   voice: VoiceStats;
@@ -779,12 +778,12 @@ export function levelBadge(level: number): string {
 }
 
 /** Level and XP progress as one row: level on the left, rounded bar with the numbers above it. */
-export function levelBar(xp: number, roleColor: string | null): string {
+export function levelBar(xp: number): string {
   const { level, intoLevel, needed } = levelProgress(xp);
   const span = intoLevel + needed;
   const pct = span > 0 ? Math.min(100, (intoLevel / span) * 100) : 0;
-  const color = roleColor && /^#[0-9a-f]{6}$/i.test(roleColor) ? roleColor : null;
-  const fill = `<i style="width:${pct.toFixed(1)}%${color ? `;background:${escapeHtml(color)}` : ''}"></i>`;
+  const band = steamLevelColors(level);
+  const fill = `<i style="width:${pct.toFixed(1)}%;--lv-from:${escapeHtml(band.from)};--lv-to:${escapeHtml(band.to)}"></i>`;
   const badge = levelBadge(level);
   return `<div class="levelrow"><div class="levelno">${badge}<span class="levelcap">Level</span></div><div class="levelmeter"><span class="levelnums">${fmt(intoLevel)} / ${fmt(span)} XP</span><div class="levelbar" role="progressbar" aria-label="Level ${level} progress" aria-valuemin="0" aria-valuemax="${span}" aria-valuenow="${intoLevel}" aria-valuetext="${fmt(intoLevel)} of ${fmt(span)} XP">${fill}</div></div></div>`;
 }
@@ -806,7 +805,7 @@ export function youSection(y: YouData, ctx: { total: number; timezone: string; c
     kpi(fmt(y.reactions.given), 'Reactions given', `${fmt(y.reactions.received)} received`),
     kpi(y.voice.totalMs > 0 ? fmtDuration(y.voice.totalMs) : '—', 'Time in voice', y.voice.totalMs > 0 ? `${fmt(y.voice.sessions)} session${y.voice.sessions === 1 ? '' : 's'}` : 'no voice time'),
   ].join('');
-  const levelRow = y.xp !== null ? levelBar(y.xp, y.roleColor ?? null) : '';
+  const levelRow = y.xp !== null ? levelBar(y.xp) : '';
 
   const range = `<p class="muted">First message ${escapeHtml(fmtDate(y.stats.firstTs, ctx.timezone))} · last message ${escapeHtml(fmtDate(y.stats.lastTs, ctx.timezone))}</p>`;
   const live: string[] = [];

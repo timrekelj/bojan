@@ -16,7 +16,7 @@ import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, levelBadge, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -924,14 +924,14 @@ rmSync(dir, { recursive: true, force: true });
   check('youSection: empty state', emptyYou.includes('id="h-you"') && emptyYou.includes('No tracked activity'));
   const youLvl = youSection(
     {
-      allRank: { rank: 3, messages: 7 }, currentWeekRank: null, lastWeekRank: null, xp: 242_000, roleColor: '#5865f2',
+      allRank: { rank: 3, messages: 7 }, currentWeekRank: null, lastWeekRank: null, xp: 242_000,
       stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
       reactions: { given: 2, received: 1 }, voice: { totalMs: 60_000, sessions: 1 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
     },
     { total: 100, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check(
-    'youSection: level row with role-colored rounded progress bar',
+    'youSection: level row with level-band coloured rounded progress bar',
     youLvl.includes('<div class="levelrow">') &&
       youLvl.includes('class="levelbadge" viewBox="0 0 52 52" data-shape="circle" data-len="2" role="img" aria-label="Level 69"') &&
       youLvl.includes('--lv-from:#7d5fb8;--lv-to:#4f3a86') &&
@@ -940,25 +940,24 @@ rmSync(dir, { recursive: true, force: true });
       youLvl.includes('role="progressbar"') &&
       youLvl.includes('aria-valuenow="500"') &&
       youLvl.includes('aria-valuemax="7000"') &&
-      youLvl.includes('width:7.1%;background:#5865f2') &&
+      youLvl.includes('<i style="width:7.1%;--lv-from:#7d5fb8;--lv-to:#4f3a86"></i>') &&
+      !youLvl.includes('background:#5865f2') &&
       youLvl.indexOf('Level') < youLvl.indexOf('500 / 7,000 XP') &&
       youLvl.indexOf('Activity time') > youLvl.indexOf('Messages, last week') &&
       youLvl.indexOf('Activity time') < youLvl.indexOf('Reactions given') &&
       !youLvl.includes('lvl 69') &&
       !emptyYou.includes('levelrow'),
   );
-  const youNoColor = youSection(
-    {
-      allRank: null, currentWeekRank: null, lastWeekRank: null, xp: 242_000, roleColor: null,
-      stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
-      reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
-    },
-    { total: 100, timezone: 'UTC', channelNames: {}, username: 'Nine' },
+  check(
+    'youSection: adjacent level bands use different bar colours',
+    levelBar(totalXpForLevel(9) + 1).includes(`--lv-from:${steamLevelColors(9).from};--lv-to:${steamLevelColors(9).to}`) &&
+      levelBar(totalXpForLevel(10) + 1).includes(`--lv-from:${steamLevelColors(10).from};--lv-to:${steamLevelColors(10).to}`) &&
+      steamLevelColors(9).from !== steamLevelColors(10).from &&
+      !levelBar(totalXpForLevel(10) + 1).includes(`--lv-from:${steamLevelColors(9).from}`),
   );
-  check('youSection: level bar falls back to the accent color', youNoColor.includes('<i style="width:7.1%"></i>'));
   const youMax = youSection(
     {
-      allRank: null, currentWeekRank: null, lastWeekRank: null, xp: 505_000, roleColor: null,
+      allRank: null, currentWeekRank: null, lastWeekRank: null, xp: 505_000,
       stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
       reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
     },
@@ -972,7 +971,7 @@ rmSync(dir, { recursive: true, force: true });
   );
   const youNoXp = youSection(
     {
-      allRank: null, currentWeekRank: null, lastWeekRank: null, xp: null, roleColor: '#5865f2',
+      allRank: null, currentWeekRank: null, lastWeekRank: null, xp: null,
       stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
       reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
     },
