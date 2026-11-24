@@ -1,6 +1,7 @@
 // Thin wrapper around @opencode/client for the self-building feature.
 // Deliberately free of config/db imports so it can be exercised standalone.
 import { OpenCode } from '@opencode/client';
+import type { GoLimits } from './limits.js';
 import type { TokenUsage } from './pricing.js';
 import { branchName, worktreeDirFor, type ModelRef } from './parse.js';
 import type { PromptImage } from './chat-parse.js';
@@ -47,18 +48,14 @@ export function lastConversationIsAssistant(messages: readonly MessageLike[]): b
   return !m || m.type === 'assistant';
 }
 
-export interface GoLimitMeter {
-  percent: number;
-  limited: boolean;
-  resetsAt: number;
-}
+export type GoLimitMeter = GoLimits['rolling'];
 
 export interface AgentStatus {
   reachable: boolean;
   version: string | null;
   error: string | null;
   /** OpenCode Go plan meters; null when unavailable. */
-  limits: { rolling: GoLimitMeter; weekly: GoLimitMeter; monthly: GoLimitMeter } | null;
+  limits: GoLimits | null;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -80,13 +77,7 @@ export async function probeAgent(baseUrl: string, password: string, timeoutMs = 
   } catch (err) {
     return { reachable: false, version: null, error: err instanceof Error ? err.message : String(err), limits: null };
   }
-  try {
-    const res = await withTimeout(agent.client.experimental.usage.limits({ location: { directory: REPO_DIR } }), timeoutMs);
-    const go = res.data?.go;
-    return { reachable: true, version, error: null, limits: go ? { rolling: go.rolling, weekly: go.weekly, monthly: go.monthly } : null };
-  } catch {
-    return { reachable: true, version, error: null, limits: null };
-  }
+  return { reachable: true, version, error: null, limits: await agent.limitMeters(REPO_DIR, timeoutMs) };
 }
 
 export class AgentTimeoutError extends Error {}
@@ -116,6 +107,17 @@ export class OpenCodeAgent {
       await sleep(1000);
     }
     throw new Error(`OpenCode location ${directory} did not become ready${last instanceof Error ? `: ${last.message}` : ''}`);
+  }
+
+  /** OpenCode Go plan meters; null when the call fails or the location has no Go plan (never throws). */
+  async limitMeters(directory = REPO_DIR, timeoutMs = 3000): Promise<GoLimits | null> {
+    try {
+      const res = await withTimeout(this.client.experimental.usage.limits({ location: { directory } }), timeoutMs);
+      const go = res.data?.go;
+      return go ? { rolling: go.rolling, weekly: go.weekly, monthly: go.monthly } : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Run a shell command in the agent container and return its output; throws on non-zero exit. */

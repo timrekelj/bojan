@@ -126,6 +126,16 @@ export class ChatRunner {
     return this.client.user?.displayName ?? 'bojan';
   }
 
+  /** Refusal text when an OpenCode Go limit blocks model calls; null when a turn may run. */
+  private async limitDenial(): Promise<string | null> {
+    try {
+      return await this.builder.limitDenial();
+    } catch (err) {
+      console.warn(`[chat] guild=${config.guildId} could not check OpenCode Go limits:`, err instanceof Error ? err.message : err);
+      return null;
+    }
+  }
+
   /** Languages the chat assistant must reply in; read per turn so dashboard changes apply to ongoing threads. */
   private chatLanguages(): string[] {
     return this.db.getBuilderSettings().chatLanguages;
@@ -214,6 +224,11 @@ export class ChatRunner {
   async startFromMention(message: Message): Promise<void> {
     const bot = this.client.user;
     if (!bot) return;
+    const denial = await this.limitDenial();
+    if (denial) {
+      await message.reply({ content: denial, allowedMentions: NO_MENTIONS }).catch(() => undefined);
+      return;
+    }
     const trigger = messageInfo(message, bot.id, this.botName());
     let referenced: ChatMessageInfo | null = null;
     const imageMessages: Message[] = [message];
@@ -381,6 +396,11 @@ export class ChatRunner {
     // Turns only exist for directed messages, so someone is always talking to the bot.
     const stopTyping = this.typing(threadId);
     try {
+      const denial = await this.limitDenial();
+      if (denial) {
+        await this.say(threadId, denial, this.replyTarget(threadId, batch));
+        return;
+      }
       // Feature requests never reach the chat agent; pending build notes stay for the next chat turn.
       const requester = this.requesterOf(batch);
       if (await this.detectFeatureRequest(threadId, batch, requester)) {
@@ -409,6 +429,11 @@ export class ChatRunner {
     const key = `${threadId}:${message.id}`;
     const stopTyping = this.typing(threadId);
     try {
+      const denial = await this.limitDenial();
+      if (denial) {
+        await this.say(threadId, denial, pending.messageId);
+        return;
+      }
       if (await this.detectFeatureRequest(threadId, [pending], pending)) {
         await this.handoff(threadId, pending, featureRequestText({ text: pending.plain, replyTo: pending.replyTo }), pending.imageMessages);
         return;

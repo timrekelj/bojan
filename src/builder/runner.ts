@@ -18,6 +18,7 @@ import {
   type BuilderMessage,
 } from './cards.js';
 import { ChatRunner } from './chat.js';
+import { LimitGate } from './limits.js';
 import { sessionUsageWithEstimate, type TokenUsage } from './pricing.js';
 import { NO_MENTIONS, withReply } from '../discord.js';
 import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
@@ -61,7 +62,7 @@ function excerpt(text: string): string {
 }
 
 /** The part of OpenCodeAgent the runner uses (lets tests plug in a fake). */
-export type AgentApi = Pick<OpenCodeAgent, 'warm' | 'createWorktree' | 'createSession' | 'switchAgent' | 'sessionExists' | 'waitIdle' | 'latestReply' | 'lastIsAssistant' | 'usage' | 'promptAndWait' | 'decide' | 'refreshMain'>;
+export type AgentApi = Pick<OpenCodeAgent, 'warm' | 'createWorktree' | 'createSession' | 'switchAgent' | 'sessionExists' | 'waitIdle' | 'latestReply' | 'lastIsAssistant' | 'usage' | 'promptAndWait' | 'decide' | 'refreshMain' | 'limitMeters'>;
 
 export interface RunnerDeps {
   agent?: AgentApi;
@@ -77,6 +78,9 @@ export class BuilderRunner {
   /** Threads whose new job is being set up, so two quick handoffs can't both start one. */
   private readonly starting = new Set<string>();
   private queueTimer: NodeJS.Timeout | null = null;
+  private drainingQueue = false;
+  /** Shared by the chat assistant: refuses model calls while an OpenCode Go limit is nearly used up. */
+  readonly limitGate = new LimitGate();
   private readonly fetchPrInfo: (ref: PrRef) => Promise<PrInfo | 'rate-limited'>;
 
   /** The chat assistant; hands feature requests to this runner. */
@@ -120,6 +124,11 @@ export class BuilderRunner {
     if (!config.opencodePassword) throw new Error('OPENCODE_PASSWORD is not set');
     this.agent = new OpenCodeAgent(config.opencodeUrl, config.opencodePassword);
     return this.agent;
+  }
+
+  /** Refusal text when an OpenCode Go limit blocks model calls; null when a request may run. */
+  limitDenial(): Promise<string | null> {
+    return this.limitGate.check(this.getAgent(), this.db.getBuilderSettings().limitThreshold, this.db.getSettings(config.guildId).timezone);
   }
 
   private state(jobId: number): JobState {
@@ -308,6 +317,20 @@ export class BuilderRunner {
     let job = this.db.getBuildJob(jobId);
     if (!job) return;
     const trigger = triggerId ?? job.triggerMessageId;
+    const denial = await this.limitDenial();
+    if (denial) {
+      console.warn(`[builder] guild=${job.guildId} job=${job.id} turn refused: ${denial}`);
+      const fresh = this.db.getBuildJob(jobId) ?? job;
+      if (!fresh.sessionId) {
+        // Nothing reached the agent yet: the request itself is denied.
+        await this.fail(jobId, denial);
+        return;
+      }
+      // Keep the job so the member can continue after the reset; the dropped message can be resent.
+      this.db.setBuildJobStatus(jobId, 'awaiting_input');
+      await this.post(fresh, buildNoteCard(denial), trigger);
+      return;
+    }
     const added = this.react(job, trigger, PLANNING);
     try {
       this.db.setBuildJobStatus(jobId, 'planning');
@@ -407,9 +430,14 @@ export class BuilderRunner {
     // approved: build now when a slot is free (and nobody is waiting ahead), otherwise queue up
     this.db.updateBuildJob(job.id, { approvedAt: Date.now() });
     const slotFree = freeSlots(this.db.countBuildingJobs(), this.db.getBuilderSettings().maxParallelBuilds) > 0;
+    let limitNote: string | null = null;
     if (slotFree && this.db.listBuildJobsByStatus(['queued']).length === 0) {
-      this.launchBuild(this.db.getBuildJob(job.id) ?? job, plan.plan);
-      return;
+      limitNote = await this.limitDenial();
+      if (!limitNote) {
+        this.launchBuild(this.db.getBuildJob(job.id) ?? job, plan.plan);
+        return;
+      }
+      console.warn(`[builder] guild=${job.guildId} job=${job.id} build not started yet: ${limitNote}`);
     }
     this.db.setBuildJobStatus(job.id, 'queued');
     const queued = this.db.getBuildJob(job.id) ?? job;
@@ -417,14 +445,30 @@ export class BuilderRunner {
     console.log(`[builder] guild=${job.guildId} job=${job.id} approved, queued #${position}`);
     this.note(queued, { event: 'queued', plan: plan.plan, position });
     await this.post(queued, buildQueuedCard({ title, position }));
+    if (limitNote) await this.post(queued, buildNoteCard(limitNote));
     this.drainQueue();
   }
 
-  /** Start queued jobs (FIFO) while build slots are free. Synchronous, so slots can't be double-booked. */
+  /** Start queued jobs (FIFO) while build slots are free and the Go limits allow it. Overlapping calls are ignored (the 30s tick retries). */
   drainQueue(): void {
-    if (this.stopped || !this.configured) return;
-    const building = this.db.countBuildingJobs();
+    if (this.stopped || !this.configured || this.drainingQueue) return;
+    const queued = this.db.listBuildJobsByStatus(['queued']);
     const max = this.db.getBuilderSettings().maxParallelBuilds;
+    if (queued.length === 0 || freeSlots(this.db.countBuildingJobs(), max) === 0) return;
+    this.drainingQueue = true;
+    void this.startQueued(max)
+      .catch((err) => console.error('[builder] could not start queued jobs:', err))
+      .finally(() => {
+        this.drainingQueue = false;
+      });
+  }
+
+  private async startQueued(max: number): Promise<void> {
+    const denial = await this.limitDenial();
+    // Blocked: the 30s tick retries after the reset; the queued card already told the requester it waits.
+    if (denial) return;
+    // Synchronous from here, so slots can't be double-booked.
+    const building = this.db.countBuildingJobs();
     for (const job of pickJobsToStart(this.db.listBuildJobsByStatus(['queued']), building, max)) {
       console.log(`[builder] guild=${job.guildId} job=${job.id} leaving the queue, building now`);
       this.launchBuild(job);
@@ -695,6 +739,12 @@ export class BuilderRunner {
       if (!this.configured || !job.sessionId) {
         this.db.updateBuildJob(job.id, { fixAttempts: job.fixAttempts + 1 });
         await this.failFix(job.id, 'The agent session is not available to resolve the conflicts.');
+        return;
+      }
+      const denial = await this.limitDenial();
+      if (denial) {
+        // Still conflicted: the next poll round (every 2 min) tries again once the limit resets.
+        console.warn(`[builder] guild=${job.guildId} job=${job.id} conflict fix waits: ${denial}`);
         return;
       }
       this.launchFix(job);

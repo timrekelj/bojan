@@ -8,7 +8,7 @@ import { isWeeklyDue } from './scheduler.js';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { BotDatabase, type WebSessionRow } from './db.js';
+import { BotDatabase, clampLimitThreshold, type WebSessionRow } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { awardMessageXp, awardReactionXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
@@ -30,7 +30,8 @@ import {
 } from './builder/cards.js';
 import { extractReply, lastConversationIsAssistant } from './builder/opencode.js';
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
-import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
+import { parseBuilderForm, parseChatLanguages, parseLimitThreshold } from './builder/form.js';
+import { blockingLimit, formatLimitDenial, LimitGate } from './builder/limits.js';
 import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
@@ -827,17 +828,17 @@ rmSync(dir, { recursive: true, force: true });
   // DB: build_jobs + settings
   const bdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-builder-')), 'b.db'));
   check('builder settings defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && !bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash' && bdb.getBuilderSettings().chatLanguages.length === 0);
-  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ', chatDecisionModel: ' p/decide ', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 3 });
+  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ', chatDecisionModel: ' p/decide ', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 3, limitThreshold: 95 });
   check('decision model setting: default, roundtrip', new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-dm-')), 'd.db')).getBuilderSettings().chatDecisionModel === 'opencode-go/jev-1.14' && bdb.getBuilderSettings().chatDecisionModel === 'p/decide');
   check('builder settings roundtrip', bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'prov/model' && bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'p/chat' && JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['Slovenian', 'English']));
-  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatDecisionModel: '', chatLanguages: [], maxParallelBuilds: 99 });
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatDecisionModel: '', chatLanguages: [], maxParallelBuilds: 99, limitThreshold: 95 });
   check('builder settings: empty decision model falls back to default', bdb.getBuilderSettings().chatDecisionModel === 'opencode-go/jev-1.14');
   check('builder settings: empty models fall back to defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash' && bdb.getBuilderSettings().chatLanguages.length === 0);
   bdb.setState('chat:languages', 'not json');
   check('chat languages: invalid state means no constraint', bdb.getBuilderSettings().chatLanguages.length === 0);
   bdb.setState('chat:languages', '["ok", 7, " "]');
   check('chat languages: only valid strings survive the state roundtrip', JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['ok']));
-  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatDecisionModel: '', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 99 });
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatDecisionModel: '', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 99, limitThreshold: 95 });
   check('no active job initially', bdb.activeBuildJobInThread('t1') === null && bdb.recentBuildJobs(G, 100).length === 0);
   check('builder settings: maxParallelBuilds default 1, roundtrip, clamped', new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-mp-')), 'm.db')).getBuilderSettings().maxParallelBuilds === 1 && bdb.getBuilderSettings().maxParallelBuilds === 5);
   const j1 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c1', requesterId: 'u1', request: 'add ping' }, 1000);
@@ -920,8 +921,8 @@ rmSync(dir, { recursive: true, force: true });
   check('goPriceFor: only opencode-go/*', goPriceFor('opencode-go/glm-5.3', prices) === glm && goPriceFor('anthropic/glm-5.3', prices) === null && goPriceFor('opencode-go/none', prices) === null && goPriceFor(null, prices) === null);
 
   // Settings form
-  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash', chatDecisionModel: 'opencode-go/jev-1.14', chatLanguages: [] as string[], maxParallelBuilds: 1 };
-  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c', chatDecisionModel: 'opencode-go/jev-1.14', chatLanguages: [], maxParallelBuilds: 1 }, modelError: null }));
+  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash', chatDecisionModel: 'opencode-go/jev-1.14', chatLanguages: [] as string[], maxParallelBuilds: 1, limitThreshold: 95 };
+  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c', chatDecisionModel: 'opencode-go/jev-1.14', chatLanguages: [], maxParallelBuilds: 1, limitThreshold: 95 }, modelError: null }));
   check('parseBuilderForm: decision model valid / empty -> default / invalid keeps current + error', parseBuilderForm({ chatDecisionModel: ' a/b ' }, cur).settings.chatDecisionModel === 'a/b' && parseBuilderForm({ chatDecisionModel: '' }, { ...cur, chatDecisionModel: 'x/y' }).settings.chatDecisionModel === 'opencode-go/jev-1.14' && (() => { const r = parseBuilderForm({ chatDecisionModel: 'bad model' }, { ...cur, chatDecisionModel: 'x/y' }); return r.settings.chatDecisionModel === 'x/y' && r.modelError !== null && r.modelError.startsWith('Decision model'); })());
   check('parseBuilderForm: invalid model keeps current + error', (() => { const r = parseBuilderForm({ model: 'nomodel' }, { ...cur, enabled: true, model: 'x/y' }); return !r.settings.enabled && r.settings.model === 'x/y' && r.modelError !== null; })());
   check('parseBuilderForm: invalid chat model keeps current + error', (() => { const r = parseBuilderForm({ chatEnabled: '1', chatModel: 'bad model/x' }, { ...cur, chatModel: 'x/chat' }); return r.settings.chatEnabled && r.settings.chatModel === 'x/chat' && r.modelError !== null && r.modelError.startsWith('Chat model'); })());
@@ -932,6 +933,29 @@ rmSync(dir, { recursive: true, force: true });
   check('parseBuilderForm: chat languages parsed from the form', parseBuilderForm({ chatLanguages: ' Slovenian, English ' }, cur).settings.chatLanguages.join(',') === 'Slovenian,English');
 
   check('parseBuilderForm: maxParallelBuilds parsed, clamped to 1..5, invalid keeps current', parseBuilderForm({ maxParallelBuilds: '3' }, cur).settings.maxParallelBuilds === 3 && parseBuilderForm({ maxParallelBuilds: '0' }, cur).settings.maxParallelBuilds === 1 && parseBuilderForm({ maxParallelBuilds: '-4' }, cur).settings.maxParallelBuilds === 1 && parseBuilderForm({ maxParallelBuilds: '99' }, cur).settings.maxParallelBuilds === 5 && parseBuilderForm({ maxParallelBuilds: 'abc' }, { ...cur, maxParallelBuilds: 4 }).settings.maxParallelBuilds === 4 && parseBuilderForm({ maxParallelBuilds: '2.5' }, { ...cur, maxParallelBuilds: 4 }).settings.maxParallelBuilds === 4 && parseBuilderForm({}, { ...cur, maxParallelBuilds: 2 }).settings.maxParallelBuilds === 2);
+
+  // OpenCode Go limit gate
+  check('clampLimitThreshold: 50..100, default 95', clampLimitThreshold(95) === 95 && clampLimitThreshold(50) === 50 && clampLimitThreshold(20) === 50 && clampLimitThreshold(120) === 100 && clampLimitThreshold(94.6) === 95 && clampLimitThreshold(NaN) === 95);
+  check('parseLimitThreshold: parsed, clamped, invalid keeps current', parseLimitThreshold('90', 95) === 90 && parseLimitThreshold('20', 95) === 50 && parseLimitThreshold('200', 95) === 100 && parseLimitThreshold('abc', 80) === 80 && parseLimitThreshold(undefined, 80) === 80 && parseLimitThreshold('95.5', 80) === 80);
+  check('parseBuilderForm: limitThreshold parsed', parseBuilderForm({ limitThreshold: '85' }, cur).settings.limitThreshold === 85 && parseBuilderForm({ limitThreshold: '10' }, cur).settings.limitThreshold === 50 && parseBuilderForm({}, { ...cur, limitThreshold: 90 }).settings.limitThreshold === 90);
+  const meter = (percent: number, resetsAt: number, limited = false) => ({ percent, limited, resetsAt });
+  const limitsAt = (rolling: number, weekly: number, monthly: number, t = now) => ({ rolling: meter(rolling, t + H), weekly: meter(weekly, t + 2 * D), monthly: meter(monthly, t + 20 * D) });
+  check('blockingLimit: below threshold and missing limits allow', blockingLimit(null, 95) === null && blockingLimit({}, 95) === null && blockingLimit(limitsAt(94, 0, 0), 95) === null && blockingLimit(limitsAt(0, 0, 0), 50) === null);
+  check('blockingLimit: at or above threshold blocks each window', blockingLimit(limitsAt(95, 0, 0), 95)?.kind === 'rolling' && blockingLimit(limitsAt(0, 99, 0), 95)?.kind === 'weekly' && blockingLimit(limitsAt(0, 0, 100), 95)?.kind === 'monthly');
+  check('blockingLimit: limited flag blocks below the threshold', blockingLimit({ rolling: meter(12, now + H, true), weekly: meter(0, now + D), monthly: meter(0, now + 20 * D) }, 95)?.kind === 'rolling');
+  check('blockingLimit: several blocked -> the latest reset wins', (() => { const b = blockingLimit({ rolling: meter(99, now + H), weekly: meter(96, now + 2 * D), monthly: meter(10, now + 20 * D) }, 95); return b?.kind === 'weekly' && b.resetsAt === now + 2 * D; })());
+  check('blockingLimit: custom threshold', blockingLimit(limitsAt(60, 0, 0), 60)?.kind === 'rolling' && blockingLimit(limitsAt(59, 0, 0), 60) === null);
+  check('formatLimitDenial: percent, reset time and countdown', (() => { const r = formatLimitDenial({ kind: 'monthly', percent: 97.4, resetsAt: now + 3 * D }, 'UTC', now); return r.includes('monthly limit') && r.includes('97%') && r.includes('Next reset:') && r.includes('in 3d') && formatLimitDenial({ kind: 'rolling', percent: 100, resetsAt: 0 }, 'UTC', now).includes('5h'); })());
+  let gateNow = now;
+  let limitCalls = 0;
+  const gate = new LimitGate(30_000, () => gateNow);
+  const busyLimits = { limitMeters: async () => { limitCalls++; return limitsAt(96, 0, 0, gateNow); } };
+  const denied = await gate.check(busyLimits, 95, 'UTC');
+  check('LimitGate: blocks over the threshold and caches the answer', denied !== null && (await gate.check(busyLimits, 95, 'UTC')) === denied && limitCalls === 1, String(denied));
+  gateNow = now + 31_000;
+  const idleLimits = { limitMeters: async () => { limitCalls++; return limitsAt(0, 0, 0, gateNow); } };
+  check('LimitGate: allows again after the TTL once the limit reset', (await gate.check(idleLimits, 95, 'UTC')) === null && limitCalls === 2);
+  check('LimitGate: read failure allows requests', (await new LimitGate(0, () => gateNow).check({ limitMeters: async () => { throw new Error('boom'); } }, 95, 'UTC')) === null);
 
   // Chat assistant: pure helpers
   const cr1 = parseChatReply('Node 24 is the LTS.\nSource: https://nodejs.org\n```json\n{"reply": true, "feature_request": null}\n```');
