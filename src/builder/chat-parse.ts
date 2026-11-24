@@ -73,6 +73,18 @@ export function formatDecisionInput(opts: {
 }
 
 /** Non-directed thread messages buffered since the bot's last reply, as background for the next directed turn. Empty for none. */
+/** Items (oldest first) sent after the last one authored by the bot; all of them when the bot never spoke. */
+export function sinceLastBotMessage<T extends { authorId: string }>(items: readonly T[], botId: string): T[] {
+  let last = -1;
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i]?.authorId === botId) {
+      last = i;
+      break;
+    }
+  }
+  return items.slice(last + 1);
+}
+
 export function formatThreadContext(lines: readonly string[], opts: { maxLines?: number; maxChars?: number } = {}): string {
   const { maxLines = 30, maxChars = 4000 } = opts;
   const kept = lines.filter((l) => l.trim().length > 0).slice(-maxLines);

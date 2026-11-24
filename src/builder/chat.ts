@@ -14,6 +14,7 @@ import {
   formatInitialPrompt,
   formatJobStatus,
   formatThreadContext,
+  sinceLastBotMessage,
   formatTranscript,
   isFeatureRequest,
   parseChatReply,
@@ -69,12 +70,10 @@ interface ThreadState {
   busy: boolean;
   /** Directed messages waiting for the next turn. */
   buffer: Pending[];
-  /** Non-directed messages since the last turn: background for the next directed one (in memory only). */
-  context: string[];
   timer: NodeJS.Timeout | null;
 }
 
-const MAX_CONTEXT_LINES = 50;
+const CONTEXT_FETCH_LIMIT = 50;
 
 function displayName(message: Message): string {
   return message.member?.displayName ?? message.author.displayName ?? message.author.username;
@@ -274,8 +273,7 @@ export class ChatRunner {
     if (info.text.trim().length === 0 && (info.extras?.length ?? 0) === 0) return;
     const directed = isDirectedAtBot(message, bot.id);
     if (!directed) {
-      // Not for the bot: no model call, reaction or typing. Keep it as background for the next directed turn.
-      this.stateFor(chat.threadId).context.push(formatChatMessage(info));
+      // Not for the bot: no model call, reaction or typing. It is fetched from Discord as context on the next directed turn.
       return;
     }
     // Thinking reaction right away so the member sees the bot noticed the message.
@@ -303,10 +301,9 @@ export class ChatRunner {
   private stateFor(threadId: string): ThreadState {
     let s = this.states.get(threadId);
     if (!s) {
-      s = { busy: false, buffer: [], context: [], timer: null };
+      s = { busy: false, buffer: [], timer: null };
       this.states.set(threadId, s);
     }
-    if (s.context.length > MAX_CONTEXT_LINES) s.context.splice(0, s.context.length - MAX_CONTEXT_LINES);
     return s;
   }
 
@@ -330,9 +327,8 @@ export class ChatRunner {
     try {
       while (s.buffer.length > 0 && !this.stopped) {
         const batch = s.buffer.splice(0);
-        const context = s.context.splice(0);
         try {
-          await this.runTurn(threadId, batch, context);
+          await this.runTurn(threadId, batch);
         } finally {
           await this.clearThinking(batch);
         }
@@ -378,7 +374,7 @@ export class ChatRunner {
     }
   }
 
-  private async runTurn(threadId: string, batch: Pending[], context: readonly string[] = []): Promise<void> {
+  private async runTurn(threadId: string, batch: Pending[]): Promise<void> {
     const chat = this.db.getChatThread(threadId);
     if (!chat) return;
     // Turns only exist for directed messages, so someone is always talking to the bot.
@@ -392,7 +388,7 @@ export class ChatRunner {
       }
       const notes = this.db.pendingChatNotes(threadId);
       const status = this.jobStatusBlock(threadId);
-      const ctxBlock = formatThreadContext(context);
+      const ctxBlock = formatThreadContext(await this.fetchContext(threadId, batch));
       const body = [ctxBlock, batch.map((b) => b.text).join('\n')].filter((p) => p.length > 0).join('\n\n');
       const prompt = withNotes(status ? [status, ...notes] : notes, withLanguageRule(body, this.chatLanguages()));
       const parsed = await this.askChat(threadId, chat.sessionId, chat.model, prompt, () => this.db.consumeChatNotes(threadId, notes.length));
@@ -478,6 +474,32 @@ export class ChatRunner {
     } catch (err) {
       console.warn(`[chat] guild=${config.guildId} thread=${threadId} decision failed:`, err instanceof Error ? err.message : err);
       return false;
+    }
+  }
+
+  /**
+   * Thread messages sent before the batch and after the bot's last message (up to 50 fetched), formatted
+   * for the prompt. Empty when the thread can't be read.
+   */
+  private async fetchContext(threadId: string, batch: Pending[]): Promise<string[]> {
+    const bot = this.client.user;
+    const first = batch[0];
+    if (!bot || !first || first.channelId !== threadId) return [];
+    try {
+      const channel = await this.client.channels.fetch(threadId);
+      if (!channel || !channel.isThread()) return [];
+      const recent = await channel.messages.fetch({ limit: CONTEXT_FETCH_LIMIT, before: first.messageId });
+      const batchIds = new Set(batch.map((b) => b.messageId));
+      const items = [...recent.values()]
+        .reverse()
+        .filter((m) => !batchIds.has(m.id))
+        .map((m) => ({ authorId: m.author.id, text: formatChatMessage(messageInfo(m, bot.id, this.botName())), empty: m.content.trim().length === 0 && m.attachments.size === 0 && m.embeds.length === 0 }));
+      return sinceLastBotMessage(items, bot.id)
+        .filter((i) => !i.empty)
+        .map((i) => i.text);
+    } catch (err) {
+      console.warn(`[chat] guild=${config.guildId} thread=${threadId} could not read thread context:`, err instanceof Error ? err.message : err);
+      return [];
     }
   }
 

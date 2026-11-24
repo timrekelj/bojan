@@ -32,7 +32,7 @@ import { extractReply, lastConversationIsAssistant } from './builder/opencode.js
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
 import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
-import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
+import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
@@ -899,6 +899,9 @@ rmSync(dir, { recursive: true, force: true });
   check('formatDecisionInput: history oldest first, then the latest message', di.startsWith('Recent thread messages') && di.indexOf('Ana: what about a /joke command?') < di.indexOf('Bob: multi line idea') && !di.includes('Cy:') && di.endsWith('Latest message (the one to classify):\nship this'));
   const diBig = formatDecisionInput({ text: 'go', history: Array.from({ length: 20 }, (_, i) => ({ name: 'U', text: `${i} ${'q'.repeat(400)}` })), maxChars: 1000 });
   check('formatDecisionInput: history clipped by dropping oldest', !diBig.includes('U: 0 ') && diBig.includes(`U: 19 `) && diBig.length < 1400);
+  const sl = sinceLastBotMessage([{ authorId: 'u1', text: 'a' }, { authorId: 'bot', text: 'b' }, { authorId: 'u2', text: 'c' }, { authorId: 'u1', text: 'd' }], 'bot');
+  check('sinceLastBotMessage: keeps only messages after the bot\'s last one', sl.map((m) => m.text).join('') === 'cd');
+  check('sinceLastBotMessage: bot never spoke -> all; bot last -> none; empty -> empty', sinceLastBotMessage([{ authorId: 'u1', text: 'a' }, { authorId: 'u2', text: 'b' }], 'bot').length === 2 && sinceLastBotMessage([{ authorId: 'u1', text: 'a' }, { authorId: 'bot', text: 'b' }], 'bot').length === 0 && sinceLastBotMessage([], 'bot').length === 0);
   const tc = formatThreadContext(['Ann (1): hi', '  ', 'Bob (2): ship it?']);
   check('formatThreadContext: header + lines, empty -> empty', tc === 'Other messages in the thread since your last reply (context, not addressed to you):\nAnn (1): hi\nBob (2): ship it?' && formatThreadContext([]) === '' && formatThreadContext(['  ']) === '');
   check('formatThreadContext: keeps newest lines within limits', formatThreadContext(Array.from({ length: 40 }, (_, i) => `L${i}`), { maxLines: 3 }).endsWith('L37\nL38\nL39') && !formatThreadContext(Array.from({ length: 40 }, (_, i) => `L${i}`), { maxLines: 3 }).includes('L36'));
