@@ -1,11 +1,13 @@
 import { BotDatabase } from './db.js';
 import { config } from './config.js';
+import { applyPendingImport } from './dbImport.js';
 import { installLogCapture } from './logs.js';
 import { createClient, registerEvents } from './bot.js';
 import { startWeeklyScheduler } from './scheduler.js';
 import { startWebServer } from './web/server.js';
 
 async function main(): Promise<void> {
+  applyPendingImport(config.databasePath);
   const db = new BotDatabase(config.databasePath);
   installLogCapture(db);
   console.log(`[db] sqlite database at ${config.databasePath}`);
@@ -13,17 +15,18 @@ async function main(): Promise<void> {
   const client = createClient();
   registerEvents(client, db);
 
-  startWebServer(client, db);
-  startWeeklyScheduler(client, db);
-
-  await client.login(config.token);
-
   const shutdown = (): void => {
     console.log('\n[shutdown] closing...');
     client.destroy();
     db.close();
     process.exit(0);
   };
+
+  startWebServer(client, db, shutdown);
+  startWeeklyScheduler(client, db);
+
+  await client.login(config.token);
+
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
