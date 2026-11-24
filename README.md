@@ -195,11 +195,13 @@ and a headless [OpenCode](https://opencode.ai) `chat` agent answers, with web se
 and the message it replies to at first; afterwards every message in the thread is forwarded to it and it decides
 whether to reply. It can read the bot's own code to answer questions about it.
 
-When an admin asks for a change to the bot itself, the chat hands over to the build flow in the same thread: the bot
+When an admin @mentions the bot with a change request for the bot itself (and building is enabled), a small decision model
+(**Decision model** in the dashboard, default `opencode-go/jev-1.14`) judges just that message and, if it is a feature
+request, the chat hands over to the build flow in the same thread: the bot
 asks a planning agent to plan it, relays questions and replies, and, once the plan is approved,
 lets a build agent implement it, push a `bot/<job>` branch and open a PR with auto-merge. GitHub CI and branch
 protection gate the merge; Dokploy then redeploys from `main`. When the job is finished the thread returns to chat.
-Non-admins are told that only admins can request changes.
+Non-admins are told by the chat agent that an admin can request changes.
 
 Requests are planned in parallel (one request per thread at a time). Approved requests build up to **Parallel builds**
 at once (dashboard, 1–5, default 1; more than 1 risks PR conflicts); the rest wait in a FIFO queue and the thread
@@ -221,7 +223,7 @@ read-only, `feature-build` can edit and run shell, all hidden from the normal ag
 `docker-compose.yml`, built from `docker/opencode/`. It publishes no ports; the bot reaches it at
 `http://opencode:4096` on the compose network.
 
-Enable chat and feature requests separately, pick the models (chat `opencode-go/glm-5.3-flash`, build `opencode-go/glm-5.3`)
+Enable chat and feature requests separately, pick the models (chat `opencode-go/glm-5.3-flash`, decision `opencode-go/jev-1.14`, build `opencode-go/glm-5.3`)
 and check agent-server status and OpenCode Go plan usage in the dashboard's **AI assistant** section. The
 **Chats & requests** page (`/dashboard/requests`) lists chat threads and every feature request
 with tokens and an estimated cost; OpenCode reports no cost for Go models, so it is computed from Go's published list

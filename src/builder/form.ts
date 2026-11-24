@@ -1,4 +1,4 @@
-import { clampMaxParallel, DEFAULT_BUILDER_MODEL, DEFAULT_CHAT_MODEL, type BuilderSettings } from '../db.js';
+import { clampMaxParallel, DEFAULT_BUILDER_MODEL, DEFAULT_CHAT_DECISION_MODEL, DEFAULT_CHAT_MODEL, type BuilderSettings } from '../db.js';
 import { parseModelRef } from './parse.js';
 
 /** Empty -> default; invalid -> keep `current` and report; otherwise the trimmed value. */
@@ -39,15 +39,17 @@ export function parseChatLanguages(raw: unknown): string[] {
 export function parseBuilderForm(form: Record<string, unknown>, current: BuilderSettings): { settings: BuilderSettings; modelError: string | null } {
   const build = pickModel(form.model, DEFAULT_BUILDER_MODEL, current.model, 'Build model');
   const chat = pickModel(form.chatModel, DEFAULT_CHAT_MODEL, current.chatModel, 'Chat model');
+  const decision = pickModel(form.chatDecisionModel, DEFAULT_CHAT_DECISION_MODEL, current.chatDecisionModel, 'Decision model');
   return {
     settings: {
       enabled: form.enabled === '1',
       model: build.model,
       chatEnabled: form.chatEnabled === '1',
       chatModel: chat.model,
+      chatDecisionModel: decision.model,
       chatLanguages: parseChatLanguages(form.chatLanguages),
       maxParallelBuilds: parseMaxParallel(form.maxParallelBuilds, current.maxParallelBuilds),
     },
-    modelError: build.error ?? chat.error,
+    modelError: build.error ?? chat.error ?? decision.error,
   };
 }

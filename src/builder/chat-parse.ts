@@ -6,20 +6,55 @@ export interface ChatReply {
   reply: boolean;
   /** Text to post ('' when `reply` is false). */
   visible: string;
-  /** Self-contained description of a requested bot feature, or null. */
-  featureRequest: string | null;
+  /** No valid json block was found: the text is never posted (the caller may ask once more). */
+  missingBlock: boolean;
 }
 
 /**
- * Parse a chat agent reply. A missing or invalid json block counts as `reply: true` with the whole
- * visible text (an empty text is then not posted). `reply: false` suppresses the visible text.
+ * Parse a chat agent reply (`{"reply": bool}` block). A missing or invalid json block is never
+ * posted: `reply: false` with `missingBlock: true`. `reply: false` suppresses the visible text.
  */
 export function parseChatReply(text: string): ChatReply {
   const { visible, result } = parseAgentReply(text);
-  if (!result) return { reply: visible.length > 0, visible, featureRequest: null };
-  const fr = typeof result.feature_request === 'string' ? result.feature_request.trim() : '';
+  if (!result) return { reply: false, visible: '', missingBlock: true };
   const wantsReply = result.reply !== false && visible.length > 0;
-  return { reply: wantsReply, visible: wantsReply ? visible : '', featureRequest: fr.length > 0 ? fr : null };
+  return { reply: wantsReply, visible: wantsReply ? visible : '', missingBlock: false };
+}
+
+export const FEATURE_REQUEST_QUESTION = {
+  name: 'feature_request',
+  instructions:
+    'Does this message ask for a new feature, a change or a bug fix in this Discord bot itself (not a general question, not just discussing an idea, not about other software)?',
+  criteria: {
+    true: 'The message clearly asks for the Discord bot to gain a feature, change its behavior or get a bug fixed.',
+    false: 'A general question, small talk, only discussing an idea, or about anything other than this bot.',
+  },
+};
+
+/** Probability from the decision model -> yes/no (null = no decision = no). */
+export function isFeatureRequest(probability: number | null, threshold = 0.5): boolean {
+  return probability !== null && Number.isFinite(probability) && probability >= threshold;
+}
+
+/** The decision model runs only for a directed message from an admin while building is enabled, with text to judge. */
+export function shouldRunDecision(opts: { directed: boolean; admin: boolean; buildingEnabled: boolean; text: string }): boolean {
+  return opts.directed && opts.admin && opts.buildingEnabled && opts.text.trim().length > 0;
+}
+
+/** Plain decision-model input: the replied-to message (if any) and the message itself. */
+export function formatDecisionInput(opts: { text: string; replyTo?: { name: string; text: string } | null }): string {
+  const parts: string[] = [];
+  const ref = opts.replyTo?.text.trim();
+  if (opts.replyTo && ref) parts.push(`Replying to ${opts.replyTo.name}: ${ref}`);
+  parts.push(`Message:\n${opts.text.trim()}`);
+  return parts.join('\n\n');
+}
+
+/** The build request text: what the requester wrote, prefixed by the message it replies to. */
+export function featureRequestText(opts: { text: string; replyTo?: { name: string; text: string } | null }): string {
+  const ref = opts.replyTo?.text.trim();
+  const own = opts.text.trim();
+  return opts.replyTo && ref ? `In reply to ${opts.replyTo.name}: ${ref}\n\n${own}` : own;
 }
 
 /** Split text into chunks of at most `max` chars, breaking at line boundaries (long lines at spaces, then hard). */

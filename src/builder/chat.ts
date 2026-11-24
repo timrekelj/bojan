@@ -1,17 +1,22 @@
 // General chat assistant: an @mention opens a thread backed by one OpenCode session (agent `chat`).
-// Every later message in the thread is forwarded to that session; the agent decides whether to reply
-// and whether the conversation is a feature request that should be handed to the build runner.
+// A directed (@mention) message from an admin, while building is enabled, is first checked by a decision
+// model (feature request or not): a feature request goes to the build runner, anything else to the chat session.
 import { PermissionFlagsBits, type Client, type Message, type SendableChannels } from 'discord.js';
 import { config } from '../config.js';
 import { ACTIVE_BUILD_STATUSES, type BotDatabase, type ChatThread } from '../db.js';
 import {
   chatThreadNameFor,
   chunkMessage,
+  featureRequestText,
+  FEATURE_REQUEST_QUESTION,
   formatChatMessage,
+  formatDecisionInput,
   formatInitialPrompt,
   formatTranscript,
+  isFeatureRequest,
   parseChatReply,
   replaceBotMention,
+  shouldRunDecision,
   withLanguageRule,
   withNotes,
   type ChatMessageInfo,
@@ -24,6 +29,7 @@ import type { BuilderRunner } from './runner.js';
 const DEBOUNCE_MS = 3_000;
 const CHAT_TIMEOUT_MS = 5 * 60_000;
 const TYPING_MS = 8_000;
+const DECISION_TIMEOUT_MS = 15_000;
 const NO_MENTIONS = { parse: [] as never[], repliedUser: false };
 
 export function isAdminMessage(message: Message): boolean {
@@ -33,8 +39,12 @@ export function isAdminMessage(message: Message): boolean {
 }
 
 interface Pending {
-  /** Formatted "<name> (<id>): text" lines. */
+  /** Prompt text for the chat agent ("<name> (<id>): text" lines or the initial-mention wrapper). */
   text: string;
+  /** What the author wrote, bot mention replaced; no prefix or wrapper. */
+  plain: string;
+  /** Plain text of the message this one replies to. */
+  replyTo?: { name: string; text: string };
   authorId: string;
   admin: boolean;
   /** The message mentioned the bot directly. */
@@ -169,7 +179,7 @@ export class ChatRunner {
     const channelName = 'name' in message.channel ? (message.channel.name as string | null) : null;
     // No language wrap here: the pending prompt goes through oneOff() or runTurn(), which both add the rule.
     const prompt = formatInitialPrompt({ channelName, trigger, referenced });
-    const pending: Pending = { text: prompt, authorId: message.author.id, admin: isAdminMessage(message), directed: true };
+    const pending: Pending = { text: prompt, plain: trigger.text, replyTo: referenced ? { name: referenced.name, text: referenced.text } : undefined, authorId: message.author.id, admin: isAdminMessage(message), directed: true };
 
     if (message.channel.isThread()) {
       void this.oneOff(message, pending);
@@ -202,11 +212,15 @@ export class ChatRunner {
     if (!bot) return;
     const info = messageInfo(message, bot.id, this.botName());
     if (info.text.trim().length === 0 && (info.extras?.length ?? 0) === 0) return;
-    this.enqueue(
-      chat.threadId,
-      { text: formatChatMessage(info), authorId: message.author.id, admin: isAdminMessage(message), directed: message.mentions.users.has(bot.id) && !message.mentions.everyone },
-      false,
-    );
+    const directed = message.mentions.users.has(bot.id) && !message.mentions.everyone;
+    void (async () => {
+      let replyTo: Pending['replyTo'];
+      if (directed && message.reference?.messageId) {
+        const ref = await message.fetchReference().catch(() => null);
+        if (ref) replyTo = { name: displayName(ref), text: replaceBotMention(ref.content, bot.id, this.botName()) };
+      }
+      this.enqueue(chat.threadId, { text: formatChatMessage(info), plain: info.text, replyTo, authorId: message.author.id, admin: isAdminMessage(message), directed }, false);
+    })();
   }
 
   // ---- per-thread queue ---------------------------------------------------------
@@ -261,13 +275,16 @@ export class ChatRunner {
     if (!chat) return;
     const stopTyping = this.typing(threadId);
     try {
+      // Feature requests never reach the chat agent; pending build notes stay for the next chat turn.
+      const requester = this.requesterOf(batch);
+      if (await this.detectFeatureRequest(threadId, batch, requester)) {
+        await this.handoff(threadId, requester, featureRequestText({ text: requester.plain, replyTo: requester.replyTo }));
+        return;
+      }
       const notes = this.db.pendingChatNotes(threadId);
       const prompt = withNotes(notes, withLanguageRule(batch.map((b) => b.text).join('\n'), this.chatLanguages()));
-      const reply = await this.getAgent().promptAndWait(chat.sessionId, prompt, CHAT_TIMEOUT_MS);
-      this.db.consumeChatNotes(threadId, notes.length);
-      await this.saveUsage(threadId, chat.sessionId, chat.model);
-      if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
-      await this.deliver(threadId, reply.text, batch);
+      const parsed = await this.askChat(threadId, chat.sessionId, chat.model, prompt, () => this.db.consumeChatNotes(threadId, notes.length));
+      if (parsed.reply) await this.say(threadId, parsed.visible);
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} turn failed:`, err);
       await this.say(threadId, 'Sorry, something went wrong on my side. Please try again in a bit.');
@@ -282,12 +299,14 @@ export class ChatRunner {
     const key = `${threadId}:${message.id}`;
     const stopTyping = this.typing(threadId);
     try {
+      if (await this.detectFeatureRequest(threadId, [pending], pending)) {
+        await this.handoff(threadId, pending, featureRequestText({ text: pending.plain, replyTo: pending.replyTo }));
+        return;
+      }
       const { sessionId, modelRef } = await this.newSession(key);
       this.db.createChatThread({ threadId: key, guildId: config.guildId, channelId: message.channel.isThread() ? (message.channel.parentId ?? threadId) : threadId, sessionId, startedBy: message.author.id, model: modelRef, oneOff: true });
-      const reply = await this.getAgent().promptAndWait(sessionId, withLanguageRule(pending.text, this.chatLanguages()), CHAT_TIMEOUT_MS);
-      await this.saveUsage(key, sessionId, modelRef);
-      if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
-      await this.deliver(threadId, reply.text, [pending]);
+      const parsed = await this.askChat(key, sessionId, modelRef, withLanguageRule(pending.text, this.chatLanguages()));
+      if (parsed.reply) await this.say(threadId, parsed.visible);
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} one-off failed:`, err);
       await this.say(threadId, 'Sorry, something went wrong on my side. Please try again in a bit.');
@@ -296,26 +315,57 @@ export class ChatRunner {
     }
   }
 
-  /** Post the agent's reply and act on a feature request. */
-  private async deliver(threadId: string, text: string, batch: Pending[]): Promise<void> {
-    const parsed = parseChatReply(text);
-    if (parsed.reply) await this.say(threadId, parsed.visible);
-    if (!parsed.featureRequest) return;
-    // The requester is whoever mentioned the bot last in the batch (else the last author).
-    const requester = [...batch].reverse().find((b) => b.directed) ?? batch[batch.length - 1]!;
-    await this.handoff(threadId, requester, parsed.featureRequest);
+  /**
+   * Prompt the chat agent and parse its `{reply}` block. A reply without a valid block is never
+   * posted: the same session is asked once more, and if that still has no block nothing is posted.
+   */
+  private async askChat(chatKey: string, sessionId: string, modelRef: string | null, prompt: string, afterFirst?: () => void): Promise<ReturnType<typeof parseChatReply>> {
+    const agent = this.getAgent();
+    let reply = await agent.promptAndWait(sessionId, prompt, CHAT_TIMEOUT_MS);
+    afterFirst?.();
+    await this.saveUsage(chatKey, sessionId, modelRef);
+    if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
+    let parsed = parseChatReply(reply.text);
+    if (parsed.missingBlock) {
+      console.warn(`[chat] guild=${config.guildId} thread=${chatKey} reply had no json block, asking again`);
+      reply = await agent.promptAndWait(sessionId, withLanguageRule('Reply now with only your message to the thread, followed by the json block.', this.chatLanguages()), CHAT_TIMEOUT_MS);
+      await this.saveUsage(chatKey, sessionId, modelRef);
+      if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
+      parsed = parseChatReply(reply.text);
+      if (parsed.missingBlock) console.warn(`[chat] guild=${config.guildId} thread=${chatKey} still no json block, posting nothing`);
+    }
+    return parsed;
   }
 
+  /** The requester is whoever mentioned the bot last in the batch (else the last author). */
+  private requesterOf(batch: Pending[]): Pending {
+    return [...batch].reverse().find((b) => b.directed) ?? batch[batch.length - 1]!;
+  }
+
+  /**
+   * Ask the decision model whether the requester's plain message is a feature request. Runs only for a
+   * directed admin message while building is enabled; any failure means "no".
+   */
+  private async detectFeatureRequest(threadId: string, batch: Pending[], requester: Pending): Promise<boolean> {
+    const buildingEnabled = this.db.getBuilderSettings().enabled && this.builder.configured;
+    if (!batch.some((b) => b.directed) || !shouldRunDecision({ directed: requester.directed, admin: requester.admin, buildingEnabled, text: requester.plain })) return false;
+    try {
+      const modelRef = this.db.getBuilderSettings().chatDecisionModel;
+      const model = parseModelRef(modelRef);
+      if (!model) throw new Error(`Invalid decision model setting "${modelRef}"`);
+      const input = formatDecisionInput({ text: requester.plain, replyTo: requester.replyTo });
+      const probability = await this.getAgent().decide(model, input, FEATURE_REQUEST_QUESTION, DECISION_TIMEOUT_MS);
+      const yes = isFeatureRequest(probability);
+      console.log(`[chat] guild=${config.guildId} thread=${threadId} decision feature_request=${probability ?? 'none'} -> ${yes}`);
+      return yes;
+    } catch (err) {
+      console.warn(`[chat] guild=${config.guildId} thread=${threadId} decision failed:`, err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+
+  /** Start a build job for a request the gate already approved (directed, admin, building enabled). */
   private async handoff(threadId: string, requester: Pending, request: string): Promise<void> {
-    const settings = this.db.getBuilderSettings();
-    if (!requester.admin) {
-      await this.say(threadId, 'Only admins can ask me to change the bot, so I can\'t start that request. An admin can ask me to plan it.');
-      return;
-    }
-    if (!settings.enabled || !this.builder.configured) {
-      await this.say(threadId, 'Building features is turned off right now, so I can\'t start that request.');
-      return;
-    }
     const slot = this.builder.reserve(threadId);
     if (!slot.ok) {
       await this.say(threadId, slot.active ? "There's already a feature request in progress in this thread." : "I'm already setting up a request in this thread. Please ask again in a minute.");
@@ -338,6 +388,7 @@ export class ChatRunner {
         request,
         context: formatTranscript(entries),
       });
+      await this.say(threadId, "Got it, I'll make a plan for this.");
     } catch (err) {
       this.builder.release(threadId);
       console.error(`[chat] guild=${config.guildId} thread=${threadId} could not hand off to the builder:`, err);
