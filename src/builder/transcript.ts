@@ -22,12 +22,23 @@ export type TranscriptPart =
   | { kind: 'reasoning'; text: string; /** Length before clipping. */ chars: number }
   | { kind: 'tool'; name: string; status: string; input: string; output: string; error: string | null; durationMs: number | null };
 
+/** Where the time of one assistant message went (ms; null = unknown). */
+export interface TranscriptTiming {
+  firstTokenMs: number | null;
+  totalMs: number | null;
+  toolsMs: number | null;
+  retry: string | null;
+}
+
 export type TranscriptEntry =
-  | { kind: 'user'; id: string; time: number | null; text: string; attachments: string[] }
+  | { kind: 'user'; id: string; time: number | null; gapMs: number | null; text: string; attachments: string[] }
   | {
       kind: 'assistant';
       id: string;
       time: number | null;
+      /** Idle time between the previous entry's end and this entry's start. */
+      gapMs: number | null;
+      timing: TranscriptTiming;
       agent: string | null;
       model: string | null;
       finish: string | null;
@@ -36,7 +47,7 @@ export type TranscriptEntry =
       cost: number | null;
       parts: TranscriptPart[];
     }
-  | { kind: 'event'; id: string; time: number | null; type: string; label: string };
+  | { kind: 'event'; id: string; time: number | null; gapMs: number | null; type: string; label: string };
 
 type Rec = Record<string, unknown>;
 
@@ -154,24 +165,58 @@ function eventLabel(m: Rec, type: string): string {
   }
 }
 
-/** Raw OpenCode messages (any order) -> display entries, in the same order. Never throws. */
+function diff(a: number | null, b: number | null): number | null {
+  return a !== null && b !== null && b >= a ? b - a : null;
+}
+
+function retryText(v: unknown): string | null {
+  if (!isRec(v)) return null;
+  const attempt = num(v.attempt);
+  const err = errorText(v.error);
+  const parts = [attempt !== null ? `attempt ${attempt}` : '', err ? clipText(err, MAX_EVENT_CHARS) : ''].filter(Boolean);
+  return parts.length > 0 ? parts.join(': ') : 'retrying';
+}
+
+function timingOf(raw: Rec, content: unknown[]): TranscriptTiming {
+  const t = isRec(raw.time) ? raw.time : {};
+  const created = num(t.created);
+  let tools = 0;
+  let anyTool = false;
+  for (const part of content) {
+    if (!isRec(part) || part.type !== 'tool') continue;
+    const p = partOf(part);
+    if (p && p.kind === 'tool' && p.durationMs !== null) {
+      tools += p.durationMs;
+      anyTool = true;
+    }
+  }
+  return { firstTokenMs: diff(created, num(t.firstToken)), totalMs: diff(created, num(t.completed)), toolsMs: anyTool ? tools : null, retry: retryText(raw.retry) };
+}
+
+/** Raw OpenCode messages (chronological order) -> display entries, in the same order. Never throws. */
 export function normalizeTranscript(messages: readonly unknown[]): TranscriptEntry[] {
   const out: TranscriptEntry[] = [];
+  let prevEnd: number | null = null;
   messages.forEach((raw, i) => {
     if (!isRec(raw)) return;
     const id = str(raw.id) ?? `m${i}`;
     const time = isRec(raw.time) ? num(raw.time.created) : null;
     const type = str(raw.type) ?? 'unknown';
+    const gapMs = diff(prevEnd, time);
+    prevEnd = time;
     if (type === 'user') {
       const files = Array.isArray(raw.files) ? raw.files : [];
       const attachments = files.filter(isRec).map((f) => `[file: ${str(f.name) || str(f.mime) || 'unknown'}]`);
-      out.push({ kind: 'user', id, time, text: clipText(str(raw.text) ?? '', MAX_TEXT_CHARS), attachments });
+      out.push({ kind: 'user', id, time, gapMs, text: clipText(str(raw.text) ?? '', MAX_TEXT_CHARS), attachments });
     } else if (type === 'assistant') {
       const content = Array.isArray(raw.content) ? raw.content : [];
+      if (isRec(raw.time)) prevEnd = num(raw.time.completed) ?? time;
       out.push({
         kind: 'assistant',
         id,
         time,
+        gapMs,
+        timing: timingOf(raw, content),
         agent: str(raw.agent),
         model: modelOf(raw.model),
         finish: str(raw.finish),
@@ -181,7 +226,7 @@ export function normalizeTranscript(messages: readonly unknown[]): TranscriptEnt
         parts: content.map(partOf).filter((p): p is TranscriptPart => p !== null),
       });
     } else {
-      out.push({ kind: 'event', id, time, type, label: eventLabel(raw, type) });
+      out.push({ kind: 'event', id, time, gapMs, type, label: eventLabel(raw, type) });
     }
   });
   return out;

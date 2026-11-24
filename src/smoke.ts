@@ -38,7 +38,7 @@ import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpProm
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { pagerHtml, rangeSummary } from './web/views.js';
-import { cachePercent, sessionParts, tokensCell, type SessionPageData } from './web/views.js';
+import { cachePercent, fmtMs, sessionParts, tokensCell, type SessionPageData } from './web/views.js';
 import { clipText, fetchTranscript, MAX_TEXT_CHARS, MAX_TOOL_INPUT_CHARS, MAX_TOOL_OUTPUT_CHARS, normalizeTranscript } from './builder/transcript.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
@@ -1531,6 +1531,25 @@ rmSync(dir, { recursive: true, force: true });
   check('sessionParts: entries render in the given (newest first) order, sub text says newest first', newestFirst.indexOf('T-a') < newestFirst.indexOf('T-b') && newestFirst.includes('newest first') && !newestFirst.includes('oldest first'));
   const olderPage = tl(['b', 'a'], { cursor: 'C1', olderCursor: 'C2' });
   check('sessionParts: pager only below the transcript, with Latest and Older', olderPage.indexOf('class="tl"') < olderPage.indexOf('Latest messages') && olderPage.indexOf('Latest messages') < olderPage.indexOf('Older messages') && olderPage.indexOf('class="pager"') > olderPage.indexOf('T-a') && !tl(['b'], { olderCursor: null }).includes('pager'));
+  const tm = normalizeTranscript([
+    { id: 'u', type: 'user', text: 'hi', time: { created: 1000 } },
+    { id: 'a1', type: 'assistant', time: { created: 2000, firstToken: 50_200, completed: 72_000 }, retry: { attempt: 2, at: 1, error: { type: 'rate', message: 'slow <down>' } }, content: [
+      { type: 'tool', name: 'bash', state: { status: 'completed' }, time: { created: 60_000, completed: 64_000 } },
+      { type: 'tool', name: 'read', state: { status: 'completed' }, time: { created: 64_000, ran: 65_000, completed: 66_500 } },
+      { type: 'tool', name: 'x', state: { status: 'running' }, time: { created: 66_600 } },
+    ] },
+    { id: 'a2', type: 'assistant', time: { created: 70_000 }, content: [] },
+    { id: 'a3', type: 'assistant', time: { created: 80_000 }, content: [] },
+  ]);
+  const ta = tm[1] as Extract<(typeof tm)[number], { kind: 'assistant' }>;
+  check('timing: first token, total, tools sum, retry string', ta.timing.firstTokenMs === 48_200 && ta.timing.totalMs === 70_000 && ta.timing.toolsMs === 5500 && ta.timing.retry === 'attempt 2: rate: slow <down>');
+  const tb = tm[2] as Extract<(typeof tm)[number], { kind: 'assistant' }>;
+  check('timing: missing firstToken/completed/tools/retry are null', tb.timing.firstTokenMs === null && tb.timing.totalMs === null && tb.timing.toolsMs === null && tb.timing.retry === null);
+  check('gapMs: first entry null, normal gap from completed, negative -> null, created fallback', tm[0]!.gapMs === null && tm[1]!.gapMs === 1000 && tm[2]!.gapMs === null && tm[3]!.gapMs === 10_000);
+  check('fmtMs: ms, seconds, minutes', fmtMs(450) === '450 ms' && fmtMs(14_100) === '14.1 s' && fmtMs(72_000) === '1 min 12 s' && fmtMs(63_000) === '1 min 3 s');
+  const timingHtml = sessionParts({ ...sdata, entries: [...tm].reverse() })['live-session']!;
+  console.log('sample timing line:', (timingHtml.match(/<div class="toks">waited[^<]*<\/div>/) ?? [''])[0]);
+  check('sessionParts: timing line rendered and escaped, idle shown from 5 s', timingHtml.includes('waited 48.2 s for first token · total 1 min 10 s · tools 5.5 s · retry: attempt 2: rate: slow &lt;down&gt;') && !timingHtml.includes('slow <down>') && timingHtml.includes('idle 10.0 s before this step') && !timingHtml.includes('idle 1.0 s'));
   check('requestsParts: session links for jobs and chats', requestsHtml.includes('href="/dashboard/sessions/ses_job7"') && requestsHtml.includes('href="/dashboard/sessions/ses_chat9"'));
   check('requestsParts: tokens cell and KPI use cache %', requestsHtml.includes('<td data-label="Tokens">100 / 20 / 5 / 75%</td>') && requestsHtml.includes('Cache hits') && !requestsHtml.includes('Cached tokens'));
   console.log('sample tokens cells:', (requestsHtml.match(/<td data-label="Tokens">[^<]*<\/td>/g) ?? []).join(' | '));

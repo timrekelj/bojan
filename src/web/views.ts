@@ -328,6 +328,7 @@ const CSS = `
   .msg pre { margin: 0; padding: 10px; max-width: 100%; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-2); }
   .msg pre + .pre-l { margin-top: 0; }
   .pre-l { padding: 8px 10px 0; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+  .msg .toks + .toks { margin-top: 2px; }
   .msg .toks { margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .err-t { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--err-soft); color: var(--err); font-size: 13px; overflow-wrap: anywhere; white-space: pre-wrap; }
   .evt { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 2px 8px; color: var(--muted); font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
@@ -1261,8 +1262,23 @@ export interface SessionPageData {
 
 const TOOL_BADGE: Record<string, string> = { completed: 'ok', error: 'error', running: 'warn', streaming: 'warn' };
 
-function fmtMs(ms: number): string {
-  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+export function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)} min ${total % 60} s`;
+}
+
+/** Muted timing line under an assistant message; only the known parts. Empty when nothing is known. */
+export function timingLine(e: Extract<TranscriptEntry, { kind: 'assistant' }>): string {
+  const t = e.timing;
+  const bits: string[] = [];
+  if (t.firstTokenMs !== null) bits.push(`waited ${fmtMs(t.firstTokenMs)} for first token`);
+  if (t.totalMs !== null) bits.push(`total ${fmtMs(t.totalMs)}`);
+  if (t.toolsMs !== null) bits.push(`tools ${fmtMs(t.toolsMs)}`);
+  if (t.retry) bits.push(`retry: ${t.retry}`);
+  if (e.gapMs !== null && e.gapMs >= 5000) bits.push(`idle ${fmtMs(e.gapMs)} before this step`);
+  return bits.length > 0 ? `<div class="toks">${escapeHtml(bits.join(' · '))}</div>` : '';
 }
 
 function toolPart(p: Extract<TranscriptPart, { kind: 'tool' }>, id: string): string {
@@ -1294,7 +1310,7 @@ function entryHtml(e: TranscriptEntry, tz: string): string {
   const toks = t || e.cost !== null ? `<div class="toks">${t ? `in ${fmt(t.input)} / out ${fmt(t.output)} / reasoning ${fmt(t.reasoning)} / cache ${fmtCachePercent(t)}` : ''}${t && e.cost !== null ? ' · ' : ''}${e.cost !== null ? escapeHtml(fmtUsd(e.cost)) : ''}</div>` : '';
   const finish = e.finish && e.finish !== 'stop' && e.finish !== 'tool-calls' ? `<span class="badge${e.finish === 'error' ? ' error' : ''}">${escapeHtml(e.finish)}</span>` : '';
   const head = `<div class="msg-h"><b>Assistant</b>${e.agent ? `<span>${escapeHtml(e.agent)}</span>` : ''}${e.model ? `<span>${escapeHtml(e.model)}</span>` : ''}${time ? `<span>${time}</span>` : ''}${finish}</div>`;
-  return `<article class="msg">${head}${parts}${e.error ? `<div class="err-t">${escapeHtml(e.error)}</div>` : ''}${toks}</article>`;
+  return `<article class="msg">${head}${parts}${e.error ? `<div class="err-t">${escapeHtml(e.error)}</div>` : ''}${toks}${timingLine(e)}</article>`;
 }
 
 /** Live regions of the session page, keyed by element id. */
