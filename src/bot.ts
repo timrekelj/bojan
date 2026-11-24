@@ -11,15 +11,17 @@ import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
   type Message,
+  type PartialUser,
   type SendableChannels,
   type TextChannel,
+  type User,
 } from 'discord.js';
 import type { BotDatabase } from './db.js';
 import { config } from './config.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
-import { awardMessageXp, buildLevelUpMessage, levelProgress, levelTag, XP_BACKFILL_PER_MESSAGE } from './levels.js';
+import { awardMessageXp, awardReactionXp, buildLevelUpMessage, levelProgress, levelTag, XP_BACKFILL_PER_MESSAGE } from './levels.js';
 import { handleBuilderMessage } from './builder/handler.js';
 import type { BuilderRunner } from './builder/runner.js';
 
@@ -331,6 +333,32 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
 }
 
 /**
+ * Post the level-up announcement in the configured channel. Best-effort: a
+ * failed announcement never breaks XP tracking.
+ */
+async function announceLevelUp(
+  client: Client,
+  guildId: string,
+  levelupChannelId: string,
+  data: { userId: string; username: string; level: number; xp: number },
+): Promise<void> {
+  try {
+    const guild = client.guilds.cache.get(guildId) ?? (await client.guilds.fetch(guildId));
+    const channel = await guild.channels.fetch(levelupChannelId).catch(() => null);
+    if (!channel || !channel.isSendable()) {
+      console.error(`[levels] level-up channel ${levelupChannelId} unavailable in guild ${guildId}`);
+      return;
+    }
+    await (channel as SendableChannels).send(
+      buildLevelUpMessage({ ...data, nextLevelXp: levelProgress(data.xp).nextLevelXp }),
+    );
+    console.log(`[levels] ${data.userId} reached level ${data.level} in guild ${guildId}`);
+  } catch (err) {
+    console.error(`[levels] level-up announcement failed in guild ${guildId}:`, err);
+  }
+}
+
+/**
  * Award MEE6-style leveling XP for one eligible message and, when the member
  * levelled up, post the announcement in the configured channel. Best-effort:
  * a failed announcement never breaks message tracking.
@@ -340,26 +368,29 @@ async function handleMessageXp(message: Message, db: BotDatabase, levelupChannel
   if (!guildId) return;
   const award = awardMessageXp(db, guildId, message.author.id, Date.now());
   if (!award?.leveledUp || !levelupChannelId) return;
-  try {
-    const guild = message.client.guilds.cache.get(guildId) ?? (await message.client.guilds.fetch(guildId));
-    const channel = await guild.channels.fetch(levelupChannelId).catch(() => null);
-    if (!channel || !channel.isSendable()) {
-      console.error(`[levels] level-up channel ${levelupChannelId} unavailable in guild ${guildId}`);
-      return;
-    }
-    await (channel as SendableChannels).send(
-      buildLevelUpMessage({
-        userId: message.author.id,
-        username: message.member?.displayName ?? message.author.displayName,
-        level: award.newLevel,
-        xp: award.xp,
-        nextLevelXp: levelProgress(award.xp).nextLevelXp,
-      }),
-    );
-    console.log(`[levels] ${message.author.id} reached level ${award.newLevel} in guild ${guildId}`);
-  } catch (err) {
-    console.error(`[levels] level-up announcement failed in guild ${guildId}:`, err);
-  }
+  await announceLevelUp(message.client, guildId, levelupChannelId, {
+    userId: message.author.id,
+    username: message.member?.displayName ?? message.author.displayName,
+    level: award.newLevel,
+    xp: award.xp,
+  });
+}
+
+/**
+ * Roll the 1% reaction-XP chance (level + 1 XP) for one reaction by a member
+ * and, when they levelled up, post the announcement in the configured channel.
+ * Best-effort: a failed announcement never breaks reaction tracking.
+ */
+async function handleReactionXp(client: Client, db: BotDatabase, guildId: string, user: User | PartialUser, levelupChannelId: string | null): Promise<void> {
+  const award = awardReactionXp(db, guildId, user.id, Date.now());
+  if (!award?.leveledUp || !levelupChannelId) return;
+  await announceLevelUp(client, guildId, levelupChannelId, {
+    userId: user.id,
+    // A partial reactor has no usable name — best-effort, the card never pings anyway.
+    username: user.partial ? (user.username ?? 'member') : user.displayName,
+    level: award.newLevel,
+    xp: award.xp,
+  });
 }
 
 export function registerEvents(client: Client, db: BotDatabase, builder: BuilderRunner): void {
@@ -400,7 +431,15 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
         if (user.bot) return;
         let message = reaction.message;
         if (message.partial) message = await message.fetch();
-        if (!message.guildId || message.author?.bot || message.webhookId) return;
+        if (!message.guildId) return;
+        // Reaction XP: every guild reaction by a member has the 1% chance,
+        // including reactions on the bot's own messages.
+        const settings = db.getSettings(message.guildId);
+        if (settings.levelingEnabled) {
+          void handleReactionXp(client, db, message.guildId, user, settings.levelupChannelId)
+            .catch((err) => console.error(`[levels] reaction xp failed in guild ${message.guildId}:`, err));
+        }
+        if (message.author?.bot || message.webhookId) return;
         const { key, label } = emojiParts(reaction.emoji);
         db.recordReaction({
           guildId: message.guildId,

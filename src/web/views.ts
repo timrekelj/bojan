@@ -578,8 +578,8 @@ export function dashboardPage(d: DashboardData): string {
       </fieldset>
       <fieldset>
         <legend>Leveling</legend>
-        <p class="sub">Members earn a random 5–10 XP per message, at most once every 30 seconds. Each level needs more XP than the last.</p>
-        <label class="switch"><input type="checkbox" name="levelingEnabled" value="1"${s.levelingEnabled ? ' checked' : ''}><span class="track"></span><span><span class="lbl">Award XP for messages</span><span class="help">XP is stored permanently per member.</span></span></label>
+        <p class="sub">Members earn a random 5–10 XP per message, at most once every 30 seconds. Every reaction has a 1% chance to win level + 1 XP (lvl 0 → 1, lvl 49 → 50). Each level needs more XP than the last.</p>
+        <label class="switch"><input type="checkbox" name="levelingEnabled" value="1"${s.levelingEnabled ? ' checked' : ''}><span class="track"></span><span><span class="lbl">Award XP for messages and reactions</span><span class="help">Reactions have a 1% chance to win level + 1 XP. XP is stored permanently per member.</span></span></label>
         <div class="field"><label for="levelupChannel">Level-up announcements</label><span class="help">Where level-ups are posted (e.g. #bot-testing). Empty = track XP silently.</span>
           <select id="levelupChannel" name="levelupChannel"><option value="">— silent —</option>${levelupOptions}</select></div>
       </fieldset>

@@ -62,7 +62,7 @@ export function levelTag(xp: number | null): string | null {
 }
 
 export interface XpAwardResult {
-  /** XP gained from this message (5–10). */
+  /** XP gained from this message (5–10) or winning reaction (level + 1). */
   xpGained: number;
   /** The member's new total XP. */
   xp: number;
@@ -83,6 +83,31 @@ export function awardMessageXp(db: BotDatabase, guildId: string, userId: string,
   const newLevel = levelFromXp(xp);
   return { xpGained, xp, newLevel, leveledUp: newLevel > levelFromXp(row?.xp ?? 0) };
 }
+
+/** Chance per eligible reaction to earn reaction XP. */
+export const REACT_XP_CHANCE = 0.01;
+
+/** XP for one winning reaction: the member's current level + 1 (lvl 0 → 1, lvl 49 → 50). */
+export function reactXpAmount(level: number): number {
+  return level + 1;
+}
+
+/**
+ * Roll the 1% reaction-XP chance for one eligible reaction. Returns null when
+ * the roll misses (no database read or write); a win adds `level + 1` XP for
+ * the member's current level, refreshing the same cooldown window as message
+ * XP. XP is stored permanently in the `user_xp` table. `rand` is injectable
+ * for tests.
+ */
+export function awardReactionXp(db: BotDatabase, guildId: string, userId: string, ts: number, rand: () => number = Math.random): XpAwardResult | null {
+  if (rand() >= REACT_XP_CHANCE) return null;
+  const row = db.getUserXp(guildId, userId);
+  const xpGained = reactXpAmount(levelFromXp(row?.xp ?? 0));
+  const xp = db.addUserXp(guildId, userId, xpGained, ts);
+  const newLevel = levelFromXp(xp);
+  return { xpGained, xp, newLevel, leveledUp: newLevel > levelFromXp(row?.xp ?? 0) };
+}
+
 
 export interface LevelUpData {
   userId: string;
