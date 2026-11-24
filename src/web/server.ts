@@ -369,7 +369,6 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       currentWeekRank: db.userRank(config.guildId, session.userId, curWeek.start, curEnd),
       lastWeekRank: db.userRank(config.guildId, session.userId, week.start, week.end),
       xp: db.getUserXp(config.guildId, session.userId)?.xp ?? null,
-      roleColor: guild?.members.cache.get(session.userId)?.roles.color?.hexColor ?? null,
       stats: db.userStats(config.guildId, session.userId),
       reactions: db.reactionStats(config.guildId, session.userId),
       voice: db.voiceStats(config.guildId, session.userId),
