@@ -3,6 +3,7 @@
 import { OpenCode } from '@opencode/client';
 import type { TokenUsage } from './pricing.js';
 import { branchName, worktreeDirFor, type ModelRef } from './parse.js';
+import type { PromptImage } from './chat-parse.js';
 
 export const REPO_DIR = '/workspace/bojan';
 
@@ -279,9 +280,9 @@ export class OpenCodeAgent {
   }
 
   /** Queue a prompt, wait for the agent to stop, and return its final reply. */
-  async promptAndWait(sessionID: string, text: string, timeoutMs: number): Promise<AgentReply> {
+  async promptAndWait(sessionID: string, text: string, timeoutMs: number, files?: readonly PromptImage[]): Promise<AgentReply> {
     const before = (await this.latestReply(sessionID)).id;
-    await this.client.session.prompt({ sessionID, text });
+    await this.client.session.prompt(files && files.length > 0 ? { sessionID, text, files } : { sessionID, text });
     await this.waitIdle(sessionID, timeoutMs);
     const reply = await this.latestReply(sessionID);
     if (reply.id !== null && reply.id === before && !reply.error) {

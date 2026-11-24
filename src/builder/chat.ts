@@ -24,7 +24,9 @@ import {
   withLanguageRule,
   withNotes,
   type ChatMessageInfo,
+  type PromptImage,
 } from './chat-parse.js';
+import { downloadImages } from './images.js';
 import { REPO_DIR } from './opencode.js';
 import { isAdminLike, parseModelRef } from './parse.js';
 import { sessionUsageWithEstimate } from './pricing.js';
@@ -58,6 +60,8 @@ interface Pending {
   messageId: string;
   /** Channel the message was sent in (the parent channel for the message that opens a thread). */
   channelId: string;
+  /** Messages whose image attachments go to the model (the message itself, then the one it replies to). */
+  imageMessages: Message[];
 }
 
 /** A direct @mention of the bot (not @everyone) or a Discord reply to a message the bot wrote. */
@@ -212,9 +216,13 @@ export class ChatRunner {
     if (!bot) return;
     const trigger = messageInfo(message, bot.id, this.botName());
     let referenced: ChatMessageInfo | null = null;
+    const imageMessages: Message[] = [message];
     if (message.reference?.messageId) {
       const ref = await message.fetchReference().catch(() => null);
-      if (ref) referenced = messageInfo(ref, bot.id, this.botName());
+      if (ref) {
+        referenced = messageInfo(ref, bot.id, this.botName());
+        imageMessages.push(ref);
+      }
     }
     const channelName = 'name' in message.channel ? (message.channel.name as string | null) : null;
     // No language wrap here: the pending prompt goes through oneOff() or runTurn(), which both add the rule.
@@ -228,6 +236,7 @@ export class ChatRunner {
       directed: true,
       messageId: message.id,
       channelId: message.channelId,
+      imageMessages,
     };
     void this.markThinking(pending);
 
@@ -278,12 +287,16 @@ export class ChatRunner {
       directed,
       messageId: message.id,
       channelId: message.channelId,
+      imageMessages: [message],
     };
     void this.markThinking(item);
     void (async () => {
       if (message.mentions.users.has(bot.id) && message.reference?.messageId) {
         const ref = await message.fetchReference().catch(() => null);
-        if (ref) item.replyTo = { name: displayName(ref), text: replaceBotMention(ref.content, bot.id, this.botName()) };
+        if (ref) {
+          item.replyTo = { name: displayName(ref), text: replaceBotMention(ref.content, bot.id, this.botName()) };
+          item.imageMessages.push(ref);
+        }
       }
       this.enqueue(chat.threadId, item, false);
     })();
@@ -371,7 +384,7 @@ export class ChatRunner {
       // Feature requests never reach the chat agent; pending build notes stay for the next chat turn.
       const requester = this.requesterOf(batch);
       if (await this.detectFeatureRequest(threadId, batch, requester)) {
-        await this.handoff(threadId, requester, featureRequestText({ text: requester.plain, replyTo: requester.replyTo }));
+        await this.handoff(threadId, requester, featureRequestText({ text: requester.plain, replyTo: requester.replyTo }), requester.imageMessages);
         return;
       }
       const notes = this.db.pendingChatNotes(threadId);
@@ -379,7 +392,8 @@ export class ChatRunner {
       const ctxBlock = formatThreadContext(await this.fetchContext(threadId, batch));
       const body = [ctxBlock, batch.map((b) => b.text).join('\n')].filter((p) => p.length > 0).join('\n\n');
       const prompt = withNotes(status ? [status, ...notes] : notes, withLanguageRule(body, this.chatLanguages()));
-      const parsed = await this.askChat(threadId, chat.sessionId, chat.model, prompt, () => this.db.consumeChatNotes(threadId, notes.length));
+      const images = await downloadImages(batch.flatMap((b) => b.imageMessages), 'chat');
+      const parsed = await this.askChat(threadId, chat.sessionId, chat.model, prompt, images, () => this.db.consumeChatNotes(threadId, notes.length));
       if (parsed.reply) await this.say(threadId, parsed.visible, this.replyTarget(threadId, batch));
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} turn failed:`, err);
@@ -396,12 +410,13 @@ export class ChatRunner {
     const stopTyping = this.typing(threadId);
     try {
       if (await this.detectFeatureRequest(threadId, [pending], pending)) {
-        await this.handoff(threadId, pending, featureRequestText({ text: pending.plain, replyTo: pending.replyTo }));
+        await this.handoff(threadId, pending, featureRequestText({ text: pending.plain, replyTo: pending.replyTo }), pending.imageMessages);
         return;
       }
       const { sessionId, modelRef } = await this.newSession(key);
       this.db.createChatThread({ threadId: key, guildId: config.guildId, channelId: message.channel.isThread() ? (message.channel.parentId ?? threadId) : threadId, sessionId, startedBy: message.author.id, model: modelRef, oneOff: true });
-      const parsed = await this.askChat(key, sessionId, modelRef, withLanguageRule(pending.text, this.chatLanguages()));
+      const images = await downloadImages(pending.imageMessages, 'chat');
+      const parsed = await this.askChat(key, sessionId, modelRef, withLanguageRule(pending.text, this.chatLanguages()), images);
       if (parsed.reply) await this.say(threadId, parsed.visible, pending.messageId);
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} one-off failed:`, err);
@@ -416,9 +431,9 @@ export class ChatRunner {
    * Prompt the chat agent and parse its `{reply}` block. A reply without a valid block is never
    * posted: the same session is asked once more, and if that still has no block nothing is posted.
    */
-  private async askChat(chatKey: string, sessionId: string, modelRef: string | null, prompt: string, afterFirst?: () => void): Promise<ReturnType<typeof parseChatReply>> {
+  private async askChat(chatKey: string, sessionId: string, modelRef: string | null, prompt: string, images: readonly PromptImage[], afterFirst?: () => void): Promise<ReturnType<typeof parseChatReply>> {
     const agent = this.getAgent();
-    let reply = await agent.promptAndWait(sessionId, prompt, CHAT_TIMEOUT_MS);
+    let reply = await agent.promptAndWait(sessionId, prompt, CHAT_TIMEOUT_MS, images);
     afterFirst?.();
     await this.saveUsage(chatKey, sessionId, modelRef);
     if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
@@ -513,7 +528,7 @@ export class ChatRunner {
   }
 
   /** Start a build job for a request the gate already approved (directed, admin, building enabled). */
-  private async handoff(threadId: string, requester: Pending, request: string): Promise<void> {
+  private async handoff(threadId: string, requester: Pending, request: string, imageMessages: readonly Message[]): Promise<void> {
     // Only a message inside the thread itself can be replied to.
     const replyTo = requester.channelId === threadId ? requester.messageId : null;
     const slot = this.builder.reserve(threadId);
@@ -538,6 +553,7 @@ export class ChatRunner {
         request,
         triggerMessageId: requester.messageId,
         context: formatTranscript(entries),
+        images: await downloadImages(imageMessages, 'builder'),
       });
       await this.say(threadId, "Got it, I'll make a plan for this.", replyTo);
     } catch (err) {

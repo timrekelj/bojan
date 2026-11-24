@@ -32,7 +32,7 @@ import { extractReply, lastConversationIsAssistant } from './builder/opencode.js
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
 import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
-import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
+import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
@@ -1025,6 +1025,13 @@ rmSync(dir, { recursive: true, force: true });
   check('pickReplyTarget: empty batch', pickReplyTarget([]) === null);
   check('pickReplyTarget: latest directed wins', pickReplyTarget([{ messageId: '1', directed: true }, { messageId: '2', directed: true }, { messageId: '3', directed: false }]) === '2');
   check('pickReplyTarget: falls back to last message', pickReplyTarget([{ messageId: '1', directed: false }, { messageId: '2', directed: false }]) === '2');
+  {
+    const att = (name: string, contentType: string | null, size: number) => ({ name, url: `https://cdn/${name}`, contentType, size });
+    const picked = selectImages([att('a.png', 'image/png', 100), att('doc.pdf', 'application/pdf', 100), att('b.jpg', 'image/jpeg; charset=x', 100), att('none', null, 100), att('huge.png', 'image/png', 6 * 1024 * 1024)]);
+    check('selectImages: only images, in order, within size', picked.map((p) => p.name).join(',') === 'a.png,b.jpg' && picked[1]!.mime === 'image/jpeg');
+    check('selectImages: capped at 4', selectImages(Array.from({ length: 7 }, (_, i) => att(`${i}.png`, 'image/png', 1))).length === 4);
+    check('selectImages: empty', selectImages([]).length === 0);
+  }
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

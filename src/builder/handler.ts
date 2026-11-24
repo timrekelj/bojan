@@ -2,6 +2,7 @@ import type { Client, Message } from 'discord.js';
 import { config } from '../config.js';
 import type { BotDatabase } from '../db.js';
 import { isAdminMessage, isDirectedAtBot } from './chat.js';
+import { downloadImages } from './images.js';
 import { stripBotMention } from './parse.js';
 import type { BuilderRunner } from './runner.js';
 
@@ -31,8 +32,10 @@ export async function handleBuilderMessage(message: Message, client: Client, db:
           : directed && (message.author.id === job.requesterId || isAdminMessage(message));
         if (allowed) {
           const text = stripBotMention(message.content, client.user.id);
-          if (text.length > 0) {
-            runner.handleReply(job, message.member?.displayName ?? message.author.username, text, { sentAt: message.createdTimestamp, messageId: message.id, trigger: directed });
+          // Only directed (triggering) replies carry images; context-only messages stay text.
+          const images = directed && message.attachments.size > 0 ? await downloadImages([message], 'builder') : [];
+          if (text.length > 0 || images.length > 0) {
+            runner.handleReply(job, message.member?.displayName ?? message.author.username, text, { sentAt: message.createdTimestamp, messageId: message.id, trigger: directed, images });
           }
         }
       }

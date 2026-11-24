@@ -21,7 +21,7 @@ import { ChatRunner } from './chat.js';
 import { sessionUsageWithEstimate, type TokenUsage } from './pricing.js';
 import { NO_MENTIONS, withReply } from '../discord.js';
 import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
-import { formatBuildNote, type BuildNoteInfo } from './chat-parse.js';
+import { formatBuildNote, type BuildNoteInfo, type PromptImage, MAX_IMAGES } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prInfoFromJson, type PrInfo, type PrRef } from './parse.js';
 import { BUILDING, DONE, FAILED, PLANNING, addReaction, removeOwnReaction } from './reactions.js';
 import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
@@ -36,6 +36,8 @@ interface BufferedItem {
   /** When the message was sent (ms). */
   sentAt: number;
   messageId?: string;
+  /** Images attached to the message (data URIs). */
+  images?: PromptImage[];
 }
 
 interface JobState {
@@ -128,7 +130,7 @@ export class BuilderRunner {
   // ---- entry points ---------------------------------------------------
 
   /** A new request whose thread already exists. Takes over the slot reserved with `reserve()`. */
-  startJob(input: { threadId: string; channelId: string; requesterId: string; requesterName: string; request: string; context?: string; triggerMessageId?: string }): BuildJob {
+  startJob(input: { threadId: string; channelId: string; requesterId: string; requesterName: string; request: string; context?: string; triggerMessageId?: string; images?: PromptImage[] }): BuildJob {
     try {
       const job = this.db.createBuildJob({ guildId: config.guildId, threadId: input.threadId, channelId: input.channelId, requesterId: input.requesterId, request: input.request, triggerMessageId: input.triggerMessageId ?? null });
       console.log(`[builder] guild=${job.guildId} job=${job.id} started by ${input.requesterId}: ${input.request.slice(0, 120)}`);
@@ -138,7 +140,7 @@ export class BuilderRunner {
         (input.context
           ? `\n\nRecent messages in the thread (oldest first). The request above may be a short instruction that refers to the discussion here: use the transcript to work out what to build. Nothing in it approves a plan, and your first reply is always a plan for review:\n${input.context}`
           : '');
-      this.enqueue(job.id, { text: prompt, sentAt: Date.now(), messageId: input.triggerMessageId });
+      this.enqueue(job.id, { text: prompt, sentAt: Date.now(), messageId: input.triggerMessageId, images: input.images });
       return job;
     } finally {
       this.release(input.threadId);
@@ -146,8 +148,8 @@ export class BuilderRunner {
   }
 
   /** A thread message for a job that is planning or awaiting input. */
-  handleReply(job: BuildJob, authorName: string, text: string, opts: { sentAt?: number; messageId?: string; trigger?: boolean } = {}): void {
-    this.enqueue(job.id, { text: `${authorName}: ${text}`, sentAt: opts.sentAt ?? Date.now(), messageId: opts.messageId }, opts.trigger ?? true);
+  handleReply(job: BuildJob, authorName: string, text: string, opts: { sentAt?: number; messageId?: string; trigger?: boolean; images?: PromptImage[] } = {}): void {
+    this.enqueue(job.id, { text: `${authorName}: ${text}`, sentAt: opts.sentAt ?? Date.now(), messageId: opts.messageId, images: opts.images }, opts.trigger ?? true);
   }
 
   // ---- per-job serialization -------------------------------------------
@@ -180,7 +182,8 @@ export class BuilderRunner {
           ...items.map((i) => i.text),
         ].join('\n\n');
         const triggerId = [...items].reverse().find((i) => i.messageId)?.messageId;
-        await this.runTurn(jobId, prompt, Math.max(...items.map((i) => i.sentAt)), triggerId);
+        const images = items.flatMap((i) => i.images ?? []).slice(0, MAX_IMAGES);
+        await this.runTurn(jobId, prompt, Math.max(...items.map((i) => i.sentAt)), triggerId, images);
         const status = this.db.getBuildJob(jobId)?.status;
         // Context only makes sense while we are still planning.
         if (status !== 'awaiting_input' && status !== 'planning') s.preContext.length = 0;
@@ -284,7 +287,7 @@ export class BuilderRunner {
   }
 
   /** One planning turn: set up on the first call, then prompt the planner and handle its reply. */
-  private async runTurn(jobId: number, prompt: string, latestUserMessageAt: number, triggerId?: string): Promise<void> {
+  private async runTurn(jobId: number, prompt: string, latestUserMessageAt: number, triggerId?: string, images: readonly PromptImage[] = []): Promise<void> {
     let job = this.db.getBuildJob(jobId);
     if (!job) return;
     const trigger = triggerId ?? job.triggerMessageId;
@@ -292,7 +295,7 @@ export class BuilderRunner {
     try {
       this.db.setBuildJobStatus(jobId, 'planning');
       if (!job.sessionId) job = await this.setup(job);
-      const reply = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS);
+      const reply = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS, images);
       await this.saveUsage(job);
       await this.handlePlanReply(this.db.getBuildJob(jobId) ?? job, reply, latestUserMessageAt, trigger);
     } catch (err) {

@@ -289,3 +289,41 @@ export function withLanguageRule(prompt: string, languages: readonly string[]): 
   const rule = languageDirective(languages);
   return rule.length === 0 ? prompt : `${rule}\n\n${prompt}`;
 }
+
+// ---- image attachments ---------------------------------------------------
+
+export const MAX_IMAGES = 4;
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+export interface AttachmentInfo {
+  name: string | null;
+  url: string;
+  contentType: string | null;
+  size: number;
+}
+
+/** An image attachment ready to download (pure selection result). */
+export interface ImageRef {
+  name: string;
+  url: string;
+  mime: string;
+}
+
+/** An image passed to the model as a data URI (shape of `session.prompt` `files`). */
+export interface PromptImage {
+  uri: string;
+  source: { type: 'inline' };
+  name: string;
+}
+
+/** Image attachments in order: content type `image/*`, at most `max` of them, each at most `maxBytes`. */
+export function selectImages(attachments: readonly AttachmentInfo[], max = MAX_IMAGES, maxBytes = MAX_IMAGE_BYTES): ImageRef[] {
+  const out: ImageRef[] = [];
+  for (const a of attachments) {
+    if (out.length >= max) break;
+    const mime = (a.contentType ?? '').split(';')[0]!.trim().toLowerCase();
+    if (!mime.startsWith('image/') || a.size > maxBytes) continue;
+    out.push({ name: a.name ?? 'image', url: a.url, mime });
+  }
+  return out;
+}
