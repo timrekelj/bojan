@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase, clampLimitThreshold, type WebSessionRow } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
-import { awardMessageXp, awardReactionXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
+import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
@@ -184,6 +184,28 @@ check(
   JSON.stringify(rWin3),
 );
 
+
+// ---- voice XP (10 xp per 10 min in voice) --------------------------------
+check('voice xp blocks: partial blocks are dropped', voiceXpBlocks(0) === 0 && voiceXpBlocks(599_999) === 0 && voiceXpBlocks(VOICE_XP_BLOCK_MS) === 1 && voiceXpBlocks(1_800_000) === 3);
+db.recordVoiceState(G, 'voiceGuy', 'vc1', now);
+const voiceOpen = db.openVoiceSessions(G).find((r) => r.userId === 'voiceGuy');
+check('voice session starts with no awarded blocks', voiceOpen !== undefined && voiceOpen.channelId === 'vc1' && voiceOpen.awardedBlocks === 0, JSON.stringify(voiceOpen));
+check('no voice xp before a full block', voiceOpen !== undefined && awardVoiceXp(db, G, 'voiceGuy', voiceOpen, now + 599_999) === null);
+const voiceOpen2 = db.openVoiceSessions(G).find((r) => r.userId === 'voiceGuy');
+const vFirst = voiceOpen2 ? awardVoiceXp(db, G, 'voiceGuy', voiceOpen2, now + 600_000) : null;
+check('10 xp at the first complete block', vFirst !== null && vFirst.xpGained === 10 && vFirst.xp === 10 && !vFirst.leveledUp, JSON.stringify(vFirst));
+const voiceOpen3 = db.openVoiceSessions(G).find((r) => r.userId === 'voiceGuy');
+check('a paid block is not paid twice', voiceOpen3 !== undefined && voiceOpen3.awardedBlocks === 1 && awardVoiceXp(db, G, 'voiceGuy', voiceOpen3, now + 600_000) === null);
+const voiceOpen4 = db.openVoiceSessions(G).find((r) => r.userId === 'voiceGuy');
+const vLate = voiceOpen4 ? awardVoiceXp(db, G, 'voiceGuy', voiceOpen4, now + 1_860_000) : null;
+check('late blocks pay the missed ones', vLate !== null && vLate.xpGained === 20 && vLate.xp === 30, JSON.stringify(vLate));
+db.addUserXp(G, 'voiceLucky', 95, now); // 5 xp short of level 1
+db.recordVoiceState(G, 'voiceLucky', 'vc1', now);
+const voiceLucky = db.openVoiceSessions(G).find((r) => r.userId === 'voiceLucky');
+const vUp = voiceLucky ? awardVoiceXp(db, G, 'voiceLucky', voiceLucky, now + 600_000) : null;
+check('voice xp level-up detected at the crossing', vUp !== null && vUp.leveledUp && vUp.newLevel === 1 && vUp.xp === 105, JSON.stringify(vUp));
+db.recordVoiceState(G, 'voiceGuy', null, now + 2_000_000);
+check('closed voice session drops out of the ticker', !db.openVoiceSessions(G).some((r) => r.userId === 'voiceGuy'));
 
 // ---- one-time XP backfill (/backfill xp) ---------------------------------
 // G has 21 recorded messages (alice 10, bob 5, carol 3, dave 1, erin 2).

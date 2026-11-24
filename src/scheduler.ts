@@ -2,6 +2,7 @@ import { PermissionFlagsBits, type Client, type Guild, type PermissionsBitField,
 import type { BotDatabase, Settings } from './db.js';
 import { currentWeekBounds, lastWeekBounds, zonedToUtcMs } from './stats.js';
 import { buildWeeklyStatsMessage } from './weekly.js';
+import { announceLevelUp, awardVoiceXp } from './levels.js';
 
 const TICK_MS = 30_000;
 
@@ -161,4 +162,53 @@ export function startWeeklyScheduler(client: Client, db: BotDatabase): NodeJS.Ti
 
   void tick(); // run once at startup; isWeeklyDue catches up a missed hour within the same week
   return setInterval(() => void tick(), TICK_MS);
+}
+
+const VOICE_XP_TICK_MS = 60_000;
+
+/**
+ * Award voice XP once a minute: every still-open voice session gets 10 XP per
+ * newly completed 10-minute block. Sessions in the AFK channel, of bots, or
+ * that no longer match the live voice state are skipped, and nothing accrues
+ * while leveling is disabled. Late blocks are paid on the next tick, so a
+ * restart or a slow tick never loses XP.
+ */
+export function startVoiceXpTicker(client: Client, db: BotDatabase): NodeJS.Timeout {
+  let running = false; // in-flight guard: skip a tick while the previous one is still running
+  const tick = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+      const now = Date.now();
+      for (const guild of client.guilds.cache.values()) {
+        try {
+          const settings = db.getSettings(guild.id);
+          if (!settings.levelingEnabled) continue;
+          for (const row of db.openVoiceSessions(guild.id)) {
+            const live = guild.voiceStates.cache.get(row.userId);
+            if (!live || live.channelId !== row.channelId) continue;
+            if (guild.afkChannelId && row.channelId === guild.afkChannelId) continue;
+            const member = guild.members.cache.get(row.userId);
+            if (member?.user.bot) continue;
+            const award = awardVoiceXp(db, guild.id, row.userId, row, now);
+            if (!award) continue;
+            console.log(`[scheduler] guild ${guild.id}: voice xp +${award.xpGained} for ${row.userId} in ${row.channelId} (total ${award.xp})`);
+            if (award.leveledUp && settings.levelupChannelId) {
+              await announceLevelUp(client, guild.id, settings.levelupChannelId, {
+                userId: row.userId,
+                username: member?.displayName ?? row.userId,
+                level: award.newLevel,
+                xp: award.xp,
+              });
+            }
+          }
+        } catch (err) {
+          console.error(`[scheduler] voice xp failed in guild ${guild.id}:`, err);
+        }
+      }
+    } finally {
+      running = false;
+    }
+  };
+  return setInterval(() => void tick(), VOICE_XP_TICK_MS);
 }

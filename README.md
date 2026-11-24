@@ -32,9 +32,10 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   than the last (level 1 at 100 XP, 2 at 300, 3 at 600, …), and on a
   level-up the bot posts a Components V2 card (no ping) to the configured
   channel. On by default; the channel is picked in the **dashboard**
-  (settings section) — until one is set, XP is tracked silently. XP is not
-  retroactive by itself, but admins can run the one-time `/backfill xp` to
-  grant 10 XP for every already-recorded message.
+  (settings section) — until one is set, XP is tracked silently. Members in
+  voice also earn 10 XP for every 10 minutes there (AFK channel excluded).
+  XP is not retroactive by itself, but admins can run the one-time
+  `/backfill xp` to grant 10 XP for every already-recorded message.
 - **Name-colour roles** — the roles are made by hand; in the dashboard you
   tick which ones are name colours and pick a channel. The bot then posts one
   Components V2 message per role there with a 🎨 marker reaction: reacting

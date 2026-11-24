@@ -140,6 +140,15 @@ export interface CurrentVoiceRow {
   lastSeenAt: number;
 }
 
+/** An open voice session plus how many 10-minute XP blocks it already paid for. */
+export interface VoiceXpRow {
+  id: number;
+  userId: string;
+  channelId: string;
+  startedAt: number;
+  awardedBlocks: number;
+}
+
 export interface ActivitySummaryRow {
   name: string;
   sessions: number;
@@ -310,7 +319,8 @@ CREATE TABLE IF NOT EXISTS voice_sessions (
   channel_id TEXT NOT NULL,
   started_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL,
-  ended_at INTEGER
+  ended_at INTEGER,
+  awarded_blocks INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_voice_guild_user ON voice_sessions (guild_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_voice_open ON voice_sessions (guild_id, user_id, ended_at);
@@ -622,6 +632,11 @@ export class BotDatabase {
     }
     if (!settingsCols.some((c) => c.name === 'levelup_channel_id')) {
       this.db.exec('ALTER TABLE settings ADD COLUMN levelup_channel_id TEXT');
+    }
+    // Migration for voice_sessions created before voice XP existed.
+    const voiceCols = this.db.prepare('PRAGMA table_info(voice_sessions)').all() as { name: string }[];
+    if (!voiceCols.some((c) => c.name === 'awarded_blocks')) {
+      this.db.exec('ALTER TABLE voice_sessions ADD COLUMN awarded_blocks INTEGER NOT NULL DEFAULT 0');
     }
     // Migration for build_jobs created before the model column existed.
     const jobCols = this.db.prepare('PRAGMA table_info(build_jobs)').all() as { name: string }[];
@@ -1127,6 +1142,35 @@ export class BotDatabase {
       .prepare('SELECT channel_id AS channelId, started_at AS startedAt, last_seen_at AS lastSeenAt FROM voice_sessions WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL ORDER BY last_seen_at DESC LIMIT 1')
       .get(guildId, userId) as CurrentVoiceRow | undefined;
     return row ?? null;
+  }
+
+  /** All voice sessions of a guild that are still open, for the voice XP ticker. */
+  openVoiceSessions(guildId: string): VoiceXpRow[] {
+    return this.db
+      .prepare(`SELECT id, user_id AS userId, channel_id AS channelId, started_at AS startedAt, awarded_blocks AS awardedBlocks
+                FROM voice_sessions WHERE guild_id = ? AND ended_at IS NULL`)
+      .all(guildId) as unknown as VoiceXpRow[];
+  }
+
+  /**
+   * Grant voice XP for one session: adds `amount` XP to the member and records
+   * the new block count on the session, atomically. Returns the new XP total.
+   */
+  awardVoiceXp(guildId: string, userId: string, sessionId: number, blocks: number, amount: number, ts: number): number {
+    this.db.exec('BEGIN');
+    try {
+      this.db
+        .prepare(`INSERT INTO user_xp (guild_id, user_id, xp, last_xp_at) VALUES (?, ?, ?, ?)
+                  ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = xp + excluded.xp, last_xp_at = excluded.last_xp_at`)
+        .run(guildId, userId, amount, ts);
+      this.db.prepare('UPDATE voice_sessions SET awarded_blocks = ? WHERE id = ?').run(blocks, sessionId);
+      const row = this.db.prepare('SELECT xp FROM user_xp WHERE guild_id = ? AND user_id = ?').get(guildId, userId) as { xp: number };
+      this.db.exec('COMMIT');
+      return row.xp;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   // ---- leveling (XP) ---------------------------------------------------
