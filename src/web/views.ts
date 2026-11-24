@@ -5,6 +5,7 @@ import { levelProgress, levelTag } from '../levels.js';
 import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 import type { DeployStatus } from '../dokploy.js';
+import type { TranscriptEntry, TranscriptPart } from '../builder/transcript.js';
 
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -314,6 +315,28 @@ const CSS = `
   .filters select { width: auto; min-width: 150px; height: 36px; }
   .note { margin-top: 14px; }
 
+  /* ---- session transcript ---- */
+  .tl { display: grid; gap: 10px; min-width: 0; }
+  .msg { min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--card-2); }
+  .msg-h { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 8px; color: var(--muted); font-size: 12.5px; }
+  .msg-h b { color: var(--text); font-weight: 600; }
+  .msg-t { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg-t + details, .msg-t + .msg-t, details + .msg-t, details + details { margin-top: 8px; }
+  .msg details { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  .msg summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 7px 10px; cursor: pointer; font-size: 13px; color: var(--text-2); }
+  .msg details[open] > summary { border-bottom: 1px solid var(--line); }
+  .msg pre { margin: 0; padding: 10px; max-width: 100%; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-2); }
+  .msg pre + .pre-l { margin-top: 0; }
+  .pre-l { padding: 8px 10px 0; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+  .msg .toks + .toks { margin-top: 2px; }
+  .msg .toks { margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .err-t { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--err-soft); color: var(--err); font-size: 13px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .evt { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 2px 8px; color: var(--muted); font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 20px; margin: 0 0 14px; }
+  .facts div { min-width: 0; }
+  .facts dt { color: var(--muted); font-size: 12px; }
+  .facts dd { margin: 0; overflow-wrap: anywhere; }
+
   /* ---- login / error ---- */
   .center { position: relative; isolation: isolate; min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: var(--royal); }
   .center .sky { position: fixed; left: 0; height: 100vh; background: var(--royal); -webkit-mask: none; mask: none; }
@@ -446,7 +469,9 @@ export const LIVE_SCRIPT = `(()=>{
 var m=document.getElementById('main'),v=m&&m.getAttribute('data-live');if(!v)return;
 var st=document.getElementById('livestat'),tx=document.getElementById('livetext'),last={},stop=false,busy=false,again=false;
 function set(s,t){if(st&&tx){st.setAttribute('data-state',s);tx.textContent=t}}
-function url(){var q=new URLSearchParams(location.search);q.set('view',v);return '/dashboard/live?'+q.toString()}
+function url(){var q=new URLSearchParams(location.search);q.set('view',v);var pm=location.pathname.match(/\\/sessions\\/([^\\/]+)$/);if(pm)q.set('id',pm[1]);return '/dashboard/live?'+q.toString()}
+function keep(el){var o=[];el.querySelectorAll('details[id][open]').forEach(function(d){o.push(d.id)});return o}
+function restore(el,o){o.forEach(function(i){var d=document.getElementById(i);if(d&&el.contains(d))d.open=true})}
 function tick(){
 if(stop||document.visibilityState!=='visible')return;
 if(busy){again=true;return}
@@ -457,7 +482,7 @@ if(!r.ok)throw new Error('http '+r.status);
 return r.json()}).then(function(j){
 if(!j)return;
 var p=j.parts||{};
-for(var id in p){var el=document.getElementById(id);if(el&&typeof p[id]==='string'&&last[id]!==p[id]){if(last[id]!==undefined||el.innerHTML!==p[id])el.innerHTML=p[id];last[id]=p[id]}}
+for(var id in p){var el=document.getElementById(id);if(el&&typeof p[id]==='string'&&last[id]!==p[id]){if(last[id]!==undefined||el.innerHTML!==p[id]){var o=keep(el);el.innerHTML=p[id];restore(el,o)}last[id]=p[id]}}
 set('ok','Updated '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}))
 }).catch(function(){set('retry','Reconnecting…')}).then(function(){busy=false;if(again){again=false;tick()}})}
 setInterval(tick,15000);
@@ -545,6 +570,8 @@ interface PageOpts {
   between?: string;
   body: string;
   now?: number;
+  /** `view` sent to /dashboard/live when it differs from `active` (the session page). */
+  liveView?: string;
 }
 
 function layout(o: PageOpts, chrome: ChromeData): string {
@@ -557,7 +584,7 @@ function layout(o: PageOpts, chrome: ChromeData): string {
   const header = `<header class="chrome"><a class="brand" href="/dashboard" aria-label="Bojan, overview">${mark(28)}<span>Bojan</span></a><span class="chrome-title" aria-hidden="true">${escapeHtml(o.title)}</span><nav class="nav" aria-label="Main">${nav}</nav><div class="me">${deploy}<div class="me-user">${avatar}<span class="me-name" title="${escapeHtml(u.username)}">${escapeHtml(u.username)}</span><a class="logout" href="/logout" title="Log out" aria-label="Log out">${LOGOUT_ICON}</a></div></div></header>`;
   const stat = o.live === 'status' ? '<span class="livestat" id="livestat" data-state="ok"><i></i><span id="livetext">Live</span><a href="">reload</a></span>' : '';
   const hero = `<div class="hero"><div class="hero-in"><div class="pagehead"><div class="pagehead-top"><h1>${escapeHtml(o.title)}</h1>${stat}</div>${o.sub}</div></div></div>`;
-  const live = o.live === 'none' || (o.live === 'quiet' && !chrome.deploy) ? '' : ` data-live="${escapeHtml(o.active)}"`;
+  const live = o.live === 'none' || (o.live === 'quiet' && !chrome.deploy) ? '' : ` data-live="${escapeHtml(o.liveView ?? o.active)}"`;
   return page(`${o.title} · Bojan`, `<a class="skip" href="#main">Skip to content</a>${header}<main class="main" id="main"${live}>${SKY}${hero}${o.between ?? ''}<div class="wrap">${o.body}</div></main>${live ? `<script>${LIVE_SCRIPT}</script>` : ''}`);
 }
 
@@ -846,17 +873,28 @@ function embedRows(d: OverviewData): string {
   return `<div class="tbl"><table><thead><tr><th scope="col">Time</th><th scope="col">Channel</th><th scope="col">Provider</th><th scope="col">URL</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
 }
 
+/**
+ * Shared Previous / "Page X of Y" / Next pager. `href` builds the (unescaped) link of a page;
+ * it is escaped here. One page: just the summary when `showSingle`, otherwise nothing. Pure.
+ */
+export function pagerHtml(o: { page: number; pages: number; summary: string; href: (page: number) => string; label: string; showSingle?: boolean }): string {
+  const showing = `<p class="muted">${escapeHtml(o.summary)}</p>`;
+  if (o.pages <= 1) return o.showSingle ? `<div class="pager">${showing}</div>` : '';
+  const step = (label: string, target: number, enabled: boolean): string =>
+    enabled ? `<a class="pager-btn" href="${escapeHtml(o.href(target))}">${label}</a>` : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
+  return `<div class="pager">${showing}<nav class="pager-nav" aria-label="${escapeHtml(o.label)}">${step('Previous', o.page - 1, o.page > 1)}<span>Page ${o.page} of ${o.pages}</span>${step('Next', o.page + 1, o.page < o.pages)}</nav></div>`;
+}
+
+/** "1–50 of 1,234" (or "0" when empty). */
+export function rangeSummary(page: number, pageSize: number, shown: number, total: number): string {
+  if (total === 0 || shown === 0) return `${fmt(total)}`;
+  const from = (page - 1) * pageSize + 1;
+  return `${fmt(from)}–${fmt(from + shown - 1)} of ${fmt(total)}`;
+}
+
 function embedPager(d: OverviewData): string {
   const { page, pages, total, pageSize } = d.embedPage;
-  const from = (page - 1) * pageSize + 1;
-  const to = Math.min(total, from + d.recentEmbeds.length - 1);
-  const showing = `<p class="muted">Showing ${fmt(from)}–${fmt(to)} of ${fmt(total)}</p>`;
-  if (pages <= 1) return `<div class="pager">${showing}</div>`;
-  const step = (label: string, target: number, enabled: boolean): string =>
-    enabled
-      ? `<a class="pager-btn" href="/dashboard?embedsPage=${target}#h-embeds">${label}</a>`
-      : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
-  return `<div class="pager">${showing}<nav class="pager-nav" aria-label="Embed conversions pages">${step('Previous', page - 1, page > 1)}<span>Page ${page} of ${pages}</span>${step('Next', page + 1, page < pages)}</nav></div>`;
+  return pagerHtml({ page, pages, summary: `Showing ${rangeSummary(page, pageSize, d.recentEmbeds.length, total)}`, href: (p) => `/dashboard?embedsPage=${p}#h-embeds`, label: 'Embed conversions pages', showSingle: true });
 }
 
 const region = (id: string, parts: Record<string, string>, cls = ''): string => `<div class="live${cls ? ' ' + cls : ''}" id="${id}">${parts[id] ?? ''}</div>`;
@@ -1062,9 +1100,24 @@ export interface LogsPageData {
   tags: string[];
   level: 'all' | 'warn' | 'error';
   tag: string | null;
+  page: number;
+  pages: number;
+  pageSize: number;
+  /** Rows matching the level/tag filter, all pages. */
+  total: number;
   timezone: string;
   user: { username: string; avatar: string | null };
   deploy?: DeployStatus;
+}
+
+/** Link to a Logs page; filters are kept, page 1 is the default. */
+function logsHref(level: string, tag: string | null, page = 1): string {
+  const q = new URLSearchParams();
+  if (level !== 'all') q.set('level', level);
+  if (tag) q.set('tag', tag);
+  if (page > 1) q.set('page', String(page));
+  const qs = q.toString();
+  return `/dashboard/logs${qs ? '?' + qs : ''}`;
 }
 
 /** Live regions of the Logs page, keyed by element id. */
@@ -1077,17 +1130,12 @@ export function logsParts(d: LogsPageData, now: number = Date.now()): Record<str
     rows.length === 0
       ? emptyState('No log entries match.')
       : `<div class="tbl"><table class="logs"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Tag</th><th scope="col">Message</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
-  return { ...chromeParts(d.deploy, now), 'live-logs': table, 'live-logcount': `newest ${fmt(d.rows.length)} ${d.rows.length === 1 ? 'entry' : 'entries'}` };
+  const pager = pagerHtml({ page: d.page, pages: d.pages, summary: `${fmt(d.total)} ${d.total === 1 ? 'entry' : 'entries'}`, href: (p) => logsHref(d.level, d.tag, p) + '#h-logs', label: 'Log pages' });
+  return { ...chromeParts(d.deploy, now), 'live-logs': table + pager, 'live-logcount': rangeSummary(d.page, d.pageSize, d.rows.length, d.total) };
 }
 
 export function logsPage(d: LogsPageData, now: number = Date.now()): string {
-  const href = (level: string, tag: string | null): string => {
-    const q = new URLSearchParams();
-    if (level !== 'all') q.set('level', level);
-    if (tag) q.set('tag', tag);
-    const qs = q.toString();
-    return `/dashboard/logs${qs ? '?' + qs : ''}`;
-  };
+  const href = (level: string, tag: string | null): string => logsHref(level, tag);
   const levelLinks = (['all', 'warn', 'error'] as const)
     .map((l) => {
       const label = l === 'all' ? 'All' : l === 'warn' ? 'Warnings + errors' : 'Errors';
@@ -1112,11 +1160,16 @@ export interface RequestsPageData {
   jobs: BuildJob[];
   totals: BuildUsage & { jobs: number };
   chatTotals: BuildUsage & { threads: number; oneOffs: number };
-  /** Most recently active chat threads (already limited). */
+  /** The current page of chat threads, most recently active first. */
   chats: ChatThread[];
+  /** Feature request pager (`?page=`). */
   page: number;
   pages: number;
   pageSize: number;
+  /** Chat pager (`?chatPage=`); total is threads + one-off replies. */
+  chatPage: number;
+  chatPages: number;
+  chatPageSize: number;
   guildId: string;
   timezone: string;
   /** job id -> 1-based place in the build queue (queued jobs only) */
@@ -1133,17 +1186,47 @@ export function fmtUsd(v: number): string {
 }
 
 const JOB_BADGE: Record<string, string> = { planning: 'warn', awaiting_input: 'warn', queued: 'warn', building: 'warn', pr_open: 'accent', merged: 'ok', failed: 'error' };
-const TOKENS_HEAD = '<th scope="col" title="input / output / reasoning / cached">Tokens (in / out / reasoning / cached)</th><th scope="col" class="r" title="Estimated from OpenCode Go list prices">Est. cost</th>';
+/**
+ * Share of prompt tokens served from cache, whole percent: cacheRead / (input + cacheRead +
+ * cacheWrite). OpenCode's `input` excludes cached tokens. 0 when there are no prompt tokens. Pure.
+ */
+export function cachePercent(u: { input: number; cacheRead: number; cacheWrite: number }): number {
+  const total = u.input + u.cacheRead + u.cacheWrite;
+  return total > 0 ? Math.round((u.cacheRead / total) * 100) : 0;
+}
+
+/** "87%" */
+export const fmtCachePercent = (u: { input: number; cacheRead: number; cacheWrite: number }): string => `${cachePercent(u)}%`;
+
+const CACHE_HELP = 'Cache % = tokens read from cache / (input + cache read + cache write)';
+
+/** "in / out / reasoning / cache %" cell text of a usage row. Pure. */
+export function tokensCell(u: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }): string {
+  return `${fmt(u.input)} / ${fmt(u.output)} / ${fmt(u.reasoning)} / ${fmtCachePercent(u)}`;
+}
+
+const TOKENS_HEAD = `<th scope="col" title="input / output / reasoning / cache %. ${CACHE_HELP}">Tokens (in / out / reasoning / cache %)</th><th scope="col" class="r" title="Estimated from OpenCode Go list prices">Est. cost</th>`;
+
+const sessionHref = (sessionId: string, cursor?: string | null): string => `/dashboard/sessions/${encodeURIComponent(sessionId)}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
+const sessionLink = (sessionId: string): string => `<a href="${escapeHtml(sessionHref(sessionId))}">Session</a>`;
+
+/** Link to the Requests page with both pagers' positions (page 1 is omitted). */
+function requestsHref(page: number, chatPage: number): string {
+  const q = new URLSearchParams();
+  if (page > 1) q.set('page', String(page));
+  if (chatPage > 1) q.set('chatPage', String(chatPage));
+  const qs = q.toString();
+  return `/dashboard/requests${qs ? '?' + qs : ''}`;
+}
 
 /** Live regions of the Chats & requests page, keyed by element id. */
 export function requestsParts(d: RequestsPageData, now: number = Date.now()): Record<string, string> {
   const t = d.totals;
-  const cached = (u: { cacheRead: number; cacheWrite: number }): number => u.cacheRead + u.cacheWrite;
   const rows = d.jobs.map((j) => {
     const title = j.title?.trim() || (j.request.length > 80 ? j.request.slice(0, 80) + '…' : j.request);
     const thread = `https://discord.com/channels/${d.guildId}/${j.threadId}`;
-    const pr = j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '';
-    const tokens = `${fmt(j.tokensInput)} / ${fmt(j.tokensOutput)} / ${fmt(j.tokensReasoning)} / ${fmt(j.tokensCacheRead + j.tokensCacheWrite)}`;
+    const pr = (j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '') + (j.sessionId ? sessionLink(j.sessionId) : '');
+    const tokens = tokensCell({ input: j.tokensInput, output: j.tokensOutput, reasoning: j.tokensReasoning, cacheRead: j.tokensCacheRead, cacheWrite: j.tokensCacheWrite });
     const queuePos = j.status === 'queued' ? d.queuePositions?.[j.id] : undefined;
     const statusLabel = queuePos ? `queued #${queuePos}` : j.status;
     const badge = JOB_BADGE[j.status] ?? '';
@@ -1156,35 +1239,32 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
   const ct = d.chatTotals;
   const chatRows = d.chats.map((c) => {
     const thread = `https://discord.com/channels/${d.guildId}/${c.threadId.split(':')[0]}`;
-    const tokens = `${fmt(c.tokensInput)} / ${fmt(c.tokensOutput)} / ${fmt(c.tokensReasoning)} / ${fmt(c.tokensCacheRead + c.tokensCacheWrite)}`;
-    return `<tr><td data-label="Thread"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${c.oneOff ? '<span class="badge">one-off</span>' : ''}</span></td><td data-label="Started by">${escapeHtml(d.members[c.startedBy] ?? c.startedBy)}</td><td class="dim" data-label="Last active">${escapeHtml(fmtDate(c.lastActiveAt, d.timezone))}</td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(c.costUsd))}</td></tr>`;
+    const tokens = tokensCell({ input: c.tokensInput, output: c.tokensOutput, reasoning: c.tokensReasoning, cacheRead: c.tokensCacheRead, cacheWrite: c.tokensCacheWrite });
+    return `<tr><td data-label="Thread"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${c.sessionId ? sessionLink(c.sessionId) : ''}${c.oneOff ? '<span class="badge">one-off</span>' : ''}</span></td><td data-label="Started by">${escapeHtml(d.members[c.startedBy] ?? c.startedBy)}</td><td class="dim" data-label="Last active">${escapeHtml(fmtDate(c.lastActiveAt, d.timezone))}</td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(c.costUsd))}</td></tr>`;
   });
   const chatTable =
     chatRows.length === 0
       ? emptyState('No chats yet.')
       : `<div class="tbl"><table><thead><tr><th scope="col">Thread</th><th scope="col">Started by</th><th scope="col">Last active</th>${TOKENS_HEAD}</tr></thead><tbody>${chatRows.join('')}</tbody></table></div>`;
-  const step = (label: string, target: number, enabled: boolean): string =>
-    enabled ? `<a class="pager-btn" href="/dashboard/requests?page=${target}">${label}</a>` : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
-  const pager =
-    d.pages > 1
-      ? `<div class="pager"><p class="muted">${fmt(t.jobs)} requests</p><nav class="pager-nav" aria-label="Feature request pages">${step('Previous', d.page - 1, d.page > 1)}<span>Page ${d.page} of ${d.pages}</span>${step('Next', d.page + 1, d.page < d.pages)}</nav></div>`
-      : '';
+  const chatTotal = ct.threads + ct.oneOffs;
+  const pager = pagerHtml({ page: d.page, pages: d.pages, summary: rangeSummary(d.page, d.pageSize, d.jobs.length, t.jobs) + ' requests', href: (p) => requestsHref(p, d.chatPage) + '#h-req', label: 'Feature request pages' });
+  const chatPager = pagerHtml({ page: d.chatPage, pages: d.chatPages, summary: rangeSummary(d.chatPage, d.chatPageSize, d.chats.length, chatTotal) + ' chats', href: (p) => requestsHref(d.page, p) + '#h-chat', label: 'Chat pages' });
   return {
     ...chromeParts(d.deploy, now),
     'live-chat-kpis': [
       kpi(fmt(ct.threads), 'Chat threads'),
       kpi(fmt(ct.oneOffs), 'One-off replies'),
       kpi(fmt(ct.input + ct.output + ct.reasoning), 'Tokens', 'in + out + reasoning'),
-      kpi(fmt(cached(ct)), 'Cached tokens'),
+      kpi(fmtCachePercent(ct), 'Cache hits', 'share of prompt tokens from cache'),
       kpi(fmtUsd(ct.costUsd), 'Est. cost'),
     ].join(''),
-    'live-chats': `<section class="card" aria-labelledby="h-chat"><div class="card-head"><h2 id="h-chat">Chats</h2><span class="sub">${d.chats.length > 0 ? `the ${fmt(d.chats.length)} most recently active` : ''}</span></div>${chatTable}</section>`,
+    'live-chats': `<section class="card" aria-labelledby="h-chat"><div class="card-head"><h2 id="h-chat">Chats</h2><span class="sub">${fmt(chatTotal)} total</span></div>${chatTable}${chatPager}</section>`,
     'live-req-kpis': [
       kpi(fmt(t.jobs), 'Requests'),
       kpi(fmt(t.input), 'Input tokens'),
       kpi(fmt(t.output), 'Output tokens'),
       kpi(fmt(t.reasoning), 'Reasoning tokens'),
-      kpi(fmt(cached(t)), 'Cached tokens'),
+      kpi(fmtCachePercent(t), 'Cache hits', 'share of prompt tokens from cache'),
       kpi(fmtUsd(t.costUsd), 'Est. cost'),
     ].join(''),
     'live-reqs': `<section class="card" aria-labelledby="h-req"><div class="card-head"><h2 id="h-req">Feature requests</h2><span class="sub">${fmt(t.jobs)} total</span></div>${table}${pager}</section>`,
@@ -1199,4 +1279,144 @@ export function requestsPage(d: RequestsPageData, now: number = Date.now()): str
   ${region('live-req-kpis', parts, 'kpis six')}
   ${region('live-reqs', parts)}`;
   return layout({ active: 'requests', title: 'Chats & requests', sub: '<p class="hero-sub">AI assistant usage. Costs are estimates from OpenCode Go list prices.</p>', live: 'status', body, now }, { user: d.user, deploy: d.deploy });
+}
+
+// ---- session transcript ------------------------------------------------------------
+export interface SessionPageData {
+  sessionId: string;
+  owner: { kind: 'job'; job: BuildJob } | { kind: 'chat'; thread: ChatThread };
+  entries: TranscriptEntry[];
+  /** Cursor of the next older page; null when there is none. */
+  olderCursor: string | null;
+  /** Cursor this page was loaded with (an older page); null for the newest page. */
+  cursor: string | null;
+  /** Why the transcript could not be loaded (shown instead of the timeline). */
+  error: string | null;
+  guildId: string;
+  timezone: string;
+  members: Record<string, string>;
+  user: { username: string; avatar: string | null };
+  deploy?: DeployStatus;
+}
+
+const TOOL_BADGE: Record<string, string> = { completed: 'ok', error: 'error', running: 'warn', streaming: 'warn' };
+
+export function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)} min ${total % 60} s`;
+}
+
+/** Muted timing line under an assistant message; only the known parts. Empty when nothing is known. */
+export function timingLine(e: Extract<TranscriptEntry, { kind: 'assistant' }>): string {
+  const t = e.timing;
+  const bits: string[] = [];
+  if (t.firstTokenMs !== null) bits.push(`waited ${fmtMs(t.firstTokenMs)} for first token`);
+  if (t.totalMs !== null) bits.push(`total ${fmtMs(t.totalMs)}`);
+  if (t.toolsMs !== null) bits.push(`tools ${fmtMs(t.toolsMs)}`);
+  if (t.retry) bits.push(`retry: ${t.retry}`);
+  if (e.gapMs !== null && e.gapMs >= 5000) bits.push(`idle ${fmtMs(e.gapMs)} before this step`);
+  return bits.length > 0 ? `<div class="toks">${escapeHtml(bits.join(' · '))}</div>` : '';
+}
+
+function toolPart(p: Extract<TranscriptPart, { kind: 'tool' }>, id: string): string {
+  const badge = TOOL_BADGE[p.status] ?? '';
+  const dur = p.durationMs !== null ? `<span class="muted">${escapeHtml(fmtMs(p.durationMs))}</span>` : '';
+  const input = p.input ? `<div class="pre-l">Input</div><pre>${escapeHtml(p.input)}</pre>` : '';
+  const output = p.output ? `<div class="pre-l">Output</div><pre>${escapeHtml(p.output)}</pre>` : '';
+  const error = p.error ? `<div class="pre-l">Error</div><pre>${escapeHtml(p.error)}</pre>` : '';
+  const body = input + output + error || '<div class="pre-l">No input or output</div>';
+  return `<details id="${escapeHtml(id)}"><summary><b>${escapeHtml(p.name)}</b><span class="badge${badge ? ' ' + badge : ''}">${escapeHtml(p.status)}</span>${dur}</summary>${body}</details>`;
+}
+
+function entryHtml(e: TranscriptEntry, tz: string): string {
+  const time = e.time !== null ? escapeHtml(fmtDate(e.time, tz)) : '';
+  if (e.kind === 'event') return `<div class="evt"><span>${escapeHtml(e.label)}</span>${time ? `<span>${time}</span>` : ''}</div>`;
+  if (e.kind === 'user') {
+    const files = e.attachments.length > 0 ? `<p class="msg-t muted">${escapeHtml(e.attachments.join(' '))}</p>` : '';
+    return `<article class="msg user"><div class="msg-h"><b>Prompt</b>${time ? `<span>${time}</span>` : ''}</div><p class="msg-t">${escapeHtml(e.text)}</p>${files}</article>`;
+  }
+  const parts = e.parts
+    .map((p, i) => {
+      const id = `d-${e.id}-${i}`;
+      if (p.kind === 'text') return p.text.trim() ? `<p class="msg-t">${escapeHtml(p.text)}</p>` : '';
+      if (p.kind === 'reasoning') return `<details id="${escapeHtml(id)}"><summary>Thinking · ${escapeHtml(fmt(p.chars))} chars</summary><pre>${escapeHtml(p.text)}</pre></details>`;
+      return toolPart(p, id);
+    })
+    .join('');
+  const t = e.tokens;
+  const toks = t || e.cost !== null ? `<div class="toks">${t ? `in ${fmt(t.input)} / out ${fmt(t.output)} / reasoning ${fmt(t.reasoning)} / cache ${fmtCachePercent(t)}` : ''}${t && e.cost !== null ? ' · ' : ''}${e.cost !== null ? escapeHtml(fmtUsd(e.cost)) : ''}</div>` : '';
+  const finish = e.finish && e.finish !== 'stop' && e.finish !== 'tool-calls' ? `<span class="badge${e.finish === 'error' ? ' error' : ''}">${escapeHtml(e.finish)}</span>` : '';
+  const head = `<div class="msg-h"><b>Assistant</b>${e.agent ? `<span>${escapeHtml(e.agent)}</span>` : ''}${e.model ? `<span>${escapeHtml(e.model)}</span>` : ''}${time ? `<span>${time}</span>` : ''}${finish}</div>`;
+  return `<article class="msg">${head}${parts}${e.error ? `<div class="err-t">${escapeHtml(e.error)}</div>` : ''}${toks}${timingLine(e)}</article>`;
+}
+
+/** Live regions of the session page, keyed by element id. */
+export function sessionParts(d: SessionPageData, now: number = Date.now()): Record<string, string> {
+  const o = d.owner;
+  const usage = o.kind === 'job' ? o.job : o.thread;
+  const model = (o.kind === 'job' ? o.job.model : o.thread.model) ?? 'default';
+  const threadId = o.kind === 'job' ? o.job.threadId : o.thread.threadId.split(':')[0];
+  const link = (href: string, label: string): string => `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  const links = [link(`https://discord.com/channels/${d.guildId}/${threadId}`, 'Thread'), ...(o.kind === 'job' && o.job.prUrl ? [link(o.job.prUrl, 'PR')] : [])].join('');
+  const who = (id: string): string => d.members[id] ?? id;
+  let heading: string;
+  let facts: [string, string][];
+  if (o.kind === 'job') {
+    const j = o.job;
+    const title = j.title?.trim() || (j.request.length > 80 ? j.request.slice(0, 80) + '…' : j.request);
+    const badge = JOB_BADGE[j.status] ?? '';
+    heading = `<h2 id="h-session">Feature request #${j.id}: ${escapeHtml(title)}</h2><span class="badge${badge ? ' ' + badge : ''}">${escapeHtml(j.status)}</span>`;
+    facts = [['Requested by', who(j.requesterId)], ['Created', fmtDate(j.createdAt, d.timezone)]];
+  } else {
+    const c = o.thread;
+    heading = `<h2 id="h-session">${c.oneOff ? 'One-off chat reply' : 'Chat thread'}</h2>`;
+    facts = [['Started by', who(c.startedBy)], ['Last active', fmtDate(c.lastActiveAt, d.timezone)]];
+  }
+  const rows: [string, string][] = [
+    ...facts,
+    ['Model', model],
+    ['Tokens (in / out / reasoning / cache %)', tokensCell({ input: usage.tokensInput, output: usage.tokensOutput, reasoning: usage.tokensReasoning, cacheRead: usage.tokensCacheRead, cacheWrite: usage.tokensCacheWrite })],
+    ['Est. cost', fmtUsd(usage.costUsd)],
+  ];
+  const dl = `<dl class="facts">${rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd></div>`).join('')}<div><dt>Session</dt><dd><code>${escapeHtml(d.sessionId)}</code></dd></div><div><dt>Links</dt><dd><span class="links">${links}</span></dd></div></dl>`;
+  const head = `<section class="card" aria-labelledby="h-session"><div class="card-head">${heading}</div>${dl}</section>`;
+
+  let timeline: string;
+  // Entries arrive newest first; parts inside one assistant message stay chronological.
+  if (d.error) timeline = `<div class="err-t" role="alert">${escapeHtml(d.error)}</div>`;
+  else if (d.entries.length === 0) timeline = emptyState('No messages yet.');
+  else {
+    const nav: string[] = [];
+    if (d.cursor) nav.push(`<a class="pager-btn" href="${escapeHtml(sessionHref(d.sessionId))}">Latest messages</a>`);
+    if (d.olderCursor) nav.push(`<a class="pager-btn" href="${escapeHtml(sessionHref(d.sessionId, d.olderCursor))}">Older messages</a>`);
+    const navHtml = nav.length > 0 ? `<div class="pager">${nav.join('')}</div>` : '';
+    timeline = `<div class="tl">${d.entries.map((e) => entryHtml(e, d.timezone)).join('')}</div>${navHtml}`;
+  }
+  return {
+    ...chromeParts(d.deploy, now),
+    'live-session-head': head,
+    'live-session': `<section class="card" aria-labelledby="h-transcript"><div class="card-head"><h2 id="h-transcript">Transcript</h2><span class="sub">newest first${d.cursor ? ' · older page' : ''}</span></div>${timeline}</section>`,
+  };
+}
+
+export function sessionPage(d: SessionPageData, now: number = Date.now()): string {
+  const parts = sessionParts(d, now);
+  const body = `
+  ${region('live-session-head', parts)}
+  ${region('live-session', parts)}`;
+  return layout(
+    {
+      active: 'requests',
+      title: 'Session',
+      sub: '<p class="hero-sub"><a href="/dashboard/requests">← Chats &amp; requests</a> · the full transcript of one OpenCode session.</p>',
+      // Older pages are a snapshot; only the newest page refreshes.
+      live: d.cursor ? 'none' : 'status',
+      liveView: 'session',
+      body,
+      now,
+    },
+    { user: d.user, deploy: d.deploy },
+  );
 }

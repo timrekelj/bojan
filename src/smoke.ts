@@ -37,6 +37,9 @@ import { blockingLimit, formatLimitDenial, LimitGate } from './builder/limits.js
 import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
+import { pagerHtml, rangeSummary } from './web/views.js';
+import { cachePercent, fmtMs, sessionParts, tokensCell, type SessionPageData } from './web/views.js';
+import { clipText, fetchTranscript, MAX_TEXT_CHARS, MAX_TOOL_INPUT_CHARS, MAX_TOOL_OUTPUT_CHARS, normalizeTranscript } from './builder/transcript.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 import { buildColorMessage, rolesToSwap, sortColorRoles } from './colors.js';
 
@@ -1029,15 +1032,37 @@ rmSync(dir, { recursive: true, force: true });
   const bsec = builderSection({ builder: { ...setData.builder, passwordSet: false, agent: null }, settings: setData.settings });
   check('builderSection: standalone card with its own form; no meters without limits', bsec.startsWith('<section class="card" id="builder"') && bsec.includes('action="/builder-settings"') && bsec.includes('OPENCODE_PASSWORD not set') && bsec.includes('Agent server not checked') && !bsec.includes('class="meter"'));
 
-  const logsHtml = logsPage({ rows: [{ id: 1, ts: T, level: 'error', tag: 'web', message: 'boom <x>\n  at y' }, { id: 2, ts: T, level: 'info', tag: null, message: 'ok' }], tags: ['web', 'bot'], level: 'error', tag: 'web', timezone: 'UTC', user: { username: 'Two', avatar: null } }, T);
+  const logsHtml = logsPage({ rows: [{ id: 1, ts: T, level: 'error', tag: 'web', message: 'boom <x>\n  at y' }, { id: 2, ts: T, level: 'info', tag: null, message: 'ok' }], tags: ['web', 'bot'], level: 'error', tag: 'web', page: 1, pages: 1, pageSize: 50, total: 2, timezone: 'UTC', user: { username: 'Two', avatar: null } }, T);
   check(
     'logsPage: segmented level control, tag select, stacked-table labels, escaped message',
     logsHtml.includes('<nav class="seg" aria-label="Level">') && logsHtml.includes('<a aria-current="page" href="/dashboard/logs?level=error&amp;tag=web">Errors</a>') && logsHtml.includes('<a href="/dashboard/logs?tag=web">All</a>') &&
       logsHtml.includes('<input type="hidden" name="level" value="error">') && logsHtml.includes('<option value="web" selected>[web]</option>') &&
       logsHtml.includes('<td class="logmsg" data-label="Message"><pre>boom &lt;x&gt;\n  at y</pre></td>') && logsHtml.includes('<span class="badge error">error</span>') && logsHtml.includes('<span class="badge ">info</span>') &&
-      logsHtml.includes('data-live="logs"') && logsHtml.includes('newest 2 entries') && logsHtml.includes('<a href="/dashboard/logs" aria-current="page">'),
+      logsHtml.includes('data-live="logs"') && logsHtml.includes('1–2 of 2') && logsHtml.includes('<a href="/dashboard/logs" aria-current="page">'),
   );
-  check('logsParts: empty state', logsParts({ rows: [], tags: [], level: 'all', tag: null, timezone: 'UTC', user: { username: 'x', avatar: null } }, T)['live-logs']!.includes('No log entries match.'));
+  check('logsParts: empty state', logsParts({ rows: [], tags: [], level: 'all', tag: null, page: 1, pages: 1, pageSize: 50, total: 0, timezone: 'UTC', user: { username: 'x', avatar: null } }, T)['live-logs']!.includes('No log entries match.'));
+  const lrow = { id: 1, ts: T, level: 'info' as const, tag: null, message: 'm' };
+  const lp = logsParts({ rows: [lrow], tags: ['web'], level: 'warn', tag: 'web&x', page: 2, pages: 3, pageSize: 50, total: 120, timezone: 'UTC', user: { username: 'x', avatar: null } }, T);
+  check(
+    'logsParts: pager in the live region keeps level, tag and page; range in the sub text',
+    lp['live-logs']!.includes('<a class="pager-btn" href="/dashboard/logs?level=warn&amp;tag=web%26x#h-logs">Previous</a>') && lp['live-logs']!.includes('href="/dashboard/logs?level=warn&amp;tag=web%26x&amp;page=3#h-logs">Next</a>') && lp['live-logs']!.includes('Page 2 of 3') && lp['live-logcount'] === '51–51 of 120',
+  );
+  check('logsPage: level tabs and tag form carry no page param', !logsPage({ rows: [lrow], tags: ['web'], level: 'warn', tag: 'web', page: 2, pages: 3, pageSize: 50, total: 120, timezone: 'UTC', user: { username: 'x', avatar: null } }, T).match(/<nav class="seg"[^]*?<\/nav>/)![0].includes('page='));
+
+  // pager helper
+  const pg = (page: number, pages: number): string => pagerHtml({ page, pages, summary: 'S <b>', href: (p) => `/x?a=1&page=${p}`, label: 'L' });
+  check('pagerHtml: single page shows nothing (or only the summary with showSingle)', pg(1, 1) === '' && pagerHtml({ page: 1, pages: 1, summary: 'S', href: () => '/', label: 'L', showSingle: true }) === '<div class="pager"><p class="muted">S</p></div>');
+  check('pagerHtml: first page disables Previous', pg(1, 3).includes('<span class="pager-btn" aria-disabled="true">Previous</span>') && pg(1, 3).includes('href="/x?a=1&amp;page=2">Next</a>') && pg(1, 3).includes('Page 1 of 3'));
+  check('pagerHtml: middle page links both ways', pg(2, 3).includes('href="/x?a=1&amp;page=1">Previous</a>') && pg(2, 3).includes('href="/x?a=1&amp;page=3">Next</a>'));
+  check('pagerHtml: last page disables Next; summary escaped', pg(3, 3).includes('<span class="pager-btn" aria-disabled="true">Next</span>') && pg(3, 3).includes('S &lt;b&gt;') && !pg(3, 3).includes('<b>'));
+  check('rangeSummary', rangeSummary(1, 50, 50, 1234) === '1–50 of 1,234' && rangeSummary(1, 50, 0, 0) === '0');
+
+  // logs paging in the db
+  const ldb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-logs-')), 'logs.db'));
+  for (let i = 1; i <= 7; i++) ldb.addLog({ ts: i, level: i % 3 === 0 ? 'error' : i % 2 === 0 ? 'warn' : 'info', tag: i <= 4 ? 'web' : 'bot', message: `m${i}` });
+  check('recentLogs: offset pages newest first, default offset 0', ldb.recentLogs({ limit: 3 }).map((r) => r.message).join() === 'm7,m6,m5' && ldb.recentLogs({ limit: 3, offset: 3 }).map((r) => r.message).join() === 'm4,m3,m2' && ldb.recentLogs({ limit: 3, offset: 6 }).map((r) => r.message).join() === 'm1');
+  check('countLogs: same level/tag filter as recentLogs', ldb.countLogs() === 7 && ldb.countLogs({ level: 'error' }) === 2 && ldb.countLogs({ level: 'warn' }) === 4 && ldb.countLogs({ tag: 'web' }) === 4 && ldb.countLogs({ level: 'error', tag: 'web' }) === 1 && ldb.recentLogs({ limit: 10, offset: 1, level: 'warn', tag: 'web' }).map((r) => r.message).join() === 'm3,m2');
+  ldb.close();
 
   const fav = faviconSvg();
   check(
@@ -1191,14 +1216,14 @@ rmSync(dir, { recursive: true, force: true });
   bdb.setChatThreadUsage('ct1:m9', { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.001 }, 300);
   const ctot = bdb.chatUsageTotals(G);
   check('chatUsageTotals counts threads and one-offs separately', ctot.threads === 1 && ctot.oneOffs === 1 && ctot.input === 1010 && ctot.output === 55 && ctot.reasoning === 10 && ctot.cacheRead === 200 && Math.abs(ctot.costUsd - 0.003) < 1e-9 && bdb.chatUsageTotals('other').threads === 0);
-  check('recentChatThreads by last activity; one-off flag; getChatThread exact id', bdb.recentChatThreads(G, 10)[0]!.threadId === 'ct1' && bdb.recentChatThreads(G, 10)[1]!.oneOff && bdb.recentChatThreads(G, 1).length === 1 && bdb.getChatThread('ct1')!.lastActiveAt === 500 && bdb.getChatThread('ct1:m9')!.oneOff);
+  check('recentChatThreads by last activity; one-off flag; getChatThread exact id', bdb.recentChatThreads(G, 10)[0]!.threadId === 'ct1' && bdb.recentChatThreads(G, 10)[1]!.oneOff && bdb.recentChatThreads(G, 1).length === 1 && bdb.recentChatThreads(G, 1, 1)[0]!.threadId === 'ct1:m9' && bdb.recentChatThreads(G, 1, 2).length === 0 && bdb.getChatThread('ct1')!.lastActiveAt === 500 && bdb.getChatThread('ct1:m9')!.oneOff);
   // chat notes in the DB
   check('addChatNote: unknown thread -> false', !bdb.addChatNote('nope', 'x'));
   check('chat notes: queue, survive reopen order, consume only the sent ones', (() => { bdb.addChatNote('ct1', 'n1'); bdb.addChatNote('ct1', 'n2'); const sent = bdb.pendingChatNotes('ct1'); bdb.addChatNote('ct1', 'n3'); bdb.consumeChatNotes('ct1', sent.length); return sent.join(',') === 'n1,n2' && bdb.pendingChatNotes('ct1').join(',') === 'n3'; })());
   let cdup = false;
   try { bdb.createChatThread({ threadId: 'ct1', guildId: G, channelId: 'c', sessionId: 's', startedBy: 'u', model: null }); } catch { cdup = true; }
   check('chat thread id is unique', cdup);
-  const html = requestsPage({ jobs: bdb.recentBuildJobs(G, 50), totals: bdb.buildUsageTotals(G), chatTotals: bdb.chatUsageTotals(G), chats: bdb.recentChatThreads(G, 50), page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: { u1: '<b>Ann</b>' }, user: { username: 'x', avatar: 'a' } });
+  const html = requestsPage({ jobs: bdb.recentBuildJobs(G, 50), totals: bdb.buildUsageTotals(G), chatTotals: bdb.chatUsageTotals(G), chats: bdb.recentChatThreads(G, 50), page: 1, pages: 1, pageSize: 50, chatPage: 1, chatPages: 1, chatPageSize: 20, guildId: G, timezone: 'UTC', members: { u1: '<b>Ann</b>' }, user: { username: 'x', avatar: 'a' } });
   check('requestsPage renders chat summary + rows', html.includes('Chat threads') && html.includes('$0.0030') && html.includes(`discord.com/channels/${G}/ct1"`) && html.includes('one-off'));
   check('requestsPage renders rows, cost and escapes names', html.includes('$0.2500') && html.includes('&lt;b&gt;Ann&lt;/b&gt;') && !html.includes('<b>Ann</b>') && html.includes(`discord.com/channels/${G}/t1`));
   bdb.close();
@@ -1408,7 +1433,7 @@ rmSync(dir, { recursive: true, force: true });
   check('plan tracking columns persist (new default null)', pj2.planPostedAt === null && pj2.lastPlan === null && pj2.triggerMessageId === null && pj2c.planMessageId === 'm9' && pj2c.planPostedAt === 77 && pj2c.lastPlan === '- p' && pj2c.triggerMessageId === 'm1' && pdb.createBuildJob({ guildId: G, threadId: 'pt9', channelId: 'c', requesterId: 'u', request: 'z', triggerMessageId: 'tm' }).triggerMessageId === 'tm');
   pdb.updateBuildJob(pj2.id, { resumeCount: 0 });
   check('resume_count can be reset to 0 (per-phase budget)', pdb.getBuildJob(pj2.id)!.resumeCount === 0);
-  const qhtml = requestsPage({ jobs: pdb.recentBuildJobs(G, 50), totals: pdb.buildUsageTotals(G), chatTotals: pdb.chatUsageTotals(G), chats: [], page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: 'a' }, queuePositions: { [pj3.id]: 1 } });
+  const qhtml = requestsPage({ jobs: pdb.recentBuildJobs(G, 50), totals: pdb.buildUsageTotals(G), chatTotals: pdb.chatUsageTotals(G), chats: [], page: 1, pages: 1, pageSize: 50, chatPage: 1, chatPages: 1, chatPageSize: 20, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: 'a' }, queuePositions: { [pj3.id]: 1 } });
   check('requests page shows queued position', qhtml.includes('queued #1'));
 
   // Migration: an older build_jobs table (no queue/resume/fix columns) gains them.
@@ -1453,6 +1478,130 @@ rmSync(dir, { recursive: true, force: true });
     check('selectImages: capped at 4', selectImages(Array.from({ length: 7 }, (_, i) => att(`${i}.png`, 'image/png', 1))).length === 4);
     check('selectImages: empty', selectImages([]).length === 0);
   }
+}
+
+{
+  // ---- session transcript page + cache percent ----
+  check('cachePercent: zero denominator', cachePercent({ input: 0, cacheRead: 0, cacheWrite: 0 }) === 0);
+  check('cachePercent: normal case', cachePercent({ input: 100, cacheRead: 700, cacheWrite: 200 }) === 70);
+  check('cachePercent: rounds to whole percent', cachePercent({ input: 2, cacheRead: 1, cacheWrite: 0 }) === 33 && cachePercent({ input: 1, cacheRead: 2, cacheWrite: 0 }) === 67 && cachePercent({ input: 0, cacheRead: 5, cacheWrite: 0 }) === 100);
+  check('tokensCell: last value is cache %', tokensCell({ input: 1000, output: 50, reasoning: 10, cacheRead: 9000, cacheWrite: 0 }) === '1,000 / 50 / 10 / 90%' || tokensCell({ input: 1000, output: 50, reasoning: 10, cacheRead: 9000, cacheWrite: 0 }).endsWith('/ 90%'), tokensCell({ input: 1000, output: 50, reasoning: 10, cacheRead: 9000, cacheWrite: 0 }));
+
+  const raw: unknown[] = [
+    { id: 'm1', type: 'user', time: { created: 1000 }, text: 'build it', files: [{ name: 'a.png', mime: 'image/png' }] },
+    {
+      id: 'm2', type: 'assistant', time: { created: 2000 }, agent: 'build', model: { id: 'glm', providerID: 'opencode-go' }, finish: 'stop', cost: 0.01,
+      tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 300, write: 0 } },
+      content: [
+        { type: 'reasoning', text: 'hmm <script>alert(1)</script>' },
+        { type: 'text', text: 'hello' },
+        { type: 'tool', id: 't1', name: 'read', state: { status: 'completed', input: { path: 'a.ts' }, content: [{ type: 'text', text: 'line1' }, { type: 'file', uri: 'x', mime: 'image/png', name: 'pic.png' }, { type: 'file', uri: 'y', mime: 'application/pdf' }] }, time: { created: 2100, ran: 2200, completed: 2700 } },
+        { type: 'tool', id: 't2', name: 'bash', state: { status: 'error', input: { command: 'ls' }, error: { type: 'ToolError', message: 'boom' } }, time: { created: 2800 } },
+      ],
+    },
+    { id: 'm3', type: 'assistant', time: { created: 3000 }, model: { id: 'glm', providerID: 'p' }, content: [], error: { type: 'ProviderError', message: 'rate limited' } },
+    { id: 'm4', type: 'agent-switched', time: { created: 4000 }, agent: 'plan', previous: 'build' },
+    { id: 'm5', type: 'brand-new-type', time: { created: 5000 } },
+    null,
+    { type: 'assistant' },
+  ];
+  const tr = normalizeTranscript(raw);
+  check('transcript: skips non-objects, keeps order', tr.length === 6 && tr.map((e) => e.kind).join() === 'user,assistant,assistant,event,event,assistant');
+  const u0 = tr[0]!;
+  check('transcript: user text + attachment', u0.kind === 'user' && u0.text === 'build it' && u0.attachments[0] === '[file: a.png]');
+  const a1 = tr[1]!;
+  check('transcript: assistant meta', a1.kind === 'assistant' && a1.agent === 'build' && a1.model === 'opencode-go/glm' && a1.finish === 'stop' && a1.cost === 0.01 && a1.tokens?.cacheRead === 300 && a1.parts.length === 4);
+  const tool1 = a1.kind === 'assistant' ? a1.parts[2] : undefined;
+  check('transcript: completed tool has pretty input, joined output, files and duration', tool1?.kind === 'tool' && tool1.status === 'completed' && tool1.input.includes('"path": "a.ts"') && tool1.output === 'line1\n[file: pic.png]\n[file: application/pdf]' && tool1.durationMs === 500 && tool1.error === null);
+  const tool2 = a1.kind === 'assistant' ? a1.parts[3] : undefined;
+  check('transcript: tool error', tool2?.kind === 'tool' && tool2.status === 'error' && tool2.error === 'ToolError: boom' && tool2.durationMs === null);
+  check('transcript: assistant error string', tr[2]!.kind === 'assistant' && (tr[2] as { error: string | null }).error === 'ProviderError: rate limited');
+  check('transcript: events (known and unknown type) render a label', tr[3]!.kind === 'event' && (tr[3] as { label: string }).label === 'Agent: build → plan' && tr[4]!.kind === 'event' && (tr[4] as { label: string }).label === 'brand-new-type');
+  check('transcript: malformed assistant tolerated', tr[5]!.kind === 'assistant' && (tr[5] as { parts: unknown[] }).parts.length === 0);
+  const big = normalizeTranscript([
+    { id: 'b1', type: 'user', text: 'x'.repeat(MAX_TEXT_CHARS + 50) },
+    { id: 'b2', type: 'assistant', content: [{ type: 'tool', name: 'big', state: { status: 'completed', input: 'i'.repeat(MAX_TOOL_INPUT_CHARS + 10), content: [{ type: 'text', text: 'o'.repeat(MAX_TOOL_OUTPUT_CHARS + 7) }] }, time: { created: 1 } }] },
+  ]);
+  const bt = big[1]!.kind === 'assistant' ? big[1]!.parts[0] : undefined;
+  check('transcript: clipping with marker', big[0]!.kind === 'user' && big[0]!.text.endsWith('… (50 more chars)') && bt?.kind === 'tool' && bt.input.endsWith('… (10 more chars)') && bt.output.endsWith('… (7 more chars)') && clipText('abc', 5) === 'abc');
+
+  const calls: unknown[] = [];
+  const fakeClient = { message: { list: async (input: unknown) => { calls.push(input); return { data: [{ id: 'n2', type: 'user', text: 'new' }, { id: 'n1', type: 'user', text: 'old' }], cursor: { next: 'CUR', previous: null } }; } } };
+  const page = await fetchTranscript(fakeClient, 'ses_abc', { limit: 2, cursor: 'C0' });
+  check('fetchTranscript: cursor request has no order, newest-first result, older cursor', !('order' in (calls[0] as object)) && (calls[0] as { cursor: string }).cursor === 'C0' && page.entries.map((e) => e.id).join() === 'n2,n1' && page.olderCursor === 'CUR');
+  const short = await fetchTranscript(fakeClient, 'ses_abc', { limit: 60 });
+  check('fetchTranscript: first page requests order desc without cursor', (calls[1] as { order: string }).order === 'desc' && !('cursor' in (calls[1] as object)));
+  const ascClient = { message: { list: async () => ({ data: [{ id: 'a1', type: 'user', text: 'old', time: { created: 1 } }, { id: 'a2', type: 'user', text: 'new', time: { created: 2 } }], cursor: { next: null, previous: null } }) } };
+  const ascPage = await fetchTranscript(ascClient, 'ses_abc', { limit: 2, cursor: 'C1' });
+  check('fetchTranscript: ascending page is sorted newest first', ascPage.entries.map((e) => e.id).join() === 'a2,a1');
+  check('fetchTranscript: no older cursor on a short page', short.olderCursor === null);
+  let timedOut = false;
+  try {
+    await fetchTranscript({ message: { list: () => new Promise(() => {}) } }, 'ses_abc', { timeoutMs: 20 });
+  } catch (err) {
+    timedOut = err instanceof Error && err.message.includes('timed out');
+  }
+  check('fetchTranscript: times out', timedOut);
+
+  const job = { id: 7, guildId: G, threadId: 'th7', channelId: 'c', requesterId: 'u1', request: 'req', title: 'T <i>', status: 'building', sessionId: 'ses_job7', worktreeDir: null, branch: null, prUrl: 'https://github.com/x/y/pull/1', error: null, model: 'opencode-go/glm', tokensInput: 100, tokensOutput: 20, tokensReasoning: 5, tokensCacheRead: 300, tokensCacheWrite: 0, costUsd: 0.5, createdAt: 1, updatedAt: 1, approvedAt: null, triggerMessageId: null, planMessageId: null, planPostedAt: null, lastPlan: null, resumeCount: 0, fixAttempts: 0, conflictNotified: false } as const;
+  const sdata: SessionPageData = {
+    sessionId: 'ses_job7', owner: { kind: 'job', job }, entries: normalizeTranscript([
+      { id: 'e1', type: 'assistant', time: { created: 1 }, tokens: { input: 100, output: 1, reasoning: 0, cache: { read: 300, write: 0 } }, content: [
+        { type: 'reasoning', text: '<script>alert("r")</script>' },
+        { type: 'tool', name: 'bash', state: { status: 'completed', input: { command: '<b>x</b>' }, content: [{ type: 'text', text: '<script>alert(1)</script>' }] }, time: { created: 1 } },
+      ] },
+    ]), olderCursor: 'OLD', cursor: null, error: null, guildId: G, timezone: 'UTC', members: { u1: 'Ann' }, user: { username: 'x', avatar: null },
+  };
+  const sp = sessionParts(sdata);
+  const all = Object.values(sp).join('');
+  check('sessionParts: escapes tool output, input and reasoning', !all.includes('<script>') && !all.includes('<b>x</b>') && all.includes('&lt;script&gt;alert(1)&lt;/script&gt;') && all.includes('&lt;b&gt;x&lt;/b&gt;'));
+  check('sessionParts: stable details ids, thinking summary, escaped title', all.includes('<details id="d-e1-0">') && all.includes('<details id="d-e1-1">') && all.includes('Thinking · ') && all.includes('T &lt;i&gt;') && !all.includes('T <i>'));
+  check('sessionParts: cache % in header and per message, older link', all.includes('75%') && all.includes('cache 75%') && all.includes('/dashboard/sessions/ses_job7?cursor=OLD'));
+  check('sessionParts: fetch error is shown instead of the timeline', sessionParts({ ...sdata, entries: [], error: 'agent <down>' })['live-session']!.includes('agent &lt;down&gt;'));
+  const rhtml = requestsParts({ jobs: [job], totals: { jobs: 1, input: 100, output: 20, reasoning: 5, cacheRead: 300, cacheWrite: 0, costUsd: 0.5 }, chatTotals: { threads: 1, oneOffs: 0, input: 10, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [{ threadId: 'ct9', guildId: G, channelId: 'c', sessionId: 'ses_chat9', startedBy: 'u1', model: null, oneOff: false, tokensInput: 10, tokensOutput: 1, tokensReasoning: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0, createdAt: 1, lastActiveAt: 1 }], page: 1, pages: 1, pageSize: 20, chatPage: 1, chatPages: 1, chatPageSize: 20, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } });
+  const requestsHtml = Object.values(rhtml).join('');
+  const rp = requestsParts({ jobs: [job], totals: { jobs: 45, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chatTotals: { threads: 40, oneOffs: 5, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [], page: 2, pages: 3, pageSize: 20, chatPage: 2, chatPages: 3, chatPageSize: 20, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } });
+  check(
+    'requestsParts: both pagers keep the other param and anchor to their card',
+    rp['live-reqs']!.includes('href="/dashboard/requests?chatPage=2#h-req">Previous</a>') && rp['live-reqs']!.includes('href="/dashboard/requests?page=3&amp;chatPage=2#h-req">Next</a>') &&
+      rp['live-chats']!.includes('href="/dashboard/requests?page=2#h-chat">Previous</a>') && rp['live-chats']!.includes('href="/dashboard/requests?page=2&amp;chatPage=3#h-chat">Next</a>') && rp['live-chats']!.includes('45 total') && !rp['live-chats']!.includes('most recently active'),
+  );
+  check('requestsParts: single-page lists have no pager', !requestsHtml.includes('pager-nav'));
+  const tl = (ids: string[], extra: Partial<SessionPageData> = {}): string => sessionParts({ ...sdata, entries: normalizeTranscript(ids.map((id, i) => ({ id, type: 'user', text: `T-${id}`, time: { created: i } }))).reverse(), ...extra })['live-session']!;
+  const newestFirst = tl(['b', 'a']);
+  check('sessionParts: entries render in the given (newest first) order, sub text says newest first', newestFirst.indexOf('T-a') < newestFirst.indexOf('T-b') && newestFirst.includes('newest first') && !newestFirst.includes('oldest first'));
+  const olderPage = tl(['b', 'a'], { cursor: 'C1', olderCursor: 'C2' });
+  check('sessionParts: pager only below the transcript, with Latest and Older', olderPage.indexOf('class="tl"') < olderPage.indexOf('Latest messages') && olderPage.indexOf('Latest messages') < olderPage.indexOf('Older messages') && olderPage.indexOf('class="pager"') > olderPage.indexOf('T-a') && !tl(['b'], { olderCursor: null }).includes('pager'));
+  const tm = normalizeTranscript([
+    { id: 'u', type: 'user', text: 'hi', time: { created: 1000 } },
+    { id: 'a1', type: 'assistant', time: { created: 2000, firstToken: 50_200, completed: 72_000 }, retry: { attempt: 2, at: 1, error: { type: 'rate', message: 'slow <down>' } }, content: [
+      { type: 'tool', name: 'bash', state: { status: 'completed' }, time: { created: 60_000, completed: 64_000 } },
+      { type: 'tool', name: 'read', state: { status: 'completed' }, time: { created: 64_000, ran: 65_000, completed: 66_500 } },
+      { type: 'tool', name: 'x', state: { status: 'running' }, time: { created: 66_600 } },
+    ] },
+    { id: 'a2', type: 'assistant', time: { created: 70_000 }, content: [] },
+    { id: 'a3', type: 'assistant', time: { created: 80_000 }, content: [] },
+  ]);
+  const ta = tm[1] as Extract<(typeof tm)[number], { kind: 'assistant' }>;
+  check('timing: first token, total, tools sum, retry string', ta.timing.firstTokenMs === 48_200 && ta.timing.totalMs === 70_000 && ta.timing.toolsMs === 5500 && ta.timing.retry === 'attempt 2: rate: slow <down>');
+  const tb = tm[2] as Extract<(typeof tm)[number], { kind: 'assistant' }>;
+  check('timing: missing firstToken/completed/tools/retry are null', tb.timing.firstTokenMs === null && tb.timing.totalMs === null && tb.timing.toolsMs === null && tb.timing.retry === null);
+  check('gapMs: first entry null, normal gap from completed, negative -> null, created fallback', tm[0]!.gapMs === null && tm[1]!.gapMs === 1000 && tm[2]!.gapMs === null && tm[3]!.gapMs === 10_000);
+  check('fmtMs: ms, seconds, minutes', fmtMs(450) === '450 ms' && fmtMs(14_100) === '14.1 s' && fmtMs(72_000) === '1 min 12 s' && fmtMs(63_000) === '1 min 3 s');
+  const timingHtml = sessionParts({ ...sdata, entries: [...tm].reverse() })['live-session']!;
+  console.log('sample timing line:', (timingHtml.match(/<div class="toks">waited[^<]*<\/div>/) ?? [''])[0]);
+  check('sessionParts: timing line rendered and escaped, idle shown from 5 s', timingHtml.includes('waited 48.2 s for first token · total 1 min 10 s · tools 5.5 s · retry: attempt 2: rate: slow &lt;down&gt;') && !timingHtml.includes('slow <down>') && timingHtml.includes('idle 10.0 s before this step') && !timingHtml.includes('idle 1.0 s'));
+  check('requestsParts: session links for jobs and chats', requestsHtml.includes('href="/dashboard/sessions/ses_job7"') && requestsHtml.includes('href="/dashboard/sessions/ses_chat9"'));
+  check('requestsParts: tokens cell and KPI use cache %', requestsHtml.includes('<td data-label="Tokens">100 / 20 / 5 / 75%</td>') && requestsHtml.includes('Cache hits') && !requestsHtml.includes('Cached tokens'));
+  console.log('sample tokens cells:', (requestsHtml.match(/<td data-label="Tokens">[^<]*<\/td>/g) ?? []).join(' | '));
+  const ownerDb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-owner-')), 'owner.db'));
+  const oj = ownerDb.createBuildJob({ guildId: G, threadId: 'tx', channelId: 'c', requesterId: 'u', request: 'r' });
+  ownerDb.updateBuildJob(oj.id, { sessionId: 'ses_own1' });
+  ownerDb.createChatThread({ threadId: 'cx', guildId: G, channelId: 'c', sessionId: 'ses_own2', startedBy: 'u', model: null });
+  const o1 = ownerDb.findSessionOwner(G, 'ses_own1');
+  const o2 = ownerDb.findSessionOwner(G, 'ses_own2');
+  check('findSessionOwner: job, chat, other guild, unknown', o1?.kind === 'job' && o2?.kind === 'chat' && ownerDb.findSessionOwner('other', 'ses_own1') === null && ownerDb.findSessionOwner(G, 'ses_nope') === null);
+  ownerDb.close();
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

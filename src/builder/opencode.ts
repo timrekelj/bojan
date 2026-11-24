@@ -82,6 +82,9 @@ export async function probeAgent(baseUrl: string, password: string, timeoutMs = 
 
 export class AgentTimeoutError extends Error {}
 
+/** Max length of a single `session.wait` request; shorter than fetch's own 5 minute header timeout. */
+const WAIT_SLICE_MS = 60_000;
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class OpenCodeAgent {
@@ -199,18 +202,34 @@ export class OpenCodeAgent {
    * Wait until the session stops. `wait` may give up on long runs (proxy/idle timeouts), so
    * it is called again until the session is no longer active, up to `timeoutMs` overall.
    */
-  async waitIdle(sessionID: string, timeoutMs: number, settleMs = 3000): Promise<void> {
+  async waitIdle(sessionID: string, timeoutMs: number, settleMs = 3000, onProgress?: () => Promise<void> | void): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     const started = Date.now();
+    const progress = async (): Promise<void> => {
+      try {
+        await onProgress?.();
+      } catch {
+        // progress reporting must never break the wait
+      }
+    };
     for (;;) {
       if (Date.now() > deadline) throw new AgentTimeoutError(`agent did not finish within ${Math.round(timeoutMs / 60_000)} minutes`);
+      // Every call is bounded by us: a hanging request would otherwise be cut by fetch after ~5 min with a noisy error.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), WAIT_SLICE_MS);
       try {
-        await this.client.experimental.session.wait({ sessionID });
+        await this.client.experimental.session.wait({ sessionID }, { signal: ctrl.signal });
       } catch (err) {
+        const sliceEnded = ctrl.signal.aborted;
         if (!(await this.isRunning(sessionID).catch(() => true))) return;
-        console.warn(`[builder] wait for session ${sessionID} interrupted (${err instanceof Error ? err.message : String(err)}), retrying`);
-        await sleep(2000);
+        if (!sliceEnded) {
+          console.warn(`[builder] wait for session ${sessionID} interrupted (${err instanceof Error ? err.message : String(err)}), retrying`);
+          await sleep(2000);
+        }
+        await progress();
         continue;
+      } finally {
+        clearTimeout(timer);
       }
       // A prompt that was only just queued may not have started yet: give it a moment before trusting "idle".
       if (await this.isRunning(sessionID)) continue;
@@ -282,10 +301,10 @@ export class OpenCodeAgent {
   }
 
   /** Queue a prompt, wait for the agent to stop, and return its final reply. */
-  async promptAndWait(sessionID: string, text: string, timeoutMs: number, files?: readonly PromptImage[]): Promise<AgentReply> {
+  async promptAndWait(sessionID: string, text: string, timeoutMs: number, files?: readonly PromptImage[], onProgress?: () => Promise<void> | void): Promise<AgentReply> {
     const before = (await this.latestReply(sessionID)).id;
     await this.client.session.prompt(files && files.length > 0 ? { sessionID, text, files } : { sessionID, text });
-    await this.waitIdle(sessionID, timeoutMs);
+    await this.waitIdle(sessionID, timeoutMs, 3000, onProgress);
     const reply = await this.latestReply(sessionID);
     if (reply.id !== null && reply.id === before && !reply.error) {
       return { ...reply, text: '', error: 'The agent produced no new reply.' };

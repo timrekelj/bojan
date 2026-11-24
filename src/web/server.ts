@@ -7,7 +7,7 @@ import { ChannelType, PermissionFlagsBits, type Client } from 'discord.js';
 import type { BotDatabase, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, requestsPage, requestsParts, settingsPage, type LogsPageData, type OverviewData, type RequestsPageData, type SettingsPageData } from './views.js';
+import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type LogsPageData, type OverviewData, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
 import { cachedDeployments, dokployEnabled, fetchDeployments, type DeployResult, type DeployStatus, type DokployConfig } from '../dokploy.js';
 import { postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
@@ -15,7 +15,8 @@ import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from
 import { parseFreeForm } from '../freegames/form.js';
 import { parseBuilderForm } from '../builder/form.js';
 import { sortQueue } from '../builder/queue.js';
-import { probeAgent } from '../builder/opencode.js';
+import { OpenCodeAgent, probeAgent } from '../builder/opencode.js';
+import { fetchTranscript } from '../builder/transcript.js';
 import { buildColorMessage, COLOR_MARKER, sortColorRoles } from '../colors.js';
 
 interface Session {
@@ -37,7 +38,8 @@ const SESSION_TTL_MS = 7 * 86400_000; // session lifetime, matched by the cookie
 const sessions = new Map<string, Session>(); // sid -> session (runtime cache; the DB is the source of truth)
 const startedAt = Date.now();
 const EMBEDS_PAGE_SIZE = 10;
-const REQUESTS_PAGE_SIZE = 50;
+const REQUESTS_PAGE_SIZE = 20;
+const LOGS_PAGE_SIZE = 50;
 const DEPLOY_PAGE_WAIT_MS = 1200; // a page render waits this long for Dokploy, then shows "unavailable"
 const DEPLOY_LIVE_WAIT_MS = 4000;
 const FAVICON = faviconSvg();
@@ -407,34 +409,74 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     };
   };
 
-  const loadLogs = (session: Session, q: { level: string | undefined; tag: string | undefined }, deploy: DeployStatus): LogsPageData => {
+  const loadLogs = (session: Session, q: { level: string | undefined; tag: string | undefined; page: string | undefined }, deploy: DeployStatus): LogsPageData => {
     const level = q.level === 'warn' || q.level === 'error' ? q.level : 'all';
     const tag = q.tag?.trim().slice(0, 64) || null;
+    const total = db.countLogs({ level, tag });
+    const pages = Math.max(1, Math.ceil(total / LOGS_PAGE_SIZE));
+    const page = parsePage(q.page, pages);
     return {
-      rows: db.recentLogs({ limit: 300, level, tag }),
+      rows: db.recentLogs({ limit: LOGS_PAGE_SIZE, offset: (page - 1) * LOGS_PAGE_SIZE, level, tag }),
       tags: db.logTags(),
       level,
       tag,
+      page,
+      pages,
+      pageSize: LOGS_PAGE_SIZE,
+      total,
       timezone: db.getSettings(config.guildId).timezone,
       user: { username: session.username, avatar: session.avatar },
       deploy,
     };
   };
 
-  const loadRequests = (session: Session, pageQ: string | undefined, deploy: DeployStatus): RequestsPageData => {
+  const loadRequests = (session: Session, pageQ: string | undefined, chatPageQ: string | undefined, deploy: DeployStatus): RequestsPageData => {
     const guild = client.guilds.cache.get(config.guildId);
     const totals = db.buildUsageTotals(config.guildId);
+    const chatTotals = db.chatUsageTotals(config.guildId);
+    const chatPages = Math.max(1, Math.ceil((chatTotals.threads + chatTotals.oneOffs) / REQUESTS_PAGE_SIZE));
+    const chatPage = parsePage(chatPageQ, chatPages);
     const pages = Math.max(1, Math.ceil(totals.jobs / REQUESTS_PAGE_SIZE));
     const page = parsePage(pageQ, pages);
     const jobs = db.recentBuildJobs(config.guildId, REQUESTS_PAGE_SIZE, (page - 1) * REQUESTS_PAGE_SIZE);
     const members: Record<string, string> = {};
-    const chats = db.recentChatThreads(config.guildId, REQUESTS_PAGE_SIZE);
+    const chats = db.recentChatThreads(config.guildId, REQUESTS_PAGE_SIZE, (chatPage - 1) * REQUESTS_PAGE_SIZE);
     for (const id of [...jobs.map((j) => j.requesterId), ...chats.map((ch) => ch.startedBy)]) {
       if (members[id]) continue;
       const name = guild?.members.cache.get(id)?.displayName ?? client.users.cache.get(id)?.displayName;
       if (name) members[id] = name;
     }
-    return { queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals: db.chatUsageTotals(config.guildId), chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar }, deploy };
+    return { queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals, chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, chatPage, chatPages, chatPageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar }, deploy };
+  };
+
+  const SESSION_ID_RE = /^ses_[A-Za-z0-9]+$/;
+  // Session detail page data; null when the id is unknown (404). A failed or unconfigured
+  // transcript fetch becomes `error` on the page instead of throwing.
+  const loadSession = async (session: Session, id: string, cursorQ: string | undefined, deploy: DeployStatus): Promise<SessionPageData | null> => {
+    if (!SESSION_ID_RE.test(id)) return null;
+    const owner = db.findSessionOwner(config.guildId, id);
+    if (!owner) return null;
+    const guild = client.guilds.cache.get(config.guildId);
+    const members: Record<string, string> = {};
+    const memberId = owner.kind === 'job' ? owner.job.requesterId : owner.thread.startedBy;
+    const name = guild?.members.cache.get(memberId)?.displayName ?? client.users.cache.get(memberId)?.displayName;
+    if (name) members[memberId] = name;
+    const cursor = cursorQ && cursorQ.length <= 512 ? cursorQ : null;
+    let entries: SessionPageData['entries'] = [];
+    let olderCursor: string | null = null;
+    let error: string | null = null;
+    if (!config.opencodePassword) error = 'The agent server is not configured (OPENCODE_PASSWORD is not set), so the transcript cannot be loaded.';
+    else {
+      try {
+        const agent = new OpenCodeAgent(config.opencodeUrl, config.opencodePassword);
+        ({ entries, olderCursor } = await fetchTranscript(agent.client, id, cursor ? { cursor } : {}));
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(`[web] session transcript ${id} failed: ${reason}`);
+        error = `Could not load the transcript from the agent server: ${reason}`;
+      }
+    }
+    return { sessionId: id, owner, entries, olderCursor, cursor, error, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar }, deploy };
   };
 
   app.get('/dashboard', requireAdmin, async (c) => {
@@ -452,9 +494,14 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       case 'overview':
         return c.json({ parts: overviewParts(loadOverview(session, { week: c.req.query('week'), embedsPage: null, deploy })) });
       case 'logs':
-        return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag') }, deploy)) });
+        return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page') }, deploy)) });
       case 'requests':
-        return c.json({ parts: requestsParts(loadRequests(session, c.req.query('page'), deploy)) });
+        return c.json({ parts: requestsParts(loadRequests(session, c.req.query('page'), c.req.query('chatPage'), deploy)) });
+      case 'session': {
+        if (c.req.query('cursor')) return c.json({ error: 'older pages do not refresh' }, 400);
+        const data = await loadSession(session, c.req.query('id') ?? '', undefined, deploy);
+        return data ? c.json({ parts: sessionParts(data) }) : c.json({ error: 'not found' }, 404);
+      }
       case 'settings':
         return c.json({ parts: chromeParts(deploy) }); // forms are never refreshed
       default:
@@ -511,11 +558,16 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   });
 
   app.get('/dashboard/logs', requireAdmin, async (c) => {
-    return c.html(logsPage(loadLogs(c.get('session'), { level: c.req.query('level'), tag: c.req.query('tag') }, await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+    return c.html(logsPage(loadLogs(c.get('session'), { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page') }, await deployStatus(DEPLOY_PAGE_WAIT_MS))));
   });
 
   app.get('/dashboard/requests', requireAdmin, async (c) => {
-    return c.html(requestsPage(loadRequests(c.get('session'), c.req.query('page'), await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+    return c.html(requestsPage(loadRequests(c.get('session'), c.req.query('page'), c.req.query('chatPage'), await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+  });
+
+  app.get('/dashboard/sessions/:id', requireAdmin, async (c) => {
+    const data = await loadSession(c.get('session'), c.req.param('id') ?? '', c.req.query('cursor'), await deployStatus(DEPLOY_PAGE_WAIT_MS));
+    return data ? c.html(sessionPage(data)) : c.html(errorPage('Session not found.'), 404);
   });
 
   app.post('/builder-settings', requireAdmin, async (c) => {
