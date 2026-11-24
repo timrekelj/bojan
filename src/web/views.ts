@@ -1,6 +1,6 @@
 import type { BuildJob, BuildUsage, BuilderSettings, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, lastWeekBounds, weekRangeLabel } from '../stats.js';
-import { levelTag } from '../levels.js';
+import { levelProgress, levelTag } from '../levels.js';
 import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 
@@ -82,6 +82,14 @@ const CSS = `
   .lb li:first-child { border-top: 0; }
   .wrap > .kpis + section { border-top: 0; padding-top: 0; }
   #you .kpis { margin-bottom: 16px; }
+  .levelrow { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px 20px; margin: 0 0 14px; }
+  .levelno { display: flex; flex-direction: column; line-height: 1.1; }
+  .levelno span { color: var(--muted); font-size: 12px; }
+  .levelno b { font-size: 24px; font-weight: 500; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .levelmeter { display: grid; gap: 6px; min-width: 0; }
+  .levelnums { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .levelbar { height: 8px; border-radius: 999px; background: var(--soft); }
+  .levelbar i { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
   .kpi small { display: block; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .you-cols { margin-top: 24px; }
   .you-cols > div { min-width: 0; }
@@ -298,8 +306,10 @@ export function leaderboard(rows: UserRow[], total: number, members: DashboardDa
 export interface YouData {
   allRank: { rank: number; messages: number } | null;
   weekRank: { rank: number; messages: number } | null;
-  /** Total XP of the logged-in user, for the Level KPI. */
+  /** Total XP of the logged-in user, for the level progress row. */
   xp: number | null;
+  /** Highest colored role of the logged-in user (hex), for the level bar fill. */
+  roleColor?: string | null;
   stats: UserStats;
   reactions: ReactionStats;
   voice: VoiceStats;
@@ -317,6 +327,16 @@ const miniList = (items: { label: string; value: string }[]): string =>
 
 const miniBlock = (title: string, inner: string): string => `<div><h3 class="mini-h">${escapeHtml(title)}</h3>${inner}</div>`;
 
+/** Level and XP progress as one row: level on the left, rounded bar with the numbers above it. */
+export function levelBar(xp: number, roleColor: string | null): string {
+  const { level, intoLevel, needed } = levelProgress(xp);
+  const span = intoLevel + needed;
+  const pct = span > 0 ? Math.min(100, (intoLevel / span) * 100) : 0;
+  const color = roleColor && /^#[0-9a-f]{6}$/i.test(roleColor) ? roleColor : null;
+  const fill = `<i style="width:${pct.toFixed(1)}%${color ? `;background:${escapeHtml(color)}` : ''}"></i>`;
+  return `<div class="levelrow"><div class="levelno"><span>Level</span><b>${level}</b></div><div class="levelmeter"><span class="levelnums">${fmt(intoLevel)} / ${fmt(span)} XP</span><div class="levelbar" role="progressbar" aria-label="Level ${level} progress" aria-valuemin="0" aria-valuemax="${span}" aria-valuenow="${intoLevel}" aria-valuetext="${fmt(intoLevel)} of ${fmt(span)} XP">${fill}</div></div></div>`;
+}
+
 // Pure: "Your stats" section for the logged-in user.
 export function youSection(y: YouData, ctx: { total: number; timezone: string; channelNames: Record<string, string>; username: string }): string {
   const hasData = y.stats.messages > 0 || y.reactions.given > 0 || y.reactions.received > 0 || y.voice.sessions > 0 || y.activityMs > 0 || y.topActivities.length > 0;
@@ -327,16 +347,14 @@ export function youSection(y: YouData, ctx: { total: number; timezone: string; c
   const allNote = [y.allRank ? `#${fmt(y.allRank.rank)}` : null, ctx.total > 0 && y.stats.messages > 0 ? `${allPct.toFixed(1)}% of server` : null].filter(Boolean).join(' · ');
   const chan = (id: string): string => (ctx.channelNames[id] ? '#' + ctx.channelNames[id] : id);
 
-  const lvl = levelTag(y.xp);
   const kpis = [
     kpi(fmt(y.stats.messages), 'Messages, all time', allNote || undefined),
     kpi(fmt(y.weekRank?.messages ?? 0), 'Messages, last week', y.weekRank ? `#${fmt(y.weekRank.rank)}` : 'not ranked'),
     kpi(y.activityMs > 0 ? fmtDuration(y.activityMs) : '—', 'Activity time', y.topActivities[0] ? `top: ${y.topActivities[0].name}` : 'none tracked'),
     kpi(fmt(y.reactions.given), 'Reactions given', `${fmt(y.reactions.received)} received`),
     kpi(y.voice.totalMs > 0 ? fmtDuration(y.voice.totalMs) : '—', 'Time in voice', y.voice.totalMs > 0 ? `${fmt(y.voice.sessions)} session${y.voice.sessions === 1 ? '' : 's'}` : 'no voice time'),
-    // Level + progress within the current level, last in the row (swapped with Activity time).
-    ...(lvl ? [kpi(lvl, 'Level')] : []),
   ].join('');
+  const levelRow = y.xp !== null ? levelBar(y.xp, y.roleColor ?? null) : '';
 
   const range = `<p class="muted">First message ${escapeHtml(fmtDate(y.stats.firstTs, ctx.timezone))} · last message ${escapeHtml(fmtDate(y.stats.lastTs, ctx.timezone))}</p>`;
   const live: string[] = [];
@@ -350,7 +368,7 @@ export function youSection(y: YouData, ctx: { total: number; timezone: string; c
   if (y.topActivities.length > 0) blocks.push(miniBlock('Top activities', miniList(y.topActivities.slice(0, 5).map((a) => ({ label: a.name, value: `${fmtDuration(a.totalMs)} · ${fmt(a.sessions)} session${a.sessions === 1 ? '' : 's'}` })))));
   if (y.topVoice.length > 0) blocks.push(miniBlock('Top voice channels', miniList(y.topVoice.slice(0, 3).map((v) => ({ label: chan(v.channelId), value: `${fmtDuration(v.totalMs)} · ${fmt(v.sessions)} session${v.sessions === 1 ? '' : 's'}` })))));
 
-  return `<section id="you" aria-labelledby="h-you">${head}<div class="kpis">${kpis}</div>${range}${liveHtml}${blocks.length > 0 ? `<div class="cols you-cols">${blocks.join('')}</div>` : ''}</section>`;
+  return `<section id="you" aria-labelledby="h-you">${head}<div class="kpis">${kpis}</div>${levelRow}${range}${liveHtml}${blocks.length > 0 ? `<div class="cols you-cols">${blocks.join('')}</div>` : ''}</section>`;
 }
 
 // Custom emoji labels look like <:name:id> / <a:name:id>; render them as images.
