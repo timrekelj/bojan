@@ -656,6 +656,17 @@ export interface SettingsPageData {
     flash: { kind: 'saved' } | null;
   };
   builder: BuilderSectionData;
+  color: {
+    /** Channel the per-role picker messages are posted in. */
+    channelId: string | null;
+    /** Roles that can be used as name colours (all non-managed roles). */
+    roles: { id: string; name: string }[];
+    selected: string[];
+    posted: number;
+    /** The bot has Manage Roles in this guild. */
+    canManage: boolean;
+    flash: { kind: 'saved' } | { kind: 'error'; reason: string } | null;
+  };
 }
 
 export interface BuilderSectionData {
@@ -963,6 +974,34 @@ function generalForm(d: SettingsPageData): string {
   </form><form id="send-now-form" method="post" action="/weekly/send-now"></form></div>`;
 }
 
+function colorSection(d: SettingsPageData): string {
+  const c = d.color;
+  const channelOpts = d.channels.map((ch) => `<option value="${escapeHtml(ch.id)}"${c.channelId === ch.id ? ' selected' : ''}>#${escapeHtml(ch.name)}</option>`).join('');
+  const chosen = new Set(c.selected);
+  const roleChips = c.roles.map((r) => chip('colorRoles', r.id, chosen.has(r.id), `@${r.name}`)).join('');
+  const flash =
+    c.flash?.kind === 'saved'
+      ? '<div class="flash" role="status">Name colour settings saved.</div>'
+      : c.flash?.kind === 'error'
+        ? `<div class="flash" role="alert">Couldn't post every colour message: ${escapeHtml(c.flash.reason)}</div>`
+        : '';
+  const status = [
+    c.canManage ? statusPill('ok', 'Manage Roles granted') : statusPill('err', 'Missing Manage Roles permission'),
+    statusPill('', `${fmt(c.selected.length)} colour roles selected`),
+    statusPill('', `${fmt(c.posted)} of ${fmt(c.selected.length)} messages posted`),
+  ].join('');
+  return `<section class="card" id="colors" aria-labelledby="h-colors"><div class="card-head"><h2 id="h-colors">Name colours</h2></div><p class="card-sub">Pick the pre-made coloured roles and post one message per role. Reacting to a message gives that role; a new colour replaces the old one. Roles must sit below the bot's highest role.</p><div class="pills card-pills">${status}</div>
+    ${flash}
+    <form method="post" action="/color-settings">
+      <div class="rows">
+        ${row({ id: 'colorChannel', label: 'Channel', help: 'Where the colour messages are posted.', control: selectEl('colorChannel', 'channel', `<option value="">— not set —</option>${channelOpts}`) })}
+        ${c.roles.length === 0 ? '<div class="row block"><p class="muted">No roles found.</p></div>' : chipRow('colorRolesLbl', 'Roles', 'The roles members can claim by reacting. Unselecting a role deletes its message.', roleChips, true)}
+      </div>
+      <div class="savebar"><span class="muted">Saving posts a message for every role that has none yet, and removes messages of unselected roles.</span><button type="submit">Save and post messages</button></div>
+    </form>
+  </section>`;
+}
+
 function freeSection(d: SettingsPageData): string {
   const f = d.free;
   const s = f.settings;
@@ -1039,9 +1078,9 @@ export function builderSection(d: Pick<SettingsPageData, 'builder' | 'settings'>
 
 // Strips the one-shot flash params so a refresh doesn't show the toast again.
 const CLEAR_FLASH_SCRIPT =
-  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('weekly');u.searchParams.delete('reason');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('colorSaved');u.searchParams.delete('colorError');u.searchParams.delete('weekly');u.searchParams.delete('reason');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
 
-/** Settings page: one card per feature; three forms (general, free games, AI assistant). */
+/** Settings page: one card per feature; forms save independently (general, colours, free games, AI assistant). */
 export function settingsPage(d: SettingsPageData, now: number = Date.now()): string {
   const flashes = [
     d.saved ? '<div class="flash" role="status">Settings saved.</div>' : '',
@@ -1049,9 +1088,9 @@ export function settingsPage(d: SettingsPageData, now: number = Date.now()): str
     d.weeklyFlash?.kind === 'error' ? `<div class="flash" role="alert">Couldn't send weekly stats: ${escapeHtml(d.weeklyFlash.reason || 'unknown error')}</div>` : '',
     d.free.flash?.kind === 'saved' ? '<div class="flash" role="status">Free games settings saved.</div>' : '',
   ].join('');
-  const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['free', 'Free games'], ['builder', 'Assistant']];
+  const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['colors', 'Colours'], ['free', 'Free games'], ['builder', 'Assistant']];
   const secnav = `<nav class="secnav" aria-label="Settings sections"><div class="secnav-in">${anchors.map(([id, label]) => `<a href="#${id}">${label}</a>`).join('')}</div></nav>`;
-  const body = `${flashes}${generalForm(d)}${freeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.free.flash || d.builder.flash ? CLEAR_FLASH_SCRIPT : ''}`;
+  const body = `${flashes}${generalForm(d)}${colorSection(d)}${freeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.free.flash || d.builder.flash || d.color.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout({ active: 'settings', title: 'Settings', sub: '<p class="hero-sub">Everything the bot does is configured here. Each section saves on its own.</p>', live: 'quiet', between: secnav, body, now }, { user: d.user, deploy: d.deploy });
 }
 

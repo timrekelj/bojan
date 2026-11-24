@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { Hono, type Context, type Next } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { serve } from '@hono/node-server';
-import { ChannelType, type Client } from 'discord.js';
+import { ChannelType, PermissionFlagsBits, type Client } from 'discord.js';
 import type { BotDatabase, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
@@ -17,6 +17,7 @@ import { parseBuilderForm } from '../builder/form.js';
 import { sortQueue } from '../builder/queue.js';
 import { OpenCodeAgent, probeAgent } from '../builder/opencode.js';
 import { fetchTranscript } from '../builder/transcript.js';
+import { buildColorMessage, COLOR_MARKER, sortColorRoles } from '../colors.js';
 
 interface Session {
   userId: string;
@@ -290,6 +291,23 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       : [];
   };
 
+  // Channel a picker message can be posted in, or null when it is missing or not sendable.
+  const sendableChannel = async (channelId: string) => {
+    const guild = client.guilds.cache.get(config.guildId);
+    if (!guild) return null;
+    const channel = guild.channels.cache.get(channelId) ?? (await guild.channels.fetch(channelId).catch(() => null));
+    return channel && channel.isSendable() ? channel : null;
+  };
+
+  // Best-effort removal of an old picker message (the channel or message may be gone).
+  const deletePickerMessage = async (channelId: string | null, messageId: string | null): Promise<void> => {
+    if (!channelId || !messageId) return;
+    const channel = await sendableChannel(channelId);
+    if (!channel) return;
+    const message = await channel.messages.fetch(messageId).catch(() => null);
+    if (message) await message.delete().catch(() => undefined);
+  };
+
   // Deployment status for the shell/health pills: null when Dokploy isn't configured. Waits at
   // most `waitMs` so a slow Dokploy never holds a page; the live refresh fills it in afterwards.
   const deployStatus = async (waitMs: number): Promise<DeployStatus> => {
@@ -517,6 +535,24 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
           flash: c.req.query('freeSaved') === '1' ? { kind: 'saved' } : null,
         },
         builder: { settings: db.getBuilderSettings(), passwordSet: !!config.opencodePassword, agent, flash: builderFlash },
+        color: (() => {
+          const colorSettings = db.getColorSettings(config.guildId);
+          const colorRoles = db.getColorRoles(config.guildId);
+          const guild = client.guilds.cache.get(config.guildId);
+          return {
+            channelId: colorSettings.channelId,
+            roles: listRoles(),
+            selected: colorRoles.map((r) => r.roleId),
+            posted: colorRoles.filter((r) => r.messageId !== null).length,
+            canManage: guild?.members.me?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false,
+            flash:
+              c.req.query('colorSaved') === '1'
+                ? ({ kind: 'saved' } as const)
+                : c.req.query('colorError')
+                  ? ({ kind: 'error', reason: (c.req.query('colorError') ?? '').slice(0, 200) } as const)
+                  : null,
+          };
+        })(),
       }),
     );
   });
@@ -548,6 +584,57 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     db.saveFreeSettings(next);
     console.log(`[web] free games settings updated by ${c.get('session').username}`);
     return c.redirect('/dashboard/settings?freeSaved=1#free');
+  });
+
+  app.post('/color-settings', requireAdmin, async (c) => {
+    const form = await c.req.parseBody({ all: true });
+    const channelId = typeof form.channel === 'string' && form.channel.length > 0 ? form.channel : null;
+    const raw = form.colorRoles;
+    const picked = (Array.isArray(raw) ? raw : raw ? [raw] : []).map(String);
+    const known = new Set(listRoles().map((r) => r.id));
+    const roleIds = [...new Set(picked.filter((id) => known.has(id)))];
+    const previous = db.getColorSettings(config.guildId).channelId;
+    db.saveColorSettings({ guildId: config.guildId, channelId });
+
+    // Roles removed from the selection lose their picker message.
+    for (const dropped of db.saveColorSelection(config.guildId, roleIds)) {
+      await deletePickerMessage(previous, dropped.messageId);
+    }
+    // A new channel moves every picker: forget the old message ids and delete the old posts.
+    if (previous !== channelId) {
+      for (const old of db.clearColorMessages(config.guildId)) {
+        await deletePickerMessage(previous, old.messageId);
+      }
+    }
+
+    const errors: string[] = [];
+    let posted = 0;
+    if (channelId) {
+      const channel = await sendableChannel(channelId);
+      const guild = client.guilds.cache.get(config.guildId);
+      if (!channel || !guild) {
+        errors.push('channel not found or not writable');
+      } else {
+        const rows = new Map(db.getColorRoles(config.guildId).map((r) => [r.roleId, r]));
+        for (const role of sortColorRoles([...guild.roles.cache.values()].filter((r) => rows.has(r.id)))) {
+          if (rows.get(role.id)?.messageId) continue;
+          try {
+            const message = await channel.send(buildColorMessage(role.id));
+            await message.react(COLOR_MARKER).catch(() => undefined);
+            db.setColorMessage(config.guildId, role.id, message.id);
+            posted++;
+          } catch (err) {
+            errors.push(`${role.name}: ${err instanceof Error ? err.message : 'send failed'}`);
+          }
+        }
+      }
+    }
+
+    console.log(`[web] name colours updated by ${c.get('session').username}: ${roleIds.length} roles, ${posted} new message(s), ${errors.length} error(s)`);
+    if (errors.length > 0) {
+      return c.redirect(`/dashboard/settings?colorError=${encodeURIComponent(errors.slice(0, 3).join('; '))}#colors`);
+    }
+    return c.redirect('/dashboard/settings?colorSaved=1#colors');
   });
 
   app.post('/settings', requireAdmin, async (c) => {
