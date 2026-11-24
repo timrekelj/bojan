@@ -7,7 +7,7 @@ import { ChannelType, PermissionFlagsBits, type Client } from 'discord.js';
 import type { BotDatabase, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type LogsPageData, type OverviewData, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
+import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type LogsPageData, type OverviewData, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
 import { cachedDeployments, dokployEnabled, fetchDeployments, type DeployResult, type DeployStatus, type DokployConfig } from '../dokploy.js';
 import { postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
@@ -37,12 +37,14 @@ const STATE_COOKIE = 'oauth_state';
 const SESSION_TTL_MS = 7 * 86400_000; // session lifetime, matched by the cookie's maxAge
 const sessions = new Map<string, Session>(); // sid -> session (runtime cache; the DB is the source of truth)
 const startedAt = Date.now();
-const EMBEDS_PAGE_SIZE = 10;
-const REQUESTS_PAGE_SIZE = 20;
-const LOGS_PAGE_SIZE = 50;
 const DEPLOY_PAGE_WAIT_MS = 1200; // a page render waits this long for Dokploy, then shows "unavailable"
 const DEPLOY_LIVE_WAIT_MS = 4000;
 const FAVICON = faviconSvg();
+
+/** Where /bot-avatar redirects: the bot's Discord avatar, or the cloud mark when it has none. Pure. */
+export function botAvatarTarget(avatarUrl: string | null): string {
+  return avatarUrl || '/favicon.svg';
+}
 
 // Static assets live next to this module: src/web/assets under tsx, dist/web/assets after
 // `npm run build` (which copies them). The second path covers `node dist/...` in a checkout
@@ -179,7 +181,12 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   if (restored.length > 0) console.log(`[web] restored ${restored.length} dashboard session(s), no re-login needed`);
 
   app.get('/favicon.svg', (c) => c.body(FAVICON, 200, { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=2592000' }));
-  app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301));
+  app.get('/bot-avatar', (c) => {
+    const url = client.user?.avatarURL({ extension: 'png', size: 128 }) ?? null;
+    c.header('cache-control', 'public, max-age=3600');
+    return c.redirect(botAvatarTarget(url), 302);
+  });
+  app.get('/favicon.ico', (c) => c.redirect('/bot-avatar', 302));
   // Public and immutable: the URL in the CSS carries a content hash (CLOUDS_URL in views.ts).
   app.get('/assets/clouds.png', (c) => (CLOUDS ? c.body(CLOUDS.slice().buffer, 200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' }) : c.notFound()));
 
@@ -324,7 +331,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
   // One loader for the Overview page and its live refresh. `embedsPage: null` skips the embed
   // table (the live endpoint doesn't render it).
-  const loadOverview = (session: Session, opts: { week: string | undefined; embedsPage: string | undefined | null; deploy: DeployStatus }): OverviewData => {
+  const loadOverview = (session: Session, opts: { week: string | undefined; embedsPage: string | undefined | null; embedsSize?: string | undefined; deploy: DeployStatus }): OverviewData => {
     const guild = client.guilds.cache.get(config.guildId);
     const settings = db.getSettings(config.guildId);
     const nowMs = Date.now();
@@ -337,9 +344,10 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const curWeekRows = db.topUsers(config.guildId, 10, curWeek.start, curEnd);
     const allRows = db.topUsers(config.guildId, 10);
     const embedTotal = db.countEmbeds(config.guildId);
-    const embedPages = Math.max(1, Math.ceil(embedTotal / EMBEDS_PAGE_SIZE));
+    const embedSize = parsePageSize(opts.embedsSize);
+    const embedPages = Math.max(1, Math.ceil(embedTotal / embedSize));
     const embedPage = parsePage(opts.embedsPage ?? undefined, embedPages);
-    const recentEmbeds = opts.embedsPage === null ? [] : db.recentEmbeds(config.guildId, EMBEDS_PAGE_SIZE, (embedPage - 1) * EMBEDS_PAGE_SIZE);
+    const recentEmbeds = opts.embedsPage === null ? [] : db.recentEmbeds(config.guildId, embedSize, (embedPage - 1) * embedSize);
 
     // Cache-only lookups: guild member -> global user -> raw id (handled in the view).
     const members: OverviewData['members'] = {};
@@ -401,7 +409,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       allTime: { total, rows: allRows },
       reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
       recentEmbeds,
-      embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: EMBEDS_PAGE_SIZE },
+      embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: embedSize },
       members,
       channelNames,
       xpByUser: db.getUserXpTotals(config.guildId),
@@ -409,20 +417,21 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     };
   };
 
-  const loadLogs = (session: Session, q: { level: string | undefined; tag: string | undefined; page: string | undefined }, deploy: DeployStatus): LogsPageData => {
+  const loadLogs = (session: Session, q: { level: string | undefined; tag: string | undefined; page: string | undefined; size?: string | undefined }, deploy: DeployStatus): LogsPageData => {
     const level = q.level === 'warn' || q.level === 'error' ? q.level : 'all';
     const tag = q.tag?.trim().slice(0, 64) || null;
     const total = db.countLogs({ level, tag });
-    const pages = Math.max(1, Math.ceil(total / LOGS_PAGE_SIZE));
+    const pageSize = parsePageSize(q.size);
+    const pages = Math.max(1, Math.ceil(total / pageSize));
     const page = parsePage(q.page, pages);
     return {
-      rows: db.recentLogs({ limit: LOGS_PAGE_SIZE, offset: (page - 1) * LOGS_PAGE_SIZE, level, tag }),
+      rows: db.recentLogs({ limit: pageSize, offset: (page - 1) * pageSize, level, tag }),
       tags: db.logTags(),
       level,
       tag,
       page,
       pages,
-      pageSize: LOGS_PAGE_SIZE,
+      pageSize,
       total,
       timezone: db.getSettings(config.guildId).timezone,
       user: { username: session.username, avatar: session.avatar },
@@ -430,23 +439,25 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     };
   };
 
-  const loadRequests = (session: Session, pageQ: string | undefined, chatPageQ: string | undefined, deploy: DeployStatus): RequestsPageData => {
+  const loadRequests = (session: Session, pageQ: string | undefined, chatPageQ: string | undefined, sizeQ: string | undefined, chatSizeQ: string | undefined, deploy: DeployStatus): RequestsPageData => {
     const guild = client.guilds.cache.get(config.guildId);
     const totals = db.buildUsageTotals(config.guildId);
     const chatTotals = db.chatUsageTotals(config.guildId);
-    const chatPages = Math.max(1, Math.ceil((chatTotals.threads + chatTotals.oneOffs) / REQUESTS_PAGE_SIZE));
+    const pageSize = parsePageSize(sizeQ);
+    const chatPageSize = parsePageSize(chatSizeQ);
+    const chatPages = Math.max(1, Math.ceil((chatTotals.threads + chatTotals.oneOffs) / chatPageSize));
     const chatPage = parsePage(chatPageQ, chatPages);
-    const pages = Math.max(1, Math.ceil(totals.jobs / REQUESTS_PAGE_SIZE));
+    const pages = Math.max(1, Math.ceil(totals.jobs / pageSize));
     const page = parsePage(pageQ, pages);
-    const jobs = db.recentBuildJobs(config.guildId, REQUESTS_PAGE_SIZE, (page - 1) * REQUESTS_PAGE_SIZE);
+    const jobs = db.recentBuildJobs(config.guildId, pageSize, (page - 1) * pageSize);
     const members: Record<string, string> = {};
-    const chats = db.recentChatThreads(config.guildId, REQUESTS_PAGE_SIZE, (chatPage - 1) * REQUESTS_PAGE_SIZE);
+    const chats = db.recentChatThreads(config.guildId, chatPageSize, (chatPage - 1) * chatPageSize);
     for (const id of [...jobs.map((j) => j.requesterId), ...chats.map((ch) => ch.startedBy)]) {
       if (members[id]) continue;
       const name = guild?.members.cache.get(id)?.displayName ?? client.users.cache.get(id)?.displayName;
       if (name) members[id] = name;
     }
-    return { queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals, chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, chatPage, chatPages, chatPageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar }, deploy };
+    return { queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals, chats, page, pages, pageSize, chatPage, chatPages, chatPageSize, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar }, deploy };
   };
 
   const SESSION_ID_RE = /^ses_[A-Za-z0-9]+$/;
@@ -481,7 +492,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
   app.get('/dashboard', requireAdmin, async (c) => {
     const deploy = await deployStatus(DEPLOY_PAGE_WAIT_MS);
-    return c.html(dashboardPage(loadOverview(c.get('session'), { week: c.req.query('week'), embedsPage: c.req.query('embedsPage'), deploy })));
+    return c.html(dashboardPage(loadOverview(c.get('session'), { week: c.req.query('week'), embedsPage: c.req.query('embedsPage'), embedsSize: c.req.query('embedsSize'), deploy })));
   });
 
   // Live refresh: the regions of a page as HTML, rendered by the same view functions as the
@@ -494,9 +505,9 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       case 'overview':
         return c.json({ parts: overviewParts(loadOverview(session, { week: c.req.query('week'), embedsPage: null, deploy })) });
       case 'logs':
-        return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page') }, deploy)) });
+        return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page'), size: c.req.query('size') }, deploy)) });
       case 'requests':
-        return c.json({ parts: requestsParts(loadRequests(session, c.req.query('page'), c.req.query('chatPage'), deploy)) });
+        return c.json({ parts: requestsParts(loadRequests(session, c.req.query('page'), c.req.query('chatPage'), c.req.query('size'), c.req.query('chatSize'), deploy)) });
       case 'session': {
         if (c.req.query('cursor')) return c.json({ error: 'older pages do not refresh' }, 400);
         const data = await loadSession(session, c.req.query('id') ?? '', undefined, deploy);
@@ -558,11 +569,11 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   });
 
   app.get('/dashboard/logs', requireAdmin, async (c) => {
-    return c.html(logsPage(loadLogs(c.get('session'), { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page') }, await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+    return c.html(logsPage(loadLogs(c.get('session'), { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page'), size: c.req.query('size') }, await deployStatus(DEPLOY_PAGE_WAIT_MS))));
   });
 
   app.get('/dashboard/requests', requireAdmin, async (c) => {
-    return c.html(requestsPage(loadRequests(c.get('session'), c.req.query('page'), c.req.query('chatPage'), await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+    return c.html(requestsPage(loadRequests(c.get('session'), c.req.query('page'), c.req.query('chatPage'), c.req.query('size'), c.req.query('chatSize'), await deployStatus(DEPLOY_PAGE_WAIT_MS))));
   });
 
   app.get('/dashboard/sessions/:id', requireAdmin, async (c) => {

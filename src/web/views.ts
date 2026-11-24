@@ -64,7 +64,7 @@ const CSS = `
   /* ---- shell: sidebar on desktop, top bar + bottom tab bar below 900px ---- */
   .chrome { position: fixed; top: 0; bottom: 0; left: 0; width: var(--side-w); z-index: 40; display: flex; flex-direction: column; gap: 22px; padding: 18px 12px 14px; background: var(--side); border-right: 1px solid var(--line); }
   .brand { display: flex; align-items: center; gap: 11px; padding: 2px 8px; color: var(--text); font-size: 16px; font-weight: 650; letter-spacing: -.015em; text-decoration: none; }
-  .mark { display: block; flex: none; }
+  .mark { display: block; flex: none; border-radius: 25%; object-fit: cover; }
   .chrome-title { display: none; }
   .nav { display: flex; flex-direction: column; gap: 2px; }
   .nav a { position: relative; display: flex; align-items: center; gap: 11px; min-height: 38px; padding: 0 10px; border-radius: 10px; color: var(--text-2); font-size: 14px; font-weight: 500; text-decoration: none; }
@@ -306,6 +306,7 @@ const CSS = `
   .pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 14px; }
   .tbl + .pager { margin-top: 0; padding-top: 14px; border-top: 1px solid var(--line); }
   .pager .muted, .pager-nav { font-variant-numeric: tabular-nums; }
+  .pager select.pager-size { width: auto; min-width: 110px; height: 32px; font-size: 13px; }
   .pager-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
   .pager-btn { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line-2); color: var(--text); font-size: 13px; font-weight: 500; text-decoration: none; }
   a.pager-btn:hover { background: var(--hover); }
@@ -450,7 +451,7 @@ const MARK_DOTS: [number, number, number][] = [[27.5, 4, 0.85], [24.5, 7, 0.6], 
 const MARK_INNER = `<rect width="32" height="32" rx="8" fill="#2b5ce6"/><g fill="#fff">${MARK_DOTS.map(([x, y, o]) => `<circle cx="${x}" cy="${y}" r=".9" opacity="${o}"/>`).join('')}<circle cx="11.5" cy="19" r="5"/><circle cx="17.5" cy="15.5" r="6.5"/><circle cx="23" cy="19.5" r="4.5"/><rect x="6.5" y="18" width="21" height="6" rx="3"/></g>`;
 
 function mark(size: number): string {
-  return `<svg class="mark" width="${size}" height="${size}" viewBox="0 0 32 32" aria-hidden="true">${MARK_INNER}</svg>`;
+  return `<img class="mark" src="/bot-avatar" width="${size}" height="${size}" alt="">`;
 }
 
 /** The brand mark as a standalone SVG document, served at /favicon.svg. Pure. */
@@ -512,7 +513,7 @@ const NAV: { id: PageId; href: string; label: string; icon: string }[] = [
 const LOGOUT_ICON = ICON('<path d="M8 3.5H5A1.5 1.5 0 0 0 3.5 5v10A1.5 1.5 0 0 0 5 16.5h3M12.5 13.5 16 10l-3.5-3.5M16 10H7.5"/>');
 
 function page(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="dark light"><meta name="theme-color" content="#101012" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>${escapeHtml(title)}</title><style>${CSS}</style></head><body>${body}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="dark light"><meta name="theme-color" content="#101012" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><link rel="icon" href="/bot-avatar"><title>${escapeHtml(title)}</title><style>${CSS}</style></head><body>${body}</body></html>`;
 }
 
 /** "5 min ago" style age of a timestamp. Pure. */
@@ -873,12 +874,25 @@ function embedRows(d: OverviewData): string {
   return `<div class="tbl"><table><thead><tr><th scope="col">Time</th><th scope="col">Channel</th><th scope="col">Provider</th><th scope="col">URL</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
 }
 
+/** Selectable rows per page on every paginated table; the first is the default. */
+export const PAGE_SIZES = [10, 20, 50, 100] as const;
+export const DEFAULT_PAGE_SIZE = 10;
+
+/** Page size from a query value: one of PAGE_SIZES, anything else (or missing) -> 10. */
+export function parsePageSize(raw: string | undefined): number {
+  const n = Number(raw);
+  return (PAGE_SIZES as readonly number[]).includes(n) ? n : DEFAULT_PAGE_SIZE;
+}
+
 /**
  * Shared Previous / "Page X of Y" / Next pager. `href` builds the (unescaped) link of a page;
  * it is escaped here. One page: just the summary when `showSingle`, otherwise nothing. Pure.
  */
-export function pagerHtml(o: { page: number; pages: number; summary: string; href: (page: number) => string; label: string; showSingle?: boolean }): string {
-  const showing = `<p class="muted">${escapeHtml(o.summary)}</p>`;
+export function pagerHtml(o: { page: number; pages: number; summary: string; href: (page: number) => string; label: string; showSingle?: boolean; size?: { current: number; href: (size: number) => string } }): string {
+  const sizeSelect = o.size
+    ? `<select class="pager-size" aria-label="Rows per page" onchange="location.href=this.value">${PAGE_SIZES.map((n) => `<option value="${escapeHtml(o.size!.href(n))}"${n === o.size!.current ? ' selected' : ''}>${n} rows</option>`).join('')}</select>`
+    : '';
+  const showing = `<p class="muted">${escapeHtml(o.summary)}</p>${sizeSelect}`;
   if (o.pages <= 1) return o.showSingle ? `<div class="pager">${showing}</div>` : '';
   const step = (label: string, target: number, enabled: boolean): string =>
     enabled ? `<a class="pager-btn" href="${escapeHtml(o.href(target))}">${label}</a>` : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
@@ -894,7 +908,14 @@ export function rangeSummary(page: number, pageSize: number, shown: number, tota
 
 function embedPager(d: OverviewData): string {
   const { page, pages, total, pageSize } = d.embedPage;
-  return pagerHtml({ page, pages, summary: `Showing ${rangeSummary(page, pageSize, d.recentEmbeds.length, total)}`, href: (p) => `/dashboard?embedsPage=${p}#h-embeds`, label: 'Embed conversions pages', showSingle: true });
+  const href = (p: number, size: number): string => {
+    const q = new URLSearchParams();
+    if (p > 1) q.set('embedsPage', String(p));
+    if (size !== DEFAULT_PAGE_SIZE) q.set('embedsSize', String(size));
+    const qs = q.toString();
+    return `/dashboard${qs ? '?' + qs : ''}#h-embeds`;
+  };
+  return pagerHtml({ page, pages, summary: `Showing ${rangeSummary(page, pageSize, d.recentEmbeds.length, total)}`, href: (p) => href(p, pageSize), label: 'Embed conversions pages', showSingle: true, size: { current: pageSize, href: (s) => href(1, s) } });
 }
 
 const region = (id: string, parts: Record<string, string>, cls = ''): string => `<div class="live${cls ? ' ' + cls : ''}" id="${id}">${parts[id] ?? ''}</div>`;
@@ -1111,11 +1132,12 @@ export interface LogsPageData {
 }
 
 /** Link to a Logs page; filters are kept, page 1 is the default. */
-function logsHref(level: string, tag: string | null, page = 1): string {
+export function logsHref(level: string, tag: string | null, page = 1, size = DEFAULT_PAGE_SIZE): string {
   const q = new URLSearchParams();
   if (level !== 'all') q.set('level', level);
   if (tag) q.set('tag', tag);
   if (page > 1) q.set('page', String(page));
+  if (size !== DEFAULT_PAGE_SIZE) q.set('size', String(size));
   const qs = q.toString();
   return `/dashboard/logs${qs ? '?' + qs : ''}`;
 }
@@ -1130,12 +1152,12 @@ export function logsParts(d: LogsPageData, now: number = Date.now()): Record<str
     rows.length === 0
       ? emptyState('No log entries match.')
       : `<div class="tbl"><table class="logs"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Tag</th><th scope="col">Message</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
-  const pager = pagerHtml({ page: d.page, pages: d.pages, summary: `${fmt(d.total)} ${d.total === 1 ? 'entry' : 'entries'}`, href: (p) => logsHref(d.level, d.tag, p) + '#h-logs', label: 'Log pages' });
-  return { ...chromeParts(d.deploy, now), 'live-logs': table + pager, 'live-logcount': rangeSummary(d.page, d.pageSize, d.rows.length, d.total) };
+  const pager = pagerHtml({ page: d.page, pages: d.pages, summary: `Showing ${rangeSummary(d.page, d.pageSize, d.rows.length, d.total)}`, href: (p) => logsHref(d.level, d.tag, p, d.pageSize) + '#h-logs', label: 'Log pages', showSingle: true, size: { current: d.pageSize, href: (s) => logsHref(d.level, d.tag, 1, s) + '#h-logs' } });
+  return { ...chromeParts(d.deploy, now), 'live-logs': table + (d.total === 0 ? '' : pager), 'live-logcount': rangeSummary(d.page, d.pageSize, d.rows.length, d.total) };
 }
 
 export function logsPage(d: LogsPageData, now: number = Date.now()): string {
-  const href = (level: string, tag: string | null): string => logsHref(level, tag);
+  const href = (level: string, tag: string | null): string => logsHref(level, tag, 1, d.pageSize);
   const levelLinks = (['all', 'warn', 'error'] as const)
     .map((l) => {
       const label = l === 'all' ? 'All' : l === 'warn' ? 'Warnings + errors' : 'Errors';
@@ -1146,7 +1168,7 @@ export function logsPage(d: LogsPageData, now: number = Date.now()): string {
     .sort()
     .map((t) => `<option value="${escapeHtml(t)}"${d.tag === t ? ' selected' : ''}>[${escapeHtml(t)}]</option>`)
     .join('');
-  const tagForm = `<form method="get" action="/dashboard/logs">${d.level !== 'all' ? `<input type="hidden" name="level" value="${escapeHtml(d.level)}">` : ''}<select name="tag" aria-label="Tag" onchange="this.form.submit()"><option value="">All tags</option>${tagOptions}</select><noscript><button class="btn ghost" type="submit">Apply</button></noscript></form>`;
+  const tagForm = `<form method="get" action="/dashboard/logs">${d.level !== 'all' ? `<input type="hidden" name="level" value="${escapeHtml(d.level)}">` : ''}${d.pageSize !== DEFAULT_PAGE_SIZE ? `<input type="hidden" name="size" value="${d.pageSize}">` : ''}<select name="tag" aria-label="Tag" onchange="this.form.submit()"><option value="">All tags</option>${tagOptions}</select><noscript><button class="btn ghost" type="submit">Apply</button></noscript></form>`;
   const parts = logsParts(d, now);
   const body = `<section class="card" aria-labelledby="h-logs"><div class="card-head"><h2 id="h-logs">Console output</h2><span class="sub live" id="live-logcount">${parts['live-logcount'] ?? ''}</span></div>
     <div class="filters"><nav class="seg" aria-label="Level">${levelLinks}</nav>${tagForm}</div>
@@ -1211,10 +1233,12 @@ const sessionHref = (sessionId: string, cursor?: string | null): string => `/das
 const sessionLink = (sessionId: string, label = 'Session'): string => `<a href="${escapeHtml(sessionHref(sessionId))}">${escapeHtml(label)}</a>`;
 
 /** Link to the Requests page with both pagers' positions (page 1 is omitted). */
-function requestsHref(page: number, chatPage: number): string {
+export function requestsHref(page: number, chatPage: number, size = DEFAULT_PAGE_SIZE, chatSize = DEFAULT_PAGE_SIZE): string {
   const q = new URLSearchParams();
   if (page > 1) q.set('page', String(page));
+  if (size !== DEFAULT_PAGE_SIZE) q.set('size', String(size));
   if (chatPage > 1) q.set('chatPage', String(chatPage));
+  if (chatSize !== DEFAULT_PAGE_SIZE) q.set('chatSize', String(chatSize));
   const qs = q.toString();
   return `/dashboard/requests${qs ? '?' + qs : ''}`;
 }
@@ -1247,8 +1271,8 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
       ? emptyState('No chats yet.')
       : `<div class="tbl"><table><thead><tr><th scope="col">Thread</th><th scope="col">Started by</th><th scope="col">Last active</th>${TOKENS_HEAD}</tr></thead><tbody>${chatRows.join('')}</tbody></table></div>`;
   const chatTotal = ct.threads + ct.oneOffs;
-  const pager = pagerHtml({ page: d.page, pages: d.pages, summary: rangeSummary(d.page, d.pageSize, d.jobs.length, t.jobs) + ' requests', href: (p) => requestsHref(p, d.chatPage) + '#h-req', label: 'Feature request pages' });
-  const chatPager = pagerHtml({ page: d.chatPage, pages: d.chatPages, summary: rangeSummary(d.chatPage, d.chatPageSize, d.chats.length, chatTotal) + ' chats', href: (p) => requestsHref(d.page, p) + '#h-chat', label: 'Chat pages' });
+  const pager = pagerHtml({ page: d.page, pages: d.pages, summary: `Showing ${rangeSummary(d.page, d.pageSize, d.jobs.length, t.jobs)}`, href: (p) => requestsHref(p, d.chatPage, d.pageSize, d.chatPageSize) + '#h-req', label: 'Feature request pages', showSingle: true, size: { current: d.pageSize, href: (s) => requestsHref(1, d.chatPage, s, d.chatPageSize) + '#h-req' } });
+  const chatPager = pagerHtml({ page: d.chatPage, pages: d.chatPages, summary: `Showing ${rangeSummary(d.chatPage, d.chatPageSize, d.chats.length, chatTotal)}`, href: (p) => requestsHref(d.page, p, d.pageSize, d.chatPageSize) + '#h-chat', label: 'Chat pages', showSingle: true, size: { current: d.chatPageSize, href: (s) => requestsHref(d.page, 1, d.pageSize, s) + '#h-chat' } });
   return {
     ...chromeParts(d.deploy, now),
     'live-chat-kpis': [
@@ -1258,7 +1282,7 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
       kpi(fmtCachePercent(ct), 'Cache hits', 'share of prompt tokens from cache'),
       kpi(fmtUsd(ct.costUsd), 'Est. cost'),
     ].join(''),
-    'live-chats': `<section class="card" aria-labelledby="h-chat"><div class="card-head"><h2 id="h-chat">Chats</h2><span class="sub">${fmt(chatTotal)} total</span></div>${chatTable}${chatPager}</section>`,
+    'live-chats': `<section class="card" aria-labelledby="h-chat"><div class="card-head"><h2 id="h-chat">Chats</h2><span class="sub">${fmt(chatTotal)} total</span></div>${chatTable}${chatTotal === 0 ? '' : chatPager}</section>`,
     'live-req-kpis': [
       kpi(fmt(t.jobs), 'Requests'),
       kpi(fmt(t.input), 'Input tokens'),
@@ -1267,7 +1291,7 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
       kpi(fmtCachePercent(t), 'Cache hits', 'share of prompt tokens from cache'),
       kpi(fmtUsd(t.costUsd), 'Est. cost'),
     ].join(''),
-    'live-reqs': `<section class="card" aria-labelledby="h-req"><div class="card-head"><h2 id="h-req">Feature requests</h2><span class="sub">${fmt(t.jobs)} total</span></div>${table}${pager}</section>`,
+    'live-reqs': `<section class="card" aria-labelledby="h-req"><div class="card-head"><h2 id="h-req">Feature requests</h2><span class="sub">${fmt(t.jobs)} total</span></div>${table}${t.jobs === 0 ? '' : pager}</section>`,
   };
 }
 

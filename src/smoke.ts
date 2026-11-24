@@ -37,7 +37,7 @@ import { blockingLimit, formatLimitDenial, LimitGate } from './builder/limits.js
 import { BUILD_RESUME_PROMPT, buildPrompt, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
-import { pagerHtml, rangeSummary } from './web/views.js';
+import { logsHref, pagerHtml, parsePageSize, rangeSummary } from './web/views.js';
 import { cachePercent, fmtMs, sessionParts, tokensCell, type SessionPageData } from './web/views.js';
 import { clipText, fetchTranscript, MAX_TEXT_CHARS, MAX_TOOL_INPUT_CHARS, MAX_TOOL_OUTPUT_CHARS, normalizeTranscript } from './builder/transcript.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
@@ -653,7 +653,7 @@ rmSync(dir, { recursive: true, force: true });
   // real HTTP route through the Hono app
   process.env.DISCORD_TOKEN ??= 't'; process.env.CLIENT_ID ??= 'c'; process.env.CLIENT_SECRET ??= 's'; process.env.GUILD_ID ??= 'gd';
   process.env.DASHBOARD_URL ??= 'http://localhost:3000'; process.env.SESSION_SECRET ??= 'x';
-  const { createWebApp } = await import('./web/server.js');
+  const { createWebApp, botAvatarTarget } = await import('./web/server.js');
   const wdb = new BotDatabase(join(fsDir, 'web.db'));
   wdb.saveFreeSettings(fs0);
   const wsent: unknown[] = [];
@@ -711,7 +711,10 @@ rmSync(dir, { recursive: true, force: true });
       `status=${cloudsRes.status} bytes=${cloudsBytes.length}`,
     );
     const ico = await get('/favicon.ico', false);
-    check('route: /favicon.ico redirects to the svg', ico.status === 301 && ico.headers.get('location') === '/favicon.svg');
+    check('route: /favicon.ico redirects to /bot-avatar', ico.status === 302 && ico.headers.get('location') === '/bot-avatar');
+    const av = await get('/bot-avatar', false);
+    check('route: /bot-avatar is public, falls back to /favicon.svg without a bot user', av.status === 302 && av.headers.get('location') === '/favicon.svg' && /max-age=\d+/.test(av.headers.get('cache-control') ?? ''), `status=${av.status} loc=${av.headers.get('location')}`);
+    check('botAvatarTarget: avatar url or the svg fallback', botAvatarTarget('https://cdn.discordapp.com/avatars/1/a.png?size=128') === 'https://cdn.discordapp.com/avatars/1/a.png?size=128' && botAvatarTarget(null) === '/favicon.svg');
     const liveAnon = await get('/dashboard/live?view=overview', false);
     check('route: unauthenticated /dashboard/live -> 401 json, not a redirect', liveAnon.status === 401 && (liveAnon.headers.get('content-type') ?? '').includes('application/json') && liveAnon.headers.get('location') === null);
     const setAnon = await get('/dashboard/settings', false);
@@ -911,7 +914,7 @@ rmSync(dir, { recursive: true, force: true });
       ovHtml.includes('<a href="/dashboard/settings">') &&
       ovHtml.includes('<a href="/dashboard/requests">') &&
       ovHtml.includes('<a href="/dashboard/logs">') &&
-      ovHtml.includes('<link rel="icon" type="image/svg+xml" href="/favicon.svg">') &&
+      ovHtml.includes('<link rel="icon" href="/bot-avatar">') &&
       (ovHtml.match(/<meta name="theme-color"/g) ?? []).length === 2 &&
       ovHtml.includes('viewport-fit=cover') &&
       ovHtml.includes('<main class="main" id="main" data-live="overview">') &&
@@ -930,7 +933,7 @@ rmSync(dir, { recursive: true, force: true });
     !ovHtml.includes('<form') &&
       !ovHtml.includes('name="weeklyEnabled"') &&
       ovHtml.includes('<td class="url" data-label="URL"><a href="https://x.test/a?b=&quot;c&quot;"') &&
-      ovHtml.includes('href="/dashboard?embedsPage=1#h-embeds"') &&
+      ovHtml.includes('href="/dashboard#h-embeds"') &&
       ovHtml.includes('href="/dashboard?embedsPage=3#h-embeds"') &&
       ovHtml.includes('#general'),
   );
@@ -1032,7 +1035,7 @@ rmSync(dir, { recursive: true, force: true });
   const bsec = builderSection({ builder: { ...setData.builder, passwordSet: false, agent: null }, settings: setData.settings });
   check('builderSection: standalone card with its own form; no meters without limits', bsec.startsWith('<section class="card" id="builder"') && bsec.includes('action="/builder-settings"') && bsec.includes('OPENCODE_PASSWORD not set') && bsec.includes('Agent server not checked') && !bsec.includes('class="meter"'));
 
-  const logsHtml = logsPage({ rows: [{ id: 1, ts: T, level: 'error', tag: 'web', message: 'boom <x>\n  at y' }, { id: 2, ts: T, level: 'info', tag: null, message: 'ok' }], tags: ['web', 'bot'], level: 'error', tag: 'web', page: 1, pages: 1, pageSize: 50, total: 2, timezone: 'UTC', user: { username: 'Two', avatar: null } }, T);
+  const logsHtml = logsPage({ rows: [{ id: 1, ts: T, level: 'error', tag: 'web', message: 'boom <x>\n  at y' }, { id: 2, ts: T, level: 'info', tag: null, message: 'ok' }], tags: ['web', 'bot'], level: 'error', tag: 'web', page: 1, pages: 1, pageSize: 10, total: 2, timezone: 'UTC', user: { username: 'Two', avatar: null } }, T);
   check(
     'logsPage: segmented level control, tag select, stacked-table labels, escaped message',
     logsHtml.includes('<nav class="seg" aria-label="Level">') && logsHtml.includes('<a aria-current="page" href="/dashboard/logs?level=error&amp;tag=web">Errors</a>') && logsHtml.includes('<a href="/dashboard/logs?tag=web">All</a>') &&
@@ -1045,8 +1048,9 @@ rmSync(dir, { recursive: true, force: true });
   const lp = logsParts({ rows: [lrow], tags: ['web'], level: 'warn', tag: 'web&x', page: 2, pages: 3, pageSize: 50, total: 120, timezone: 'UTC', user: { username: 'x', avatar: null } }, T);
   check(
     'logsParts: pager in the live region keeps level, tag and page; range in the sub text',
-    lp['live-logs']!.includes('<a class="pager-btn" href="/dashboard/logs?level=warn&amp;tag=web%26x#h-logs">Previous</a>') && lp['live-logs']!.includes('href="/dashboard/logs?level=warn&amp;tag=web%26x&amp;page=3#h-logs">Next</a>') && lp['live-logs']!.includes('Page 2 of 3') && lp['live-logcount'] === '51–51 of 120',
+    lp['live-logs']!.includes('<a class="pager-btn" href="/dashboard/logs?level=warn&amp;tag=web%26x&amp;size=50#h-logs">Previous</a>') && lp['live-logs']!.includes('href="/dashboard/logs?level=warn&amp;tag=web%26x&amp;page=3&amp;size=50#h-logs">Next</a>') && lp['live-logs']!.includes('Page 2 of 3') && lp['live-logcount'] === '51–51 of 120',
   );
+  check('logsParts: single page still shows the Showing summary', logsParts({ rows: [lrow], tags: [], level: 'all', tag: null, page: 1, pages: 1, pageSize: 50, total: 1, timezone: 'UTC', user: { username: 'x', avatar: null } }, T)['live-logs']!.includes('Showing 1–1 of 1'));
   check('logsPage: level tabs and tag form carry no page param', !logsPage({ rows: [lrow], tags: ['web'], level: 'warn', tag: 'web', page: 2, pages: 3, pageSize: 50, total: 120, timezone: 'UTC', user: { username: 'x', avatar: null } }, T).match(/<nav class="seg"[^]*?<\/nav>/)![0].includes('page='));
 
   // pager helper
@@ -1067,10 +1071,10 @@ rmSync(dir, { recursive: true, force: true });
   const fav = faviconSvg();
   check(
     'faviconSvg: standalone svg, cloud glyph on a royal-blue tile, no script or external refs; same mark in the shell',
-    fav.startsWith('<svg xmlns="http://www.w3.org/2000/svg"') && fav.endsWith('</svg>') && fav.includes('viewBox="0 0 32 32"') && fav.includes('<rect width="32" height="32" rx="8" fill="#2b5ce6"/>') && (fav.match(/<circle /g) ?? []).length >= 3 && !fav.includes('crispEdges') && !/<script|href=|https?:\/\/(?!www\.w3\.org)/.test(fav) && fav === faviconSvg() && ovHtml.includes('<svg class="mark" width="28" height="28" viewBox="0 0 32 32"'),
+    fav.startsWith('<svg xmlns="http://www.w3.org/2000/svg"') && fav.endsWith('</svg>') && fav.includes('viewBox="0 0 32 32"') && fav.includes('<rect width="32" height="32" rx="8" fill="#2b5ce6"/>') && (fav.match(/<circle /g) ?? []).length >= 3 && !fav.includes('crispEdges') && !/<script|href=|https?:\/\/(?!www\.w3\.org)/.test(fav) && fav === faviconSvg() && ovHtml.includes('<img class="mark" src="/bot-avatar" width="28" height="28" alt="">'),
   );
   const loginHtml = loginPage('https://discord.com/oauth2/authorize?a=1&b="2"');
-  check('loginPage / errorPage: auth card on the cloud background, escaped, no chrome or polling', loginHtml.includes('class="sky"') && loginHtml.includes(CLOUDS_URL) && loginHtml.includes('viewBox="0 0 32 32"') && loginHtml.includes('href="https://discord.com/oauth2/authorize?a=1&amp;b=&quot;2&quot;"') && !loginHtml.includes('class="chrome"') && !loginHtml.includes(LIVE_SCRIPT) && errorPage('no <b>').includes('no &lt;b&gt;') && errorPage('x').includes('href="/login"'));
+  check('loginPage / errorPage: auth card on the cloud background, escaped, no chrome or polling', loginHtml.includes('class="sky"') && loginHtml.includes(CLOUDS_URL) && loginHtml.includes('<img class="mark" src="/bot-avatar" width="56" height="56" alt="">') && loginHtml.includes('href="https://discord.com/oauth2/authorize?a=1&amp;b=&quot;2&quot;"') && !loginHtml.includes('class="chrome"') && !loginHtml.includes(LIVE_SCRIPT) && errorPage('no <b>').includes('no &lt;b&gt;') && errorPage('x').includes('href="/login"'));
   check('LIVE_SCRIPT: polls the live endpoint, handles 401 and failures, safe to inline', LIVE_SCRIPT.includes("'/dashboard/live?'") && LIVE_SCRIPT.includes('15000') && LIVE_SCRIPT.includes('r.status===401') && LIVE_SCRIPT.includes('Reconnecting') && LIVE_SCRIPT.includes('Session expired') && LIVE_SCRIPT.includes('visibilitychange') && !LIVE_SCRIPT.includes('</script'));
 
   // ---- Dokploy deployment summary ----
@@ -1560,13 +1564,39 @@ rmSync(dir, { recursive: true, force: true });
   check('sessionParts: fetch error is shown instead of the timeline', sessionParts({ ...sdata, entries: [], error: 'agent <down>' })['live-session']!.includes('agent &lt;down&gt;'));
   const rhtml = requestsParts({ jobs: [job], totals: { jobs: 1, input: 100, output: 20, reasoning: 5, cacheRead: 300, cacheWrite: 0, costUsd: 0.5 }, chatTotals: { threads: 1, oneOffs: 0, input: 10, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [{ threadId: 'ct9', guildId: G, channelId: 'c', sessionId: 'ses_chat9', startedBy: 'u1', model: null, oneOff: false, tokensInput: 10, tokensOutput: 1, tokensReasoning: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0, createdAt: 1, lastActiveAt: 1 }], page: 1, pages: 1, pageSize: 20, chatPage: 1, chatPages: 1, chatPageSize: 20, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } });
   const requestsHtml = Object.values(rhtml).join('');
-  const rp = requestsParts({ jobs: [job], totals: { jobs: 45, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chatTotals: { threads: 40, oneOffs: 5, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [], page: 2, pages: 3, pageSize: 20, chatPage: 2, chatPages: 3, chatPageSize: 20, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } });
+  const rp = requestsParts({ jobs: [job], totals: { jobs: 45, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chatTotals: { threads: 40, oneOffs: 5, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [], page: 2, pages: 3, pageSize: 10, chatPage: 2, chatPages: 3, chatPageSize: 10, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } });
+  const rp2 = requestsParts({ jobs: [job], totals: { jobs: 450, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chatTotals: { threads: 400, oneOffs: 50, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [], page: 2, pages: 9, pageSize: 50, chatPage: 3, chatPages: 5, chatPageSize: 100, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } });
+  check(
+    'requestsParts: size dropdowns keep the other list page+size and reset their own page',
+    rp2['live-reqs']!.includes('href="/dashboard/requests?page=3&amp;size=50&amp;chatPage=3&amp;chatSize=100#h-req">Next</a>') &&
+      rp2['live-reqs']!.includes('<option value="/dashboard/requests?size=20&amp;chatPage=3&amp;chatSize=100#h-req">20 rows</option>') &&
+      rp2['live-reqs']!.includes('<option value="/dashboard/requests?size=50&amp;chatPage=3&amp;chatSize=100#h-req" selected>50 rows</option>') &&
+      rp2['live-chats']!.includes('<option value="/dashboard/requests?page=2&amp;size=50#h-chat">10 rows</option>') &&
+      rp2['live-chats']!.includes('<option value="/dashboard/requests?page=2&amp;size=50&amp;chatSize=100#h-chat" selected>100 rows</option>'),
+  );
+  check('logsHref: keeps level/tag/size, omits defaults', logsHref('all', null) === '/dashboard/logs' && logsHref('warn', 'a b', 1, 50) === '/dashboard/logs?level=warn&tag=a+b&size=50' && logsHref('all', null, 3, 20) === '/dashboard/logs?page=3&size=20' && logsHref('error', null, 2) === '/dashboard/logs?level=error&page=2');
+  const lp = logsParts({ rows: [], tags: [], level: 'warn', tag: 't', page: 2, pages: 4, pageSize: 20, total: 70, timezone: 'UTC', user: { username: 'x', avatar: null } })['live-logs']!;
+  check(
+    'logsParts: pager links and size dropdown keep filters and size',
+    lp.includes('href="/dashboard/logs?level=warn&amp;tag=t&amp;size=20#h-logs">Previous</a>') && lp.includes('href="/dashboard/logs?level=warn&amp;tag=t&amp;page=3&amp;size=20#h-logs">Next</a>') &&
+      lp.includes('<option value="/dashboard/logs?level=warn&amp;tag=t#h-logs">10 rows</option>') && lp.includes('<option value="/dashboard/logs?level=warn&amp;tag=t&amp;size=20#h-logs" selected>20 rows</option>'),
+  );
+  check(
+    'parsePageSize: valid sizes pass, junk and missing fall back to 10',
+    [10, 20, 50, 100].every((n) => parsePageSize(String(n)) === n) && parsePageSize(undefined) === 10 && parsePageSize('') === 10 && parsePageSize('abc') === 10 && parsePageSize('15') === 10 && parsePageSize('1000') === 10 && parsePageSize('-20') === 10 && parsePageSize('20x') === 10 && parsePageSize('0') === 10,
+  );
+  const psz = pagerHtml({ page: 1, pages: 1, summary: 'S', href: () => '/', label: 'L', showSingle: true, size: { current: 50, href: (n) => `/x?a=1&size=${n}` } });
+  check(
+    'pagerHtml size: four options, current selected, hrefs escaped, shown on a single page',
+    (psz.match(/<option /g) ?? []).length === 4 && psz.includes('aria-label="Rows per page"') && psz.includes('<option value="/x?a=1&amp;size=50" selected>50 rows</option>') && (psz.match(/ selected>/g) ?? []).length === 1 && psz.includes('<option value="/x?a=1&amp;size=100">100 rows</option>') && !psz.includes('pager-nav') &&
+      !pagerHtml({ page: 1, pages: 1, summary: 'S', href: () => '/', label: 'L', size: { current: 10, href: () => '/' } }).includes('<select'),
+  );
   check(
     'requestsParts: both pagers keep the other param and anchor to their card',
     rp['live-reqs']!.includes('href="/dashboard/requests?chatPage=2#h-req">Previous</a>') && rp['live-reqs']!.includes('href="/dashboard/requests?page=3&amp;chatPage=2#h-req">Next</a>') &&
       rp['live-chats']!.includes('href="/dashboard/requests?page=2#h-chat">Previous</a>') && rp['live-chats']!.includes('href="/dashboard/requests?page=2&amp;chatPage=3#h-chat">Next</a>') && rp['live-chats']!.includes('45 total') && !rp['live-chats']!.includes('most recently active'),
   );
-  check('requestsParts: single-page lists have no pager', !requestsHtml.includes('pager-nav'));
+  check('requestsParts: single-page lists show only the Showing summary, no nav', !requestsHtml.includes('pager-nav') && requestsHtml.includes('Showing 1–1 of 1') && !requestsHtml.includes(' requests</p>') && !requestsHtml.includes(' chats</p>'));
   const tl = (ids: string[], extra: Partial<SessionPageData> = {}): string => sessionParts({ ...sdata, entries: normalizeTranscript(ids.map((id, i) => ({ id, type: 'user', text: `T-${id}`, time: { created: i } }))).reverse(), ...extra })['live-session']!;
   const newestFirst = tl(['b', 'a']);
   check('sessionParts: entries render in the given (newest first) order, sub text says newest first', newestFirst.indexOf('T-a') < newestFirst.indexOf('T-b') && newestFirst.includes('newest first') && !newestFirst.includes('oldest first'));
