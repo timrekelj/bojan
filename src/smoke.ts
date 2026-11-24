@@ -10,13 +10,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase, clampLimitThreshold, type WebSessionRow } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
-import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, steamLevelColors, steamLevelShape, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
+import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, STEAM_LEVEL_OUTLINES, STEAM_LEVEL_SHAPES, steamLevelColors, steamLevelOutline, steamLevelShape, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, levelBadge, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -154,6 +154,31 @@ check(
     steamLevelShape(5000) === 'bevel' &&
     steamLevelShape(-5) === 'circle',
   `${steamLevelShape(0)} ${steamLevelShape(100)} ${steamLevelShape(200)} ${steamLevelShape(5000)}`,
+);
+check(
+  'steam level badge outlines cover every shape',
+  STEAM_LEVEL_SHAPES.every((s) => !!STEAM_LEVEL_OUTLINES[s]) &&
+    steamLevelOutline(0).tag === 'circle' &&
+    steamLevelOutline(200).tag === 'rect' &&
+    steamLevelOutline(100).tag === 'polygon' &&
+    steamLevelOutline(-5).tag === 'circle',
+  JSON.stringify(steamLevelOutline(100)),
+);
+const badgeMarkup = levelBadge(69);
+check(
+  'level badge is a hollow SVG outline',
+  badgeMarkup.startsWith('<svg class="levelbadge" viewBox="0 0 52 52"') &&
+    badgeMarkup.includes('fill="none"') &&
+    badgeMarkup.includes('stroke="currentColor"') &&
+    badgeMarkup.includes('stroke-width="3"') &&
+    !badgeMarkup.includes('linear-gradient') &&
+    !badgeMarkup.includes('radial-gradient'),
+  badgeMarkup,
+);
+check(
+  'level badge shrinks the font for long level numbers',
+  levelBadge(1050).includes('data-len="4"') && levelBadge(1050).includes('font-size="12"'),
+  levelBadge(1050),
 );
 const x1 = awardMessageXp(db, G, 'gamer', now);
 check('first message earns 5-10 xp', x1 !== null && x1.xpGained >= 5 && x1.xpGained <= 10 && x1.xp === x1.xpGained && x1.newLevel === 0 && !x1.leveledUp, JSON.stringify(x1));
@@ -900,7 +925,7 @@ rmSync(dir, { recursive: true, force: true });
   check(
     'youSection: level row with role-colored rounded progress bar',
     youLvl.includes('<div class="levelrow">') &&
-      youLvl.includes('class="levelbadge" data-shape="circle" data-len="2" role="img" aria-label="Level 69"') &&
+      youLvl.includes('class="levelbadge" viewBox="0 0 52 52" data-shape="circle" data-len="2" role="img" aria-label="Level 69"') &&
       youLvl.includes('--lv-from:#7d5fb8;--lv-to:#4f3a86') &&
       youLvl.includes('<span class="levelcap">Level</span>') &&
       youLvl.includes('500 / 7,000 XP') &&
@@ -933,7 +958,7 @@ rmSync(dir, { recursive: true, force: true });
   );
   check(
     'youSection: 100+ wraps the palette and gets a hex badge with a three-digit layout',
-    youMax.includes('class="levelbadge" data-shape="hex" data-len="3"') &&
+    youMax.includes('class="levelbadge" viewBox="0 0 52 52" data-shape="hex" data-len="3"') &&
       youMax.includes('aria-label="Level 100"') &&
       youMax.includes('--lv-to:#565c66'),
   );
