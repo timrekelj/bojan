@@ -47,6 +47,17 @@ export function levelProgress(xp: number): LevelProgress {
   return { level, intoLevel: xp - totalXpForLevel(level), needed: nextLevelXp - xp, nextLevelXp };
 }
 
+/**
+ * Compact level + progress tag for stat displays, e.g. "lvl 12 · 450/700":
+ * XP earned within the current level (restarts at 0 on level-up) over the
+ * full cost of the next level. `null` when the member has no XP row at all.
+ */
+export function levelTag(xp: number | null): string | null {
+  if (xp === null) return null;
+  const { level, intoLevel, needed } = levelProgress(xp);
+  return `lvl ${level} · ${fmt(intoLevel)}/${fmt(intoLevel + needed)}`;
+}
+
 export interface XpAwardResult {
   /** XP gained from this message (5–10). */
   xpGained: number;

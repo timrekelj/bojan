@@ -1,4 +1,5 @@
 import type { UserRow } from './db.js';
+import { levelTag } from './levels.js';
 
 // ---- timezone helpers ---------------------------------------------------
 
@@ -134,13 +135,14 @@ export function daySeries(week: WeekBounds, timeZone: string): { key: string; la
   return out;
 }
 
-/** Leaderboard lines, e.g. "**1.** <@123> — **1,234** (35.5%)". */
-export function leaderboardLines(rows: UserRow[], total: number): string[] {
+/** Leaderboard lines, e.g. "**1.** <@123> — **1,234** (35.5%) · lvl 12 · 450/700". */
+export function leaderboardLines(rows: UserRow[], total: number, xpByUser?: Record<string, number>): string[] {
   if (rows.length === 0) return ['No messages recorded yet.'];
   const medals = ['🥇', '🥈', '🥉'];
   return rows.map((r, i) => {
     const medal = medals[i] ?? `**${i + 1}.**`;
     const share = total > 0 ? ` (${((r.messages / total) * 100).toFixed(1)}%)` : '';
-    return `${medal} <@${r.userId}> — **${fmt(r.messages)}**${share}`;
+    const tag = levelTag(xpByUser?.[r.userId] ?? null);
+    return `${medal} <@${r.userId}> — **${fmt(r.messages)}**${share}${tag ? ` · ${tag}` : ''}`;
   });
 }

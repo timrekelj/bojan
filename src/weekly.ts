@@ -25,6 +25,8 @@ export interface WeeklyStatsData {
   activeMembers: number;
   total: number;
   topMessagers: UserRow[];
+  /** Total XP per member, for level tags on the top-messager lines. */
+  xpByUser?: Record<string, number>;
   topChannels: ChannelRow[];
   topGiven: ReactionCountRow[];
   topReceived: ReactionCountRow[];
@@ -72,7 +74,7 @@ export function buildWeeklyStatsMessage(data: WeeklyStatsData) {
   container
     .addSeparatorComponents(divider())
     .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(['### 🏆 Top messagers', ...leaderboardLines(data.topMessagers, data.weekTotal).slice(0, 5)].join('\n')),
+      new TextDisplayBuilder().setContent(['### 🏆 Top messagers', ...leaderboardLines(data.topMessagers, data.weekTotal, data.xpByUser).slice(0, 5)].join('\n')),
     )
     .addSeparatorComponents(divider())
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### 💬 Most used channels\n${channels}`))

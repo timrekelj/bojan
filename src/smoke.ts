@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
-import { awardMessageXp, buildLevelUpMessage, levelFromXp, levelProgress, levelUpText, rollXp, totalXpForLevel, XP_COOLDOWN_MS } from './levels.js';
+import { awardMessageXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, rollXp, totalXpForLevel, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
@@ -80,6 +80,14 @@ check('leaderboard order', top[0]?.userId === 'alice' && top[0]?.messages === 10
 const ua = db.userStats(G, 'alice');
 check('user stats', ua.messages === 10 && ua.firstTs !== null && ua.lastTs !== null);
 check('leaderboard lines', leaderboardLines(top, 19)[0]?.includes('<@alice>') ?? false);
+const lbTagged = leaderboardLines(top, 19, { alice: 650, bob: 242_000 });
+const bobLine = lbTagged.find((l) => l.includes('<@bob>'));
+const cathyLine = lbTagged.find((l) => l.includes('<@cathy>'));
+check(
+  'leaderboard lines carry level tags',
+  (lbTagged[0]?.includes('lvl 3 · 50/400') ?? false) && (bobLine?.includes('lvl 69 · 500/7,000') ?? false) && !(cathyLine?.includes('lvl') ?? false),
+  JSON.stringify(lbTagged.slice(0, 3)),
+);
 
 const s = db.getSettings(G);
 check('default settings', s.weeklyEnabled && s.weeklyDay === 1 && s.weeklyHour === 9 && s.timezone === 'UTC' && s.embedChannels.length === 0);
@@ -105,6 +113,16 @@ check('each level costs more xp than the previous', levelCostsGrow);
 check('xp roll bounds', rollXp(() => 0) === 5 && rollXp(() => 0.999999) === 10);
 const prog = levelProgress(650);
 check('level progress', prog.level === 3 && prog.intoLevel === 50 && prog.needed === 350 && prog.nextLevelXp === 1000, JSON.stringify(prog));
+check(
+  'level tag',
+  levelTag(null) === null &&
+    levelTag(0) === 'lvl 0 · 0/100' &&
+    levelTag(100) === 'lvl 1 · 0/200' &&
+    levelTag(600) === 'lvl 3 · 0/400' && // exactly at a level boundary: progress restarts from 0
+    levelTag(650) === 'lvl 3 · 50/400' &&
+    levelTag(242_000) === 'lvl 69 · 500/7,000',
+  `${levelTag(242_000)}`,
+);
 const x1 = awardMessageXp(db, G, 'gamer', now);
 check('first message earns 5-10 xp', x1 !== null && x1.xpGained >= 5 && x1.xpGained <= 10 && x1.xp === x1.xpGained && x1.newLevel === 0 && !x1.leveledUp, JSON.stringify(x1));
 check('no xp row for a stranger', db.getUserXp(G, 'stranger') === null);
@@ -117,6 +135,12 @@ const up = awardMessageXp(db, G, 'speedrunner', now + XP_COOLDOWN_MS + 6_000);
 check('level-up detected at the crossing', up !== null && up.leveledUp && up.newLevel === 1 && up.xp >= 100 && up.xp <= 105, JSON.stringify(up));
 const up2 = awardMessageXp(db, G, 'speedrunner', now + 2 * XP_COOLDOWN_MS + 7_000);
 check('no level-up without a crossing', up2 !== null && !up2.leveledUp && up2.newLevel === 1, JSON.stringify(up2));
+const xpTotals = db.getUserXpTotals(G);
+check(
+  'xp totals map matches per-user rows',
+  xpTotals.gamer === db.getUserXp(G, 'gamer')?.xp && xpTotals.speedrunner === db.getUserXp(G, 'speedrunner')?.xp && xpTotals.stranger === undefined && Object.keys(xpTotals).length === 2,
+  JSON.stringify(xpTotals),
+);
 db.saveSettings({ ...s2, levelingEnabled: false, levelupChannelId: 'chan-lvl' });
 const s4 = db.getSettings(G);
 check('leveling settings roundtrip', s4.levelingEnabled === false && s4.levelupChannelId === 'chan-lvl');
@@ -205,6 +229,12 @@ const weeklyEmpty = buildWeeklyStatsMessage({
   topMessagers: [], topChannels: [], topGiven: [], topReceived: [], perDay: [],
 });
 check('weekly empty data', JSON.stringify(weeklyEmpty.components[0]?.toJSON()).includes('—'));
+const weeklyLvl = buildWeeklyStatsMessage({
+  week: lwk, timeZone: 'UTC', weekTotal: 5, weekReactions: 0, activeMembers: 1, total: 5,
+  topMessagers: [{ userId: 'alice', messages: 5 }], xpByUser: { alice: 650, bob: 100 },
+  topChannels: [], topGiven: [], topReceived: [], perDay: [],
+});
+check('weekly shows level tags', JSON.stringify(weeklyLvl.components.map((c) => c.toJSON())).includes('lvl 3 · 50/400'));
 
 // Leaderboard + activity cards (Components V2)
 function textLength(json: unknown): number {
@@ -222,21 +252,29 @@ function textLength(json: unknown): number {
 }
 const lb = buildLeaderboardMessage({
   totalMessages: 21, totalReactions: 5, topUsers: db.topUsers(G, 10), topGiven: givenAll, topReceived: receivedAll,
+  xpByUser: { alice: 650, bob: 242_000 },
   guildIconUrl: 'https://example.com/icon.png',
 });
 const lbJson = lb.components.map((c) => c.toJSON());
 check('leaderboard is V2 with one container, no pings', (lb.flags & MessageFlags.IsComponentsV2) !== 0 && lb.components.length === 1 && lbJson[0]?.type === 17 && lb.allowedMentions.parse.length === 0 && !('embeds' in lb));
+const lbJsonStr = JSON.stringify(lbJson);
+check('leaderboard tags messages and reaction rows', lbJsonStr.includes('lvl 3 · 50/400') && lbJsonStr.includes('lvl 69 · 500/7,000'));
 const bigUsers = Array.from({ length: 50 }, (_, i) => ({ userId: `${'1'.repeat(18)}${i}`, messages: 100000 - i, firstTs: 0, lastTs: 0 })) as unknown as ReturnType<typeof db.topUsers>;
 const bigReactions = Array.from({ length: 50 }, (_, i) => ({ userId: `${'2'.repeat(18)}${i}`, count: 90000 - i }));
 const lbBig = buildLeaderboardMessage({ limit: 50, totalMessages: 9_999_999, totalReactions: 999_999, topUsers: bigUsers, topGiven: bigReactions, topReceived: bigReactions });
 const lbBigLen = textLength(lbBig.components.map((c) => c.toJSON()));
 check('leaderboard with 50 rows stays under 4000 chars', lbBigLen < 4000 && lbBigLen > 500, `${lbBigLen} chars`);
+const bigXp = Object.fromEntries(bigUsers.map((u) => [u.userId, 242_000]));
+const lbBigLvl = buildLeaderboardMessage({ limit: 50, totalMessages: 9_999_999, totalReactions: 999_999, topUsers: bigUsers, topGiven: bigReactions, topReceived: bigReactions, xpByUser: bigXp });
+const lbBigLvlLen = textLength(lbBigLvl.components.map((c) => c.toJSON()));
+check('leaderboard with 50 rows and level tags still fits the budget', lbBigLvlLen < 4000 && lbBigLvlLen > 500, `${lbBigLvlLen} chars`);
 
 const actNow = Date.now();
 const actDayStart = actNow - 6 * D;
 const actDays = daySeries({ start: actDayStart, end: actNow, key: '' }, 'UTC');
 const act = buildActivityMessage({
   name: 'League of Legends', username: 'alice', avatarUrl: 'https://example.com/a.png', timeZone: 'UTC',
+  xp: 650,
   summary: { name: 'League of Legends', sessions: 42, totalMs: 723 * 60_000, avgMs: 17 * 60_000, firstAt: actNow - 30 * D, lastAt: actNow - H },
   breakdown: [{ label: 'Ranked', sessions: 10, totalMs: 300 * 60_000 }],
   recent: [{ startedAt: actNow - 2 * H, endedAt: actNow - H, durationMs: H, details: 'Ranked Solo', state: null, open: 0 }],
@@ -248,12 +286,14 @@ const actFile = act.files[0];
 writeFileSync('/tmp/bojan-activity-chart.png', (actFile as unknown as { attachment: Buffer }).attachment);
 check('activity is V2 with one container, no pings', (act.flags & MessageFlags.IsComponentsV2) !== 0 && act.components.length === 1 && actJson.includes('"type":17') && act.allowedMentions.parse.length === 0);
 check('activity references its chart attachment', actJson.includes('attachment://activity-chart.png') && actFile?.name === 'activity-chart.png');
+check('activity header shows the level tag', actJson.includes('lvl 3 · 50/400'));
 const actEmpty = buildActivityMessage({
   name: 'x', username: 'u', timeZone: 'UTC', summary: { name: 'x', sessions: 1, totalMs: 0, avgMs: 0, firstAt: null, lastAt: null },
   breakdown: [], recent: [], minutes: [], dayStart: actDayStart, now: actNow,
 });
 const actEmptyJson = JSON.stringify(actEmpty.components.map((c) => c.toJSON()));
 check('activity omits empty sections', !actEmptyJson.includes('Breakdown') && !actEmptyJson.includes('Recent sessions'));
+check('activity header has no level tag without xp', !actEmptyJson.includes('lvl '));
 const actBig = buildActivityMessage({
   name: 'x', username: 'u', timeZone: 'UTC', summary: { name: 'x', sessions: 1, totalMs: 0, avgMs: 0, firstAt: null, lastAt: null },
   breakdown: Array.from({ length: 50 }, (_, i) => ({ label: `L${i} ${'y'.repeat(100)}`, sessions: 1, totalMs: 1000 })),
@@ -611,11 +651,30 @@ rmSync(dir, { recursive: true, force: true });
   const noYou = leaderboard(rows, 16, mem, { userId: 'u9', rank: null });
   check('leaderboard: no extra row when user has no messages; no highlight', !noYou.includes('you') && (noYou.match(/<li/g) ?? []).length === 3 && !leaderboard(rows, 16, mem).includes('aria-current'));
   check('leaderboard: names escaped', inTop.includes('One &lt;b&gt;') && !inTop.includes('One <b>'));
+  const lvlTop = leaderboard(rows, 16, mem, { userId: 'u9', rank: { rank: 42, messages: 3 } }, { u1: 650, u9: 242_000 });
+  check(
+    'leaderboard: level tags next to names, including the extra row',
+    lvlTop.includes('<span class="nm">One &lt;b&gt;</span><span class="lvl">lvl 3 · 50/400</span>') &&
+      lvlTop.includes('<span class="nm">Nine</span><span class="lvl">lvl 69 · 500/7,000</span>') &&
+      (lvlTop.match(/class="lvl"/g) ?? []).length === 2,
+  );
   const emptyYou = youSection(
-    { allRank: null, weekRank: null, stats: { userId: 'u9', messages: 0, firstTs: null, lastTs: null }, reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null },
+    { allRank: null, weekRank: null, xp: null, stats: { userId: 'u9', messages: 0, firstTs: null, lastTs: null }, reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null },
     { total: 10, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check('youSection: empty state', emptyYou.includes('id="h-you"') && emptyYou.includes('No tracked activity'));
+  const youLvl = youSection(
+    {
+      allRank: { rank: 3, messages: 7 }, weekRank: null, xp: 242_000,
+      stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
+      reactions: { given: 2, received: 1 }, voice: { totalMs: 60_000, sessions: 1 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
+    },
+    { total: 100, timezone: 'UTC', channelNames: {}, username: 'Nine' },
+  );
+  check(
+    'youSection: level + progress KPI below the message stats',
+    youLvl.includes('<b>lvl 69 · 500/7,000</b>') && youLvl.indexOf('Level') > youLvl.indexOf('Messages, all time') && youLvl.indexOf('Level') < youLvl.indexOf('Reactions given') && !emptyYou.includes('<b>lvl'),
+  );
 }
 
 // ---- self-building (builder) ---------------------------------------------

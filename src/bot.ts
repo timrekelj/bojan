@@ -19,7 +19,7 @@ import { config } from './config.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
-import { awardMessageXp, buildLevelUpMessage, levelProgress } from './levels.js';
+import { awardMessageXp, buildLevelUpMessage, levelProgress, levelTag } from './levels.js';
 import { handleBuilderMessage } from './builder/handler.js';
 import type { BuilderRunner } from './builder/runner.js';
 
@@ -89,6 +89,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
         topUsers: db.topUsers(guildId, limit),
         topGiven: db.topReactionsGiven(guildId, limit),
         topReceived: db.topReactionsReceived(guildId, limit),
+        xpByUser: db.getUserXpTotals(guildId),
         guildIconUrl: interaction.guild?.iconURL({ size: 128 }) ?? null,
       }),
     );
@@ -108,12 +109,14 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const voice = db.voiceStats(guildId, user.id);
     const inVoiceNow = db.currentVoiceChannel(guildId, user.id);
     const topVoiceChannels = db.topVoiceChannels(guildId, user.id, 3);
+    const lvlTag = levelTag(db.getUserXp(guildId, user.id)?.xp ?? null);
 
     const embed = new EmbedBuilder()
       .setTitle(`Stats for ${user.username}`)
       .setThumbnail(user.displayAvatarURL({ size: 128 }))
       .addFields(
         { name: 'All-time messages', value: `**${fmt(stats.messages)}**${total > 0 ? ` (${((stats.messages / total) * 100).toFixed(1)}% of server)` : ''}`, inline: true },
+        { name: 'Level', value: lvlTag ? `**${lvlTag}**` : 'No XP yet', inline: true },
         { name: 'Reactions given', value: `**${fmt(reactions.given)}**`, inline: true },
         { name: 'Reactions received', value: `**${fmt(reactions.received)}**`, inline: true },
         { name: 'Last message seen', value: fmtDate(stats.lastTs, settings.timezone), inline: true },
@@ -181,6 +184,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
         username: user.username,
         avatarUrl: user.displayAvatarURL({ size: 128 }),
         timeZone: tz,
+        xp: db.getUserXp(guildId, user.id)?.xp ?? null,
         summary,
         breakdown,
         recent,

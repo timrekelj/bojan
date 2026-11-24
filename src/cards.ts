@@ -11,6 +11,7 @@ import {
 import { renderDailyChart } from './chart.js';
 import type { ActivityBreakdownRow, ActivitySessionRow, ActivitySummaryRow, DayCount, ReactionCountRow, UserRow } from './db.js';
 import { fmt, fmtDate, fmtDuration, leaderboardLines, daySeries } from './stats.js';
+import { levelTag } from './levels.js';
 import { BLURPLE, divider } from './weekly.js';
 
 export const ACTIVITY_CHART_NAME = 'activity-chart.png';
@@ -63,17 +64,23 @@ export interface LeaderboardData {
   topUsers: UserRow[];
   topGiven: ReactionCountRow[];
   topReceived: ReactionCountRow[];
+  /** Total XP per member, for level tags next to each user. */
+  xpByUser?: Record<string, number>;
   guildIconUrl?: string | null;
 }
 
 export function buildLeaderboardMessage(data: LeaderboardData) {
   const medal = (i: number): string => ['🥇', '🥈', '🥉'][i] ?? `${i + 1}.`;
   const share = (count: number): string => (data.totalReactions > 0 ? ` (${((count / data.totalReactions) * 100).toFixed(1)}%)` : '');
-  const reactionLines = (rows: ReactionCountRow[]): string[] => rows.map((r, i) => `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**${share(r.count)}`);
+  const reactionLines = (rows: ReactionCountRow[]): string[] =>
+    rows.map((r, i) => {
+      const tag = levelTag(data.xpByUser?.[r.userId] ?? null);
+      return `${medal(i)} <@${r.userId}> — **${fmt(r.count)}**${share(r.count)}${tag ? ` · ${tag}` : ''}`;
+    });
 
   const header = ['## 🏆 Leaderboard', '-# All time'].join('\n');
   const sections: Section[] = [
-    { heading: '💬 Messages', note: `${fmt(data.totalMessages)} total`, lines: leaderboardLines(data.topUsers, data.totalMessages) },
+    { heading: '💬 Messages', note: `${fmt(data.totalMessages)} total`, lines: leaderboardLines(data.topUsers, data.totalMessages, data.xpByUser) },
     { heading: '😄 Reactions given', note: `${fmt(data.totalReactions)} total`, lines: reactionLines(data.topGiven) },
     { heading: '😍 Reactions received', lines: reactionLines(data.topReceived) },
   ];
@@ -94,6 +101,8 @@ export interface ActivityData {
   username: string;
   avatarUrl?: string | null;
   timeZone: string;
+  /** Total XP of the member, for a level tag in the header. */
+  xp?: number | null;
   summary: ActivitySummaryRow;
   breakdown: ActivityBreakdownRow[];
   recent: ActivitySessionRow[];
@@ -105,9 +114,10 @@ export interface ActivityData {
 
 export function buildActivityMessage(data: ActivityData) {
   const { summary, timeZone: tz } = data;
+  const lvl = levelTag(data.xp ?? null);
   const header = [
     `## 📊 ${data.name}`,
-    `-# ${data.username}`,
+    `-# ${data.username}${lvl ? ` · ${lvl}` : ''}`,
     '',
     `**Total** ${fmtDuration(summary.totalMs)} · **Sessions** ${fmt(summary.sessions)} · **Avg** ${fmtDuration(summary.avgMs)}`,
     `-# First seen ${fmtDate(summary.firstAt, tz)} · Last seen ${fmtDate(summary.lastAt, tz)}`,

@@ -81,6 +81,7 @@ export async function postWeeklyStats(
       activeMembers: db.distinctActiveUsers(guild.id),
       total: db.countMessages(guild.id),
       topMessagers: db.topUsers(guild.id, 5, week.start, week.end),
+      xpByUser: db.getUserXpTotals(guild.id),
       topChannels: db.topChannels(guild.id, week.start, week.end, 5),
       topGiven: db.topReactionsGiven(guild.id, 3, week.start, week.end),
       topReceived: db.topReactionsReceived(guild.id, 3, week.start, week.end),

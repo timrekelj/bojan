@@ -276,6 +276,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const you: DashboardData['you'] = {
       allRank: db.userRank(config.guildId, session.userId),
       weekRank: db.userRank(config.guildId, session.userId, week.start, week.end),
+      xp: db.getUserXp(config.guildId, session.userId)?.xp ?? null,
       stats: db.userStats(config.guildId, session.userId),
       reactions: db.reactionStats(config.guildId, session.userId),
       voice: db.voiceStats(config.guildId, session.userId),
@@ -315,6 +316,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: EMBEDS_PAGE_SIZE },
         members,
         channelNames,
+        xpByUser: db.getUserXpTotals(config.guildId),
         user: { id: session.userId, username: session.username, avatar: session.avatar },
         saved: c.req.query('saved') === '1',
         weeklyFlash:
