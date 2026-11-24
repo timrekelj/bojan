@@ -341,6 +341,8 @@ export interface BuilderSettings {
   chatEnabled: boolean;
   /** Chat model, "providerID/modelID". */
   chatModel: string;
+  /** Languages the chat assistant must reply in; empty = no constraint (any language). */
+  chatLanguages: string[];
 }
 
 export const DEFAULT_BUILDER_MODEL = 'opencode-go/glm-5.3';
@@ -369,6 +371,18 @@ function parseNotes(raw: string): string[] {
   try {
     const v: unknown = JSON.parse(raw);
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Chat languages are stored as a JSON string array in bot_state; missing or invalid state = no constraint. */
+function parseChatLanguages(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (!Array.isArray(v)) return [];
+    return v.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter((x) => x.length > 0);
   } catch {
     return [];
   }
@@ -1102,6 +1116,7 @@ export class BotDatabase {
       model: model && model.length > 0 ? model : DEFAULT_BUILDER_MODEL,
       chatEnabled: this.getState('chat:enabled') === '1',
       chatModel: chatModel && chatModel.length > 0 ? chatModel : DEFAULT_CHAT_MODEL,
+      chatLanguages: parseChatLanguages(this.getState('chat:languages')),
     };
   }
 
@@ -1110,6 +1125,7 @@ export class BotDatabase {
     this.setState('builder:model', s.model.trim().length > 0 ? s.model.trim() : DEFAULT_BUILDER_MODEL);
     this.setState('chat:enabled', s.chatEnabled ? '1' : '0');
     this.setState('chat:model', s.chatModel.trim().length > 0 ? s.chatModel.trim() : DEFAULT_CHAT_MODEL);
+    this.setState('chat:languages', JSON.stringify(s.chatLanguages));
   }
 
   createBuildJob(j: { guildId: string; threadId: string; channelId: string; requesterId: string; request: string }, now = Date.now()): BuildJob {
