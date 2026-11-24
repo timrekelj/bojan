@@ -9,8 +9,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   channel, user, timestamp), and every reaction is recorded with both sides:
   the message author (reactions *received*) and the reactor (reactions
   *given*), plus the emoji. Tables: `messages`, `reactions`, `settings`,
-  `embed_log`, `bot_state`, `activity_sessions`, `voice_sessions`. Reactions
-  can also be backfilled with `/backfill`.
+  `embed_log`, `bot_state`, `activity_sessions`, `voice_sessions`,
+  `user_xp`. Reactions can also be backfilled with `/backfill`.
 - **Presence / activity tracking** — with the privileged **Presence Intent**
   enabled, the bot records what members are playing/listening to/watching
   (e.g. "Playing World of Warcraft") as sessions in the `activity_sessions`
@@ -26,6 +26,13 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   table (start, end, channel), including members already in voice when the bot
   starts (counted from startup). `/stats` shows total time in voice, "in voice
   now" and the member's top voice channels.
+- **MEE6-style leveling** — every eligible (non-bot, non-webhook) message
+  earns a random 5–10 XP, at most once every 30 seconds per member; the total
+  is stored permanently in the `user_xp` table. Each level needs more XP
+  than the last (level 1 at 100 XP, 2 at 300, 3 at 600, …), and on a
+  level-up the bot posts a Components V2 card (no ping) to the configured
+  channel. On by default; the channel is picked in the **dashboard**
+  (settings section) — until one is set, XP is tracked silently.
 - **Weekly stats message** — on a configurable day/hour (per guild timezone,
   weeks run Monday–Sunday) the bot posts last week's recap to a configured
   channel: total messages and reactions, top-5 messagers, top-5 channels,
@@ -72,7 +79,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   login**; only server administrators (or a configured admin role) get in.
   Shows bot status (ping, uptime, DB size), this-week and all-time
   leaderboards, recent embed conversions, and a settings form (stats channel,
-  weekly day/hour/timezone, embed-conversion channels), and a separate
+  weekly day/hour/timezone, embed-conversion channels, leveling on/off plus
+  its level-up channel), and a separate
   "Free games" section (announcement channel, ping role, stores, DLC / beta /
   mobile, status line). JSON API at
   `/api/stats.json` (includes `freeGames` settings).

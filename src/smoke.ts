@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
+import { awardMessageXp, buildLevelUpMessage, levelFromXp, levelProgress, levelUpText, rollXp, totalXpForLevel, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
@@ -84,6 +85,48 @@ check('default settings', s.weeklyEnabled && s.weeklyDay === 1 && s.weeklyHour =
 db.saveSettings({ ...s, statsChannelId: 'chan9', weeklyDay: 5, weeklyHour: 18, timezone: 'Europe/Ljubljana', embedChannels: ['c1', 'c2'] });
 const s2 = db.getSettings(G);
 check('settings roundtrip', s2.statsChannelId === 'chan9' && s2.weeklyDay === 5 && s2.weeklyHour === 18 && s2.timezone === 'Europe/Ljubljana' && s2.embedChannels.join() === 'c1,c2');
+check('default leveling settings', s.levelingEnabled && s.levelupChannelId === null);
+
+// ---- leveling (MEE6-style XP) ------------------------------------------
+check('level thresholds', totalXpForLevel(0) === 0 && totalXpForLevel(1) === 100 && totalXpForLevel(2) === 300 && totalXpForLevel(3) === 600);
+check('level from xp', levelFromXp(0) === 0 && levelFromXp(99) === 0 && levelFromXp(100) === 1 && levelFromXp(599) === 2 && levelFromXp(600) === 3);
+let levelRoundTrip = true;
+for (const xp of [0, 5, 99, 100, 101, 299, 300, 599, 600, 12345, 1_000_000, 10_000_000]) {
+  const l = levelFromXp(xp);
+  if (totalXpForLevel(l) > xp || totalXpForLevel(l + 1) <= xp) levelRoundTrip = false;
+}
+check('level/xp round trip', levelRoundTrip);
+let levelCostsGrow = true;
+for (let l = 1; l < 50; l++) {
+  if (totalXpForLevel(l + 1) - totalXpForLevel(l) <= totalXpForLevel(l) - totalXpForLevel(l - 1)) levelCostsGrow = false;
+}
+check('each level costs more xp than the previous', levelCostsGrow);
+check('xp roll bounds', rollXp(() => 0) === 5 && rollXp(() => 0.999999) === 10);
+const prog = levelProgress(650);
+check('level progress', prog.level === 3 && prog.intoLevel === 50 && prog.needed === 350 && prog.nextLevelXp === 1000, JSON.stringify(prog));
+const x1 = awardMessageXp(db, G, 'gamer', now);
+check('first message earns 5-10 xp', x1 !== null && x1.xpGained >= 5 && x1.xpGained <= 10 && x1.xp === x1.xpGained && x1.newLevel === 0 && !x1.leveledUp, JSON.stringify(x1));
+check('no xp row for a stranger', db.getUserXp(G, 'stranger') === null);
+check('cooldown blocks a second award', awardMessageXp(db, G, 'gamer', now + 5_000) === null);
+const x3 = awardMessageXp(db, G, 'gamer', now + XP_COOLDOWN_MS + 5_000);
+check('xp accrues after the cooldown', x3 !== null && x1 !== null && x3.xp === x1.xp + x3.xpGained && !x3.leveledUp, JSON.stringify({ x1, x3 }));
+// 95 xp is exactly one roll (5-10) short of level 1 (100 xp)
+db.addUserXp(G, 'speedrunner', 95, now);
+const up = awardMessageXp(db, G, 'speedrunner', now + XP_COOLDOWN_MS + 6_000);
+check('level-up detected at the crossing', up !== null && up.leveledUp && up.newLevel === 1 && up.xp >= 100 && up.xp <= 105, JSON.stringify(up));
+const up2 = awardMessageXp(db, G, 'speedrunner', now + 2 * XP_COOLDOWN_MS + 7_000);
+check('no level-up without a crossing', up2 !== null && !up2.leveledUp && up2.newLevel === 1, JSON.stringify(up2));
+db.saveSettings({ ...s2, levelingEnabled: false, levelupChannelId: 'chan-lvl' });
+const s4 = db.getSettings(G);
+check('leveling settings roundtrip', s4.levelingEnabled === false && s4.levelupChannelId === 'chan-lvl');
+const lvlData = { userId: 'u1', username: 'gamer', level: 3, xp: 650, nextLevelXp: 1000 };
+const lvlMsg = buildLevelUpMessage(lvlData);
+const lvlJson = JSON.stringify(lvlMsg.components.map((c) => c.toJSON()));
+check(
+  'level-up message is V2 with no pings',
+  (lvlMsg.flags & MessageFlags.IsComponentsV2) !== 0 && lvlMsg.components.length === 1 && lvlMsg.allowedMentions.parse.length === 0 && lvlJson.includes('<@u1>') && lvlJson.includes('level 3') && !('embeds' in lvlMsg),
+);
+check('level-up text fits the text budget', levelUpText(lvlData).length < 4000);
 
 db.logEmbed({ guildId: G, channelId: 'c1', messageId: 'm1', url: 'https://x.com/a/status/1', provider: 'x', ts: now });
 check('embed log', db.recentEmbeds(G, 10).length === 1 && db.recentEmbeds(G, 10)[0]?.provider === 'x');

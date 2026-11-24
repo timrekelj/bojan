@@ -414,6 +414,8 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       weeklyHour: num(form.weeklyHour, current.weeklyHour, 0, 23),
       timezone,
       embedChannels: Array.isArray(rawChannels) ? rawChannels.map(String) : rawChannels ? [String(rawChannels)] : [],
+      levelingEnabled: form.levelingEnabled === '1',
+      levelupChannelId: str(form.levelupChannel) || null,
     };
     db.saveSettings(next);
     console.log(`[web] settings updated by ${c.get('session').username}`);

@@ -8,6 +8,7 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 - `bot.ts`: client and intents, slash command definitions, per-guild registration, event handlers, `/backfill`.
 - `db.ts`: `BotDatabase`, the only SQL access (schema, migrations, queries, key/value `bot_state` table).
 - `stats.ts`: pure time/week/timezone math and leaderboard formatting.
+- `levels.ts`: MEE6-style leveling — pure XP roll/level math, `awardMessageXp` (30s per-user cooldown, `user_xp` table), Components V2 level-up card; toggle + channel in dashboard settings.
 - `weekly.ts` / `cards.ts`: Components V2 message builders (weekly stats; leaderboard and activity).
 - `chart.ts`: SVG-to-PNG daily chart (resvg uses system fonts; the Dockerfile installs DejaVu).
 - `scheduler.ts`: 30s tick that posts last week's stats once per week (`weekly:<guild>` state key).
