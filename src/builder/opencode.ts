@@ -263,6 +263,35 @@ export class OpenCodeAgent {
     };
   }
 
+  /**
+   * Ask a decision model one yes/no question about `inputText`. Returns the probability (0..1) that
+   * the predicate is true, or null when the model answered with an error / gave no usable answer.
+   */
+  async decide(
+    model: ModelRef,
+    inputText: string,
+    question: { name: string; instructions: string; criteria?: { true?: string; false?: string } },
+    timeoutMs = 15_000,
+  ): Promise<number | null> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await this.client.experimental.generate.decisions(
+        {
+          model: { providerID: model.providerID, id: model.id },
+          input: [{ type: 'text', text: inputText }],
+          questions: [{ type: 'predicate', name: question.name, instructions: question.instructions, criteria: question.criteria }],
+        },
+        { signal: ctrl.signal },
+      );
+      const answer = res.answers.find((a) => a.name === question.name);
+      if (!answer || answer.type !== 'predicate') return null;
+      return typeof answer.probability === 'number' ? answer.probability : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Queue a prompt, wait for the agent to stop, and return its final reply. */
   async promptAndWait(sessionID: string, text: string, timeoutMs: number): Promise<AgentReply> {
     const before = (await this.latestReply(sessionID)).id;

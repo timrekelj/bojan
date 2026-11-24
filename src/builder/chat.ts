@@ -1,15 +1,18 @@
 // General chat assistant: an @mention opens a thread backed by one OpenCode session (agent `chat`).
-// Every later message in the thread is forwarded to that session; the agent decides whether to reply
-// and whether the conversation is a feature request that should be handed to the build runner.
+// Every later message in the thread is first checked by a decision model (feature request or not): a
+// feature request goes straight to the build runner, anything else is forwarded to the chat session.
 import { PermissionFlagsBits, type Client, type Message, type SendableChannels } from 'discord.js';
 import { config } from '../config.js';
 import { ACTIVE_BUILD_STATUSES, type BotDatabase, type ChatThread } from '../db.js';
 import {
   chatThreadNameFor,
   chunkMessage,
+  FEATURE_REQUEST_QUESTION,
   formatChatMessage,
+  formatDecisionInput,
   formatInitialPrompt,
   formatTranscript,
+  isFeatureRequest,
   parseChatReply,
   replaceBotMention,
   withLanguageRule,
@@ -24,6 +27,7 @@ import type { BuilderRunner } from './runner.js';
 const DEBOUNCE_MS = 3_000;
 const CHAT_TIMEOUT_MS = 5 * 60_000;
 const TYPING_MS = 8_000;
+const DECISION_TIMEOUT_MS = 15_000;
 const NO_MENTIONS = { parse: [] as never[], repliedUser: false };
 
 export function isAdminMessage(message: Message): boolean {
@@ -261,13 +265,15 @@ export class ChatRunner {
     if (!chat) return;
     const stopTyping = this.typing(threadId);
     try {
+      // Feature requests never reach the chat agent; pending build notes stay for the next chat turn.
+      if (await this.detectFeatureRequest(threadId, batch)) {
+        await this.startFeatureRequest(threadId, batch);
+        return;
+      }
       const notes = this.db.pendingChatNotes(threadId);
       const prompt = withNotes(notes, withLanguageRule(batch.map((b) => b.text).join('\n'), this.chatLanguages()));
-      const reply = await this.getAgent().promptAndWait(chat.sessionId, prompt, CHAT_TIMEOUT_MS);
-      this.db.consumeChatNotes(threadId, notes.length);
-      await this.saveUsage(threadId, chat.sessionId, chat.model);
-      if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
-      await this.deliver(threadId, reply.text, batch);
+      const parsed = await this.askChat(threadId, chat.sessionId, chat.model, prompt, () => this.db.consumeChatNotes(threadId, notes.length));
+      if (parsed.reply) await this.say(threadId, parsed.visible);
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} turn failed:`, err);
       await this.say(threadId, 'Sorry, something went wrong on my side. Please try again in a bit.');
@@ -284,10 +290,12 @@ export class ChatRunner {
     try {
       const { sessionId, modelRef } = await this.newSession(key);
       this.db.createChatThread({ threadId: key, guildId: config.guildId, channelId: message.channel.isThread() ? (message.channel.parentId ?? threadId) : threadId, sessionId, startedBy: message.author.id, model: modelRef, oneOff: true });
-      const reply = await this.getAgent().promptAndWait(sessionId, withLanguageRule(pending.text, this.chatLanguages()), CHAT_TIMEOUT_MS);
-      await this.saveUsage(key, sessionId, modelRef);
-      if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
-      await this.deliver(threadId, reply.text, [pending]);
+      if (await this.detectFeatureRequest(threadId, [pending])) {
+        await this.startFeatureRequest(threadId, [pending]);
+        return;
+      }
+      const parsed = await this.askChat(key, sessionId, modelRef, withLanguageRule(pending.text, this.chatLanguages()));
+      if (parsed.reply) await this.say(threadId, parsed.visible);
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} one-off failed:`, err);
       await this.say(threadId, 'Sorry, something went wrong on my side. Please try again in a bit.');
@@ -296,20 +304,75 @@ export class ChatRunner {
     }
   }
 
-  /** Post the agent's reply and act on a feature request. */
-  private async deliver(threadId: string, text: string, batch: Pending[]): Promise<void> {
-    const parsed = parseChatReply(text);
-    if (parsed.reply) await this.say(threadId, parsed.visible);
-    if (!parsed.featureRequest) return;
-    // The requester is whoever mentioned the bot last in the batch (else the last author).
-    const requester = [...batch].reverse().find((b) => b.directed) ?? batch[batch.length - 1]!;
-    await this.handoff(threadId, requester, parsed.featureRequest);
+  /**
+   * Prompt the chat agent and parse its `{reply}` block. A reply without a valid block is never
+   * posted: the same session is asked once more, and if that still has no block nothing is posted.
+   */
+  private async askChat(chatKey: string, sessionId: string, modelRef: string | null, prompt: string, afterFirst?: () => void): Promise<ReturnType<typeof parseChatReply>> {
+    const agent = this.getAgent();
+    let reply = await agent.promptAndWait(sessionId, prompt, CHAT_TIMEOUT_MS);
+    afterFirst?.();
+    await this.saveUsage(chatKey, sessionId, modelRef);
+    if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
+    let parsed = parseChatReply(reply.text);
+    if (parsed.missingBlock) {
+      console.warn(`[chat] guild=${config.guildId} thread=${chatKey} reply had no json block, asking again`);
+      reply = await agent.promptAndWait(sessionId, 'Reply now with only your message to the thread, followed by the json block.', CHAT_TIMEOUT_MS);
+      await this.saveUsage(chatKey, sessionId, modelRef);
+      if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
+      parsed = parseChatReply(reply.text);
+      if (parsed.missingBlock) console.warn(`[chat] guild=${config.guildId} thread=${chatKey} still no json block, posting nothing`);
+    }
+    return parsed;
   }
 
-  private async handoff(threadId: string, requester: Pending, request: string): Promise<void> {
+  /** The requester is whoever mentioned the bot last in the batch (else the last author). */
+  private requesterOf(batch: Pending[]): Pending {
+    return [...batch].reverse().find((b) => b.directed) ?? batch[batch.length - 1]!;
+  }
+
+  /** Ask the decision model whether the latest message is a feature request; any failure means "no". */
+  private async detectFeatureRequest(threadId: string, batch: Pending[]): Promise<boolean> {
+    try {
+      const modelRef = this.db.getBuilderSettings().chatDecisionModel;
+      const model = parseModelRef(modelRef);
+      if (!model) throw new Error(`Invalid decision model setting "${modelRef}"`);
+      const channel = await this.client.channels.fetch(threadId).catch(() => null);
+      let entries: ChatMessageInfo[] = [];
+      if (channel && channel.isThread()) {
+        const recent = await channel.messages.fetch({ limit: 11 });
+        entries = [...recent.values()]
+          .reverse()
+          .map((m) => ({ name: m.author.bot ? m.author.displayName : displayName(m), id: m.author.id, text: m.content }))
+          .filter((e) => e.text.trim().length > 0);
+        // The batch itself is in the history; it is passed separately as the latest message.
+        entries = entries.length > batch.length ? entries.slice(0, entries.length - batch.length) : [];
+      }
+      const latest = batch.map((b) => b.text).join('\n');
+      const probability = await this.getAgent().decide(model, formatDecisionInput(entries, latest), FEATURE_REQUEST_QUESTION, DECISION_TIMEOUT_MS);
+      const yes = isFeatureRequest(probability);
+      console.log(`[chat] guild=${config.guildId} thread=${threadId} decision feature_request=${probability ?? 'none'} -> ${yes}`);
+      return yes;
+    } catch (err) {
+      console.warn(`[chat] guild=${config.guildId} thread=${threadId} decision failed:`, err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+
+  /** A detected feature request: fixed acknowledgement + build job (admins) or fixed refusal (others). */
+  private async startFeatureRequest(threadId: string, batch: Pending[]): Promise<void> {
+    const requester = this.requesterOf(batch);
+    const request = (requester.directed ? requester.text : batch.map((b) => b.text).join('\n')).trim();
+    await this.handoff(threadId, requester, request, {
+      ack: "Got it, I'll make a plan for this.",
+      notAdmin: 'That sounds like a change to the bot. Only admins can start one, so ask an admin to request it.',
+    });
+  }
+
+  private async handoff(threadId: string, requester: Pending, request: string, msgs: { ack?: string; notAdmin?: string } = {}): Promise<void> {
     const settings = this.db.getBuilderSettings();
     if (!requester.admin) {
-      await this.say(threadId, 'Only admins can ask me to change the bot, so I can\'t start that request. An admin can ask me to plan it.');
+      await this.say(threadId, msgs.notAdmin ?? 'Only admins can ask me to change the bot, so I can\'t start that request. An admin can ask me to plan it.');
       return;
     }
     if (!settings.enabled || !this.builder.configured) {
@@ -324,6 +387,7 @@ export class ChatRunner {
     try {
       const channel = await this.client.channels.fetch(threadId).catch(() => null);
       if (!channel || !channel.isThread()) throw new Error('not a thread');
+      if (msgs.ack) await this.say(threadId, msgs.ack);
       const recent = await channel.messages.fetch({ limit: 20 });
       const entries: ChatMessageInfo[] = [...recent.values()]
         .reverse()

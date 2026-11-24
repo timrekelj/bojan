@@ -6,20 +6,43 @@ export interface ChatReply {
   reply: boolean;
   /** Text to post ('' when `reply` is false). */
   visible: string;
-  /** Self-contained description of a requested bot feature, or null. */
-  featureRequest: string | null;
+  /** No valid json block was found: the text is never posted (the caller may ask once more). */
+  missingBlock: boolean;
 }
 
 /**
- * Parse a chat agent reply. A missing or invalid json block counts as `reply: true` with the whole
- * visible text (an empty text is then not posted). `reply: false` suppresses the visible text.
+ * Parse a chat agent reply (`{"reply": bool}` block). A missing or invalid json block is never
+ * posted: `reply: false` with `missingBlock: true`. `reply: false` suppresses the visible text.
  */
 export function parseChatReply(text: string): ChatReply {
   const { visible, result } = parseAgentReply(text);
-  if (!result) return { reply: visible.length > 0, visible, featureRequest: null };
-  const fr = typeof result.feature_request === 'string' ? result.feature_request.trim() : '';
+  if (!result) return { reply: false, visible: '', missingBlock: true };
   const wantsReply = result.reply !== false && visible.length > 0;
-  return { reply: wantsReply, visible: wantsReply ? visible : '', featureRequest: fr.length > 0 ? fr : null };
+  return { reply: wantsReply, visible: wantsReply ? visible : '', missingBlock: false };
+}
+
+export const FEATURE_REQUEST_QUESTION = {
+  name: 'feature_request',
+  instructions:
+    'Does the LATEST message ask for a new feature, a change or a bug fix in this Discord bot itself (not a general question, not just discussing an idea, not about other software)?',
+  criteria: {
+    true: 'The latest message clearly asks for the Discord bot to gain a feature, change its behavior or get a bug fixed.',
+    false: 'A general question, small talk, only discussing an idea, or about anything other than this bot.',
+  },
+};
+
+/** Probability from the decision model -> yes/no (null = no decision = no). */
+export function isFeatureRequest(probability: number | null, threshold = 0.7): boolean {
+  return probability !== null && Number.isFinite(probability) && probability >= threshold;
+}
+
+/** Recent messages (last `maxMessages`, trimmed) followed by the latest one, clearly marked. */
+export function formatDecisionInput(entries: readonly ChatMessageInfo[], latest: string, maxMessages = 10): string {
+  const context = formatTranscript(entries, { maxMessages, maxChars: 3000, perMessage: 400 });
+  const parts: string[] = [];
+  if (context.length > 0) parts.push(`Recent messages (oldest first):\n${context}`);
+  parts.push(`LATEST message:\n${latest.trim()}`);
+  return parts.join('\n\n');
 }
 
 /** Split text into chunks of at most `max` chars, breaking at line boundaries (long lines at spaces, then hard). */

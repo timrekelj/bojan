@@ -353,6 +353,8 @@ export interface BuilderSettings {
   chatEnabled: boolean;
   /** Chat model, "providerID/modelID". */
   chatModel: string;
+  /** Decision model detecting feature requests before the chat agent runs, "providerID/modelID". */
+  chatDecisionModel: string;
   /** How many builds may run at once (1–5); further approved requests wait in a queue. */
   maxParallelBuilds: number;
   /** Languages the chat assistant must reply in; empty = no constraint (any language). */
@@ -361,6 +363,7 @@ export interface BuilderSettings {
 
 export const DEFAULT_BUILDER_MODEL = 'opencode-go/glm-5.3';
 export const DEFAULT_CHAT_MODEL = 'opencode-go/glm-5.3-flash';
+export const DEFAULT_CHAT_DECISION_MODEL = 'opencode-go/jev-1.14';
 export const DEFAULT_MAX_PARALLEL_BUILDS = 1;
 export const MAX_PARALLEL_BUILDS_LIMIT = 5;
 
@@ -1147,11 +1150,13 @@ export class BotDatabase {
   getBuilderSettings(): BuilderSettings {
     const model = this.getState('builder:model');
     const chatModel = this.getState('chat:model');
+    const decisionModel = this.getState('chat:decisionModel');
     return {
       enabled: this.getState('builder:enabled') === '1',
       model: model && model.length > 0 ? model : DEFAULT_BUILDER_MODEL,
       chatEnabled: this.getState('chat:enabled') === '1',
       chatModel: chatModel && chatModel.length > 0 ? chatModel : DEFAULT_CHAT_MODEL,
+      chatDecisionModel: decisionModel && decisionModel.length > 0 ? decisionModel : DEFAULT_CHAT_DECISION_MODEL,
       maxParallelBuilds: clampMaxParallel(Number(this.getState('builder:maxParallel') ?? DEFAULT_MAX_PARALLEL_BUILDS)),
       chatLanguages: parseChatLanguages(this.getState('chat:languages')),
     };
@@ -1162,6 +1167,7 @@ export class BotDatabase {
     this.setState('builder:model', s.model.trim().length > 0 ? s.model.trim() : DEFAULT_BUILDER_MODEL);
     this.setState('chat:enabled', s.chatEnabled ? '1' : '0');
     this.setState('chat:model', s.chatModel.trim().length > 0 ? s.chatModel.trim() : DEFAULT_CHAT_MODEL);
+    this.setState('chat:decisionModel', s.chatDecisionModel.trim().length > 0 ? s.chatDecisionModel.trim() : DEFAULT_CHAT_DECISION_MODEL);
     this.setState('builder:maxParallel', String(clampMaxParallel(s.maxParallelBuilds)));
     this.setState('chat:languages', JSON.stringify(s.chatLanguages));
   }

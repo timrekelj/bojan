@@ -31,7 +31,7 @@ import { extractReply, lastConversationIsAssistant } from './builder/opencode.js
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
 import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, pickJobsToStart, queuePosition, sortQueue } from './builder/queue.js';
-import { chatThreadNameFor, chunkMessage, formatChatMessage, formatInitialPrompt, formatTranscript, languageDirective, parseChatReply, replaceBotMention, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
+import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, formatDecisionInput, formatInitialPrompt, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, replaceBotMention, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
@@ -647,15 +647,17 @@ rmSync(dir, { recursive: true, force: true });
   // DB: build_jobs + settings
   const bdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-builder-')), 'b.db'));
   check('builder settings defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && !bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash' && bdb.getBuilderSettings().chatLanguages.length === 0);
-  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 3 });
+  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ', chatDecisionModel: ' p/decide ', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 3 });
+  check('decision model setting: default, roundtrip', new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-dm-')), 'd.db')).getBuilderSettings().chatDecisionModel === 'opencode-go/jev-1.14' && bdb.getBuilderSettings().chatDecisionModel === 'p/decide');
   check('builder settings roundtrip', bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'prov/model' && bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'p/chat' && JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['Slovenian', 'English']));
-  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatLanguages: [], maxParallelBuilds: 99 });
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatDecisionModel: '', chatLanguages: [], maxParallelBuilds: 99 });
+  check('builder settings: empty decision model falls back to default', bdb.getBuilderSettings().chatDecisionModel === 'opencode-go/jev-1.14');
   check('builder settings: empty models fall back to defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash' && bdb.getBuilderSettings().chatLanguages.length === 0);
   bdb.setState('chat:languages', 'not json');
   check('chat languages: invalid state means no constraint', bdb.getBuilderSettings().chatLanguages.length === 0);
   bdb.setState('chat:languages', '["ok", 7, " "]');
   check('chat languages: only valid strings survive the state roundtrip', JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['ok']));
-  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 99 });
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatDecisionModel: '', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 99 });
   check('no active job initially', bdb.activeBuildJobInThread('t1') === null && bdb.countBuildJobs(G) === 0);
   check('builder settings: maxParallelBuilds default 1, roundtrip, clamped', new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-mp-')), 'm.db')).getBuilderSettings().maxParallelBuilds === 1 && bdb.getBuilderSettings().maxParallelBuilds === 5);
   const j1 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c1', requesterId: 'u1', request: 'add ping' }, 1000);
@@ -740,8 +742,9 @@ rmSync(dir, { recursive: true, force: true });
   check('goPriceFor: only opencode-go/*', goPriceFor('opencode-go/glm-5.3', prices) === glm && goPriceFor('anthropic/glm-5.3', prices) === null && goPriceFor('opencode-go/none', prices) === null && goPriceFor(null, prices) === null);
 
   // Settings form
-  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash', chatLanguages: [] as string[], maxParallelBuilds: 1 };
-  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c', chatLanguages: [], maxParallelBuilds: 1 }, modelError: null }));
+  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash', chatDecisionModel: 'opencode-go/jev-1.14', chatLanguages: [] as string[], maxParallelBuilds: 1 };
+  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c', chatDecisionModel: 'opencode-go/jev-1.14', chatLanguages: [], maxParallelBuilds: 1 }, modelError: null }));
+  check('parseBuilderForm: decision model valid / empty -> default / invalid keeps current + error', parseBuilderForm({ chatDecisionModel: ' a/b ' }, cur).settings.chatDecisionModel === 'a/b' && parseBuilderForm({ chatDecisionModel: '' }, { ...cur, chatDecisionModel: 'x/y' }).settings.chatDecisionModel === 'opencode-go/jev-1.14' && (() => { const r = parseBuilderForm({ chatDecisionModel: 'bad model' }, { ...cur, chatDecisionModel: 'x/y' }); return r.settings.chatDecisionModel === 'x/y' && r.modelError !== null && r.modelError.startsWith('Decision model'); })());
   check('parseBuilderForm: invalid model keeps current + error', (() => { const r = parseBuilderForm({ model: 'nomodel' }, { ...cur, enabled: true, model: 'x/y' }); return !r.settings.enabled && r.settings.model === 'x/y' && r.modelError !== null; })());
   check('parseBuilderForm: invalid chat model keeps current + error', (() => { const r = parseBuilderForm({ chatEnabled: '1', chatModel: 'bad model/x' }, { ...cur, chatModel: 'x/chat' }); return r.settings.chatEnabled && r.settings.chatModel === 'x/chat' && r.modelError !== null && r.modelError.startsWith('Chat model'); })());
   check('parseBuilderForm: empty -> defaults', (() => { const r = parseBuilderForm({ enabled: '1', model: '', chatModel: '' }, { ...cur, model: 'x/y', chatModel: 'x/z' }); return r.settings.model === 'opencode-go/glm-5.3' && r.settings.chatModel === 'opencode-go/glm-5.3-flash' && !r.settings.chatEnabled; })());
@@ -754,17 +757,18 @@ rmSync(dir, { recursive: true, force: true });
 
   // Chat assistant: pure helpers
   const cr1 = parseChatReply('Node 24 is the LTS.\nSource: https://nodejs.org\n```json\n{"reply": true, "feature_request": null}\n```');
-  check('parseChatReply: reply true', cr1.reply && cr1.visible.startsWith('Node 24') && !cr1.visible.includes('```') && cr1.featureRequest === null);
-  const cr2 = parseChatReply('ignored text\n```json\n{"reply": false, "feature_request": null}\n```');
-  check('parseChatReply: reply false hides the text', !cr2.reply && cr2.visible === '' && cr2.featureRequest === null);
-  const cr3 = parseChatReply('I can turn this into a build request.\n```json\n{"reply": true, "feature_request": "  Add a /ping command that replies pong  "}\n```');
-  check('parseChatReply: feature_request trimmed', cr3.reply && cr3.featureRequest === 'Add a /ping command that replies pong');
+  check('parseChatReply: reply true', cr1.reply && cr1.visible.startsWith('Node 24') && !cr1.visible.includes('```') && !cr1.missingBlock);
+  const cr2 = parseChatReply('ignored text\n```json\n{"reply": false}\n```');
+  check('parseChatReply: reply false hides the text', !cr2.reply && cr2.visible === '' && !cr2.missingBlock);
   const cr4 = parseChatReply('Just some text without a block');
-  check('parseChatReply: missing block -> reply true with the text', cr4.reply && cr4.visible === 'Just some text without a block' && cr4.featureRequest === null);
+  check('parseChatReply: missing block -> never posted, flagged', !cr4.reply && cr4.visible === '' && cr4.missingBlock);
   const cr5 = parseChatReply('Text\n```json\n{not json}\n```');
-  check('parseChatReply: invalid json -> reply true with visible text', cr5.reply && cr5.visible === 'Text' && cr5.featureRequest === null);
-  check('parseChatReply: empty -> no reply; blank feature_request -> null', !parseChatReply('').reply && parseChatReply('hi\n```json\n{"feature_request": "  "}\n```').featureRequest === null && !parseChatReply('```json\n{"reply": true}\n```').reply);
-  check('parseChatReply: feature_request survives reply:false', (() => { const r = parseChatReply('x\n```json\n{"reply": false, "feature_request": "do it"}\n```'); return !r.reply && r.featureRequest === 'do it'; })());
+  check('parseChatReply: invalid json -> never posted, flagged', !cr5.reply && cr5.visible === '' && cr5.missingBlock);
+  check('parseChatReply: empty -> flagged; block with no text -> no reply', !parseChatReply('').reply && parseChatReply('').missingBlock && !parseChatReply('```json\n{"reply": true}\n```').reply);
+  check('isFeatureRequest: threshold, null = no', isFeatureRequest(0.96) && isFeatureRequest(0.7) && !isFeatureRequest(0.69) && !isFeatureRequest(null) && !isFeatureRequest(NaN) && isFeatureRequest(0.5, 0.5));
+  check('FEATURE_REQUEST_QUESTION: predicate text mentions the latest message', FEATURE_REQUEST_QUESTION.name === 'feature_request' && FEATURE_REQUEST_QUESTION.instructions.includes('LATEST'));
+  const di = formatDecisionInput(Array.from({ length: 15 }, (_, i) => ({ name: `u${i}`, id: String(i), text: `msg ${i}` })), 'u99 (99): add a beer reaction');
+  check('formatDecisionInput: last 10 context lines + marked latest', di.includes('u14 (14): msg 14') && di.includes('u5 (5): msg 5') && !di.includes('u4 (4)') && di.endsWith('LATEST message:\nu99 (99): add a beer reaction') && formatDecisionInput([], 'hi') === 'LATEST message:\nhi');
 
   const long = Array.from({ length: 60 }, (_, i) => `line ${i} ${'x'.repeat(60)}`).join('\n');
   const chunks = chunkMessage(long, 2000);
