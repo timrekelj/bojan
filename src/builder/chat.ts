@@ -12,9 +12,11 @@ import {
   formatChatMessage,
   formatDecisionInput,
   formatInitialPrompt,
+  formatJobStatus,
   formatTranscript,
   isFeatureRequest,
   parseChatReply,
+  pickReplyTarget,
   replaceBotMention,
   shouldRunDecision,
   withLanguageRule,
@@ -24,6 +26,8 @@ import {
 import { OpenCodeAgent, REPO_DIR } from './opencode.js';
 import { isAdminLike, parseModelRef } from './parse.js';
 import { estimateCostUsd, getGoPrices, goPriceFor } from './pricing.js';
+import { queuePosition } from './queue.js';
+import { addReaction, removeOwnReaction, thinkingEmoji } from './reactions.js';
 import type { BuilderRunner } from './runner.js';
 
 const DEBOUNCE_MS = 3_000;
@@ -47,8 +51,17 @@ interface Pending {
   replyTo?: { name: string; text: string };
   authorId: string;
   admin: boolean;
-  /** The message mentioned the bot directly. */
+  /** The message mentions the bot or replies to one of its messages. */
   directed: boolean;
+  messageId: string;
+  /** Channel the message was sent in (the parent channel for the message that opens a thread). */
+  channelId: string;
+}
+
+/** A direct @mention of the bot (not @everyone) or a Discord reply to a message the bot wrote. */
+export function isDirectedAtBot(message: Message, botId: string): boolean {
+  if (message.mentions.everyone) return message.mentions.repliedUser?.id === botId;
+  return message.mentions.users.has(botId) || message.mentions.repliedUser?.id === botId;
 }
 
 interface ThreadState {
@@ -90,7 +103,11 @@ export class ChatRunner {
 
   stop(): void {
     this.stopped = true;
-    for (const s of this.states.values()) if (s.timer) clearTimeout(s.timer);
+    for (const s of this.states.values()) {
+      if (s.timer) clearTimeout(s.timer);
+      // Messages that will never be processed must not keep a thinking reaction.
+      void this.clearThinking(s.buffer.splice(0));
+    }
   }
 
   private getAgent(): OpenCodeAgent {
@@ -136,6 +153,22 @@ export class ChatRunner {
     return c && c.isSendable() ? (c as SendableChannels) : null;
   }
 
+  /** React with the thinking emoji on a directed message while it waits for / gets an answer. */
+  private async markThinking(item: Pending): Promise<void> {
+    await addReaction(this.client, item.channelId, item.messageId, await thinkingEmoji(this.client), 'chat');
+  }
+
+  /** Remove the thinking reaction from every directed message of a finished (or dropped) batch. */
+  private async clearThinking(batch: readonly Pending[]): Promise<void> {
+    const emoji = await thinkingEmoji(this.client);
+    await Promise.all(batch.filter((b) => b.directed).map((b) => removeOwnReaction(this.client, b.channelId, b.messageId, emoji, 'chat')));
+  }
+
+  /** Message the reply to this batch attaches to (only messages in the thread itself can be referenced). */
+  private replyTarget(threadId: string, batch: readonly Pending[]): string | null {
+    return pickReplyTarget(batch.filter((b) => b.channelId === threadId));
+  }
+
   private typing(threadId: string): () => void {
     let channel: SendableChannels | null = null;
     const tick = async (): Promise<void> => {
@@ -151,14 +184,23 @@ export class ChatRunner {
     return () => clearInterval(timer);
   }
 
-  private async say(threadId: string, text: string): Promise<void> {
+  /** Send text to the thread; the first chunk replies to `replyTo` (when given), the rest are plain sends. */
+  private async say(threadId: string, text: string, replyTo: string | null = null): Promise<void> {
     try {
       const channel = await this.channelFor(threadId);
       if (!channel) {
         console.warn(`[chat] guild=${config.guildId} thread ${threadId} is not sendable`);
         return;
       }
-      for (const chunk of chunkMessage(text)) await channel.send({ content: chunk, allowedMentions: { parse: [] } });
+      let first = true;
+      for (const chunk of chunkMessage(text)) {
+        if (first && replyTo) {
+          await channel.send({ content: chunk, reply: { messageReference: replyTo, failIfNotExists: false }, allowedMentions: NO_MENTIONS });
+        } else {
+          await channel.send({ content: chunk, allowedMentions: { parse: [] } });
+        }
+        first = false;
+      }
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} could not post:`, err);
     }
@@ -179,7 +221,17 @@ export class ChatRunner {
     const channelName = 'name' in message.channel ? (message.channel.name as string | null) : null;
     // No language wrap here: the pending prompt goes through oneOff() or runTurn(), which both add the rule.
     const prompt = formatInitialPrompt({ channelName, trigger, referenced });
-    const pending: Pending = { text: prompt, plain: trigger.text, replyTo: referenced ? { name: referenced.name, text: referenced.text } : undefined, authorId: message.author.id, admin: isAdminMessage(message), directed: true };
+    const pending: Pending = {
+      text: prompt,
+      plain: trigger.text,
+      replyTo: referenced ? { name: referenced.name, text: referenced.text } : undefined,
+      authorId: message.author.id,
+      admin: isAdminMessage(message),
+      directed: true,
+      messageId: message.id,
+      channelId: message.channelId,
+    };
+    void this.markThinking(pending);
 
     if (message.channel.isThread()) {
       void this.oneOff(message, pending);
@@ -192,6 +244,7 @@ export class ChatRunner {
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} could not start a thread:`, err);
       await message.reply({ content: 'I could not open a thread for that (need Create Public Threads permission).', allowedMentions: NO_MENTIONS }).catch(() => undefined);
+      await this.clearThinking([pending]);
       return;
     }
     try {
@@ -201,6 +254,7 @@ export class ChatRunner {
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} could not create a session:`, err);
       await this.say(threadId, 'Sorry, I could not start the assistant right now. Please try again later.');
+      await this.clearThinking([pending]);
       return;
     }
     this.enqueue(threadId, pending, true);
@@ -212,14 +266,24 @@ export class ChatRunner {
     if (!bot) return;
     const info = messageInfo(message, bot.id, this.botName());
     if (info.text.trim().length === 0 && (info.extras?.length ?? 0) === 0) return;
-    const directed = message.mentions.users.has(bot.id) && !message.mentions.everyone;
+    const directed = isDirectedAtBot(message, bot.id);
+    // Thinking reaction right away so the member sees the bot noticed the message.
+    const item: Pending = {
+      text: formatChatMessage(info),
+      plain: info.text,
+      authorId: message.author.id,
+      admin: isAdminMessage(message),
+      directed,
+      messageId: message.id,
+      channelId: message.channelId,
+    };
+    if (directed) void this.markThinking(item);
     void (async () => {
-      let replyTo: Pending['replyTo'];
-      if (directed && message.reference?.messageId) {
+      if (directed && message.mentions.users.has(bot.id) && message.reference?.messageId) {
         const ref = await message.fetchReference().catch(() => null);
-        if (ref) replyTo = { name: displayName(ref), text: replaceBotMention(ref.content, bot.id, this.botName()) };
+        if (ref) item.replyTo = { name: displayName(ref), text: replaceBotMention(ref.content, bot.id, this.botName()) };
       }
-      this.enqueue(chat.threadId, { text: formatChatMessage(info), plain: info.text, replyTo, authorId: message.author.id, admin: isAdminMessage(message), directed }, false);
+      this.enqueue(chat.threadId, item, false);
     })();
   }
 
@@ -231,8 +295,12 @@ export class ChatRunner {
       s = { busy: false, buffer: [], timer: null };
       this.states.set(threadId, s);
     }
+    if (this.stopped) {
+      void this.clearThinking([item]);
+      return;
+    }
     s.buffer.push(item);
-    if (s.busy || this.stopped) return;
+    if (s.busy) return;
     if (s.timer) clearTimeout(s.timer);
     const state = s;
     state.timer = setTimeout(() => void this.drain(threadId, state), immediate ? 0 : DEBOUNCE_MS);
@@ -245,10 +313,11 @@ export class ChatRunner {
     try {
       while (s.buffer.length > 0 && !this.stopped) {
         const batch = s.buffer.splice(0);
-        // While a build job owns the thread, its messages belong to the build runner.
-        const job = this.db.getBuildJobByThread(threadId);
-        if (job && ACTIVE_BUILD_STATUSES.includes(job.status)) continue;
-        await this.runTurn(threadId, batch);
+        try {
+          await this.runTurn(threadId, batch);
+        } finally {
+          await this.clearThinking(batch);
+        }
       }
     } finally {
       s.busy = false;
@@ -270,10 +339,32 @@ export class ChatRunner {
     }
   }
 
+  /** `[build status]` block for the thread's newest job while it is in flight; empty otherwise. */
+  private jobStatusBlock(threadId: string): string {
+    try {
+      const job = this.db.getBuildJobByThread(threadId);
+      if (!job || !(ACTIVE_BUILD_STATUSES.includes(job.status) || job.status === 'pr_open')) return '';
+      const since = job.status === 'building' ? (job.approvedAt ?? job.updatedAt) : job.updatedAt;
+      return formatJobStatus({
+        jobId: job.id,
+        title: job.title,
+        request: job.request,
+        status: job.status,
+        queuePosition: job.status === 'queued' ? queuePosition(this.db.listBuildJobsByStatus(['queued']), job.id) : null,
+        sinceMs: Date.now() - since,
+        prUrl: job.prUrl,
+      });
+    } catch (err) {
+      console.warn(`[chat] guild=${config.guildId} thread=${threadId} could not build job status:`, err instanceof Error ? err.message : err);
+      return '';
+    }
+  }
+
   private async runTurn(threadId: string, batch: Pending[]): Promise<void> {
     const chat = this.db.getChatThread(threadId);
     if (!chat) return;
-    const stopTyping = this.typing(threadId);
+    // Typing only when someone is actually talking to the bot; undirected turns usually stay silent.
+    const stopTyping = batch.some((b) => b.directed) ? this.typing(threadId) : () => undefined;
     try {
       // Feature requests never reach the chat agent; pending build notes stay for the next chat turn.
       const requester = this.requesterOf(batch);
@@ -282,12 +373,13 @@ export class ChatRunner {
         return;
       }
       const notes = this.db.pendingChatNotes(threadId);
-      const prompt = withNotes(notes, withLanguageRule(batch.map((b) => b.text).join('\n'), this.chatLanguages()));
+      const status = this.jobStatusBlock(threadId);
+      const prompt = withNotes(status ? [status, ...notes] : notes, withLanguageRule(batch.map((b) => b.text).join('\n'), this.chatLanguages()));
       const parsed = await this.askChat(threadId, chat.sessionId, chat.model, prompt, () => this.db.consumeChatNotes(threadId, notes.length));
-      if (parsed.reply) await this.say(threadId, parsed.visible);
+      if (parsed.reply) await this.say(threadId, parsed.visible, this.replyTarget(threadId, batch));
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} turn failed:`, err);
-      await this.say(threadId, 'Sorry, something went wrong on my side. Please try again in a bit.');
+      await this.say(threadId, 'Sorry, something went wrong on my side. Please try again in a bit.', this.replyTarget(threadId, batch));
     } finally {
       stopTyping();
     }
@@ -306,12 +398,13 @@ export class ChatRunner {
       const { sessionId, modelRef } = await this.newSession(key);
       this.db.createChatThread({ threadId: key, guildId: config.guildId, channelId: message.channel.isThread() ? (message.channel.parentId ?? threadId) : threadId, sessionId, startedBy: message.author.id, model: modelRef, oneOff: true });
       const parsed = await this.askChat(key, sessionId, modelRef, withLanguageRule(pending.text, this.chatLanguages()));
-      if (parsed.reply) await this.say(threadId, parsed.visible);
+      if (parsed.reply) await this.say(threadId, parsed.visible, pending.messageId);
     } catch (err) {
       console.error(`[chat] guild=${config.guildId} thread=${threadId} one-off failed:`, err);
-      await this.say(threadId, 'Sorry, something went wrong on my side. Please try again in a bit.');
+      await this.say(threadId, 'Sorry, something went wrong on my side. Please try again in a bit.', pending.messageId);
     } finally {
       stopTyping();
+      await this.clearThinking([pending]);
     }
   }
 
@@ -348,6 +441,9 @@ export class ChatRunner {
    */
   private async detectFeatureRequest(threadId: string, batch: Pending[], requester: Pending): Promise<boolean> {
     const buildingEnabled = this.db.getBuilderSettings().enabled && this.builder.configured;
+    // A job is already active in this thread: never start another; the chat agent answers (it sees the status block).
+    const job = this.db.getBuildJobByThread(threadId);
+    if (job && ACTIVE_BUILD_STATUSES.includes(job.status)) return false;
     if (!batch.some((b) => b.directed) || !shouldRunDecision({ directed: requester.directed, admin: requester.admin, buildingEnabled, text: requester.plain })) return false;
     try {
       const modelRef = this.db.getBuilderSettings().chatDecisionModel;
@@ -366,9 +462,11 @@ export class ChatRunner {
 
   /** Start a build job for a request the gate already approved (directed, admin, building enabled). */
   private async handoff(threadId: string, requester: Pending, request: string): Promise<void> {
+    // Only a message inside the thread itself can be replied to.
+    const replyTo = requester.channelId === threadId ? requester.messageId : null;
     const slot = this.builder.reserve(threadId);
     if (!slot.ok) {
-      await this.say(threadId, slot.active ? "There's already a feature request in progress in this thread." : "I'm already setting up a request in this thread. Please ask again in a minute.");
+      await this.say(threadId, slot.active ? "There's already a feature request in progress in this thread." : "I'm already setting up a request in this thread. Please ask again in a minute.", replyTo);
       return;
     }
     try {
@@ -386,13 +484,14 @@ export class ChatRunner {
         requesterId: requester.authorId,
         requesterName: requesterName ? displayName(requesterName) : requester.authorId,
         request,
+        triggerMessageId: requester.messageId,
         context: formatTranscript(entries),
       });
-      await this.say(threadId, "Got it, I'll make a plan for this.");
+      await this.say(threadId, "Got it, I'll make a plan for this.", replyTo);
     } catch (err) {
       this.builder.release(threadId);
       console.error(`[chat] guild=${config.guildId} thread=${threadId} could not hand off to the builder:`, err);
-      await this.say(threadId, 'Sorry, I could not start that request.');
+      await this.say(threadId, 'Sorry, I could not start that request.', replyTo);
     }
   }
 }

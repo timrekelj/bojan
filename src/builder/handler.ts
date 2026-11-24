@@ -22,7 +22,21 @@ export async function handleBuilderMessage(message: Message, client: Client, db:
     // A job in planning / awaiting_input / queued / building owns the thread.
     const job = db.getBuildJobByThread(message.channelId);
     if (job && (job.status === 'planning' || job.status === 'awaiting_input' || job.status === 'queued' || job.status === 'building')) {
-      // Queued and building jobs are not talking to the planner: answer once per phase, no model call.
+      const chat = db.getChatThread(message.channelId);
+      if (chat && runner.chat.available) {
+        // awaiting_input: only the planner. planning: chat assistant plus planner context. queued/building: chat only.
+        if (job.status !== 'awaiting_input') runner.chat.handleThreadMessage(message, chat);
+        if (job.status === 'planning' || job.status === 'awaiting_input') {
+          if (message.author.id === job.requesterId || isAdminMessage(message)) {
+            const text = stripBotMention(message.content, client.user.id);
+            if (text.length > 0) {
+              runner.handleReply(job, message.member?.displayName ?? message.author.username, text, { sentAt: message.createdTimestamp, messageId: message.id });
+            }
+          }
+        }
+        return true;
+      }
+      // Fallback (no chat thread or chat unavailable). Queued and building jobs are not talking to the planner: answer once per phase, no model call.
       if (job.status === 'queued' || job.status === 'building') {
         const key = `${job.id}:${job.status}`;
         if (!notedPhases.has(key)) {
@@ -37,7 +51,7 @@ export async function handleBuilderMessage(message: Message, client: Client, db:
       if (message.author.id !== job.requesterId && !isAdminMessage(message)) return true;
       const text = stripBotMention(message.content, client.user.id);
       if (text.length === 0) return true;
-      runner.handleReply(job, message.member?.displayName ?? message.author.username, text);
+      runner.handleReply(job, message.member?.displayName ?? message.author.username, text, { sentAt: message.createdTimestamp, messageId: message.id });
       return true;
     }
     // Otherwise the thread is back in (or already in) chat mode.

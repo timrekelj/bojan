@@ -57,6 +57,12 @@ export function featureRequestText(opts: { text: string; replyTo?: { name: strin
   return opts.replyTo && ref ? `In reply to ${opts.replyTo.name}: ${ref}\n\n${own}` : own;
 }
 
+/** Message id a reply should attach to: the latest directed message, else the last one; null for an empty batch. */
+export function pickReplyTarget(items: readonly { messageId: string; directed: boolean }[]): string | null {
+  const directed = [...items].reverse().find((i) => i.directed);
+  return (directed ?? items[items.length - 1])?.messageId ?? null;
+}
+
 /** Split text into chunks of at most `max` chars, breaking at line boundaries (long lines at spaces, then hard). */
 export function chunkMessage(text: string, max = 2000): string[] {
   const out: string[] = [];
@@ -178,6 +184,46 @@ export function formatBuildNote(n: BuildNoteInfo): string {
     case 'cancelled':
       return `${head} cancelled`;
   }
+}
+
+export interface JobStatusInfo {
+  jobId: number;
+  title: string | null;
+  request: string;
+  status: string;
+  queuePosition: number | null;
+  /** Milliseconds spent in the current phase. */
+  sinceMs: number;
+  prUrl: string | null;
+}
+
+/** Status block for the chat prompt while the thread's newest build job is in flight. Empty for other statuses. */
+export function formatJobStatus(info: JobStatusInfo): string {
+  const minutes = Math.max(0, Math.round(info.sinceMs / 60_000));
+  const label = info.title ? `job #${info.jobId} "${info.title}"` : `job #${info.jobId}`;
+  const flat = info.request.replace(/\s+/g, ' ').trim();
+  const request = flat.length > 300 ? `${flat.slice(0, 299)}…` : flat;
+  let phase: string;
+  switch (info.status) {
+    case 'planning':
+      phase = `planning (${minutes} min): the planner is writing or revising a plan. Messages sent now are shown to it as context together with the next reply to the plan.`;
+      break;
+    case 'awaiting_input':
+      phase = 'plan posted, waiting for the requester to approve it or give feedback (as a reply to the posted plan).';
+      break;
+    case 'queued':
+      phase = `queued: waiting for a free build slot${info.queuePosition ? `, position ${info.queuePosition}` : ''}.`;
+      break;
+    case 'building':
+      phase = `building for ${minutes} min: implementing the approved plan.`;
+      break;
+    case 'pr_open':
+      phase = `PR open${info.prUrl ? ` at ${info.prUrl}` : ''}, waiting for review.`;
+      break;
+    default:
+      return '';
+  }
+  return `[build status] ${label} — ${phase} Request: ${request}`;
 }
 
 /** Prepend pending notes to the next chat prompt. */

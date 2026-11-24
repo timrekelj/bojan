@@ -1,5 +1,27 @@
 // Pure scheduling helpers for the build queue, restart recovery and PR conflict fixes.
-import { normalizeBuildResult, normalizePlanResult, parseAgentReply } from './parse.js';
+import { normalizeBuildResult, normalizePlanResult, parseAgentReply, type PlanStatus } from './parse.js';
+
+/**
+ * `approved` only counts when a plan card was already posted and the turn was triggered by a user
+ * message sent after it; otherwise it is downgraded to `needs_input`. Other statuses pass through.
+ */
+export function guardPlanStatus(input: { status: PlanStatus; planPostedAt: number | null; latestUserMessageAt: number | null }): PlanStatus {
+  if (input.status !== 'approved') return input.status;
+  if (input.planPostedAt !== null && input.latestUserMessageAt !== null && input.latestUserMessageAt > input.planPostedAt) return 'approved';
+  return 'needs_input';
+}
+
+function normalizePlanText(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/** True when `next` differs from the previously posted plan (whitespace-insensitive). An empty next plan counts as unchanged when a plan exists. */
+export function planChanged(prev: string | null, next: string): boolean {
+  const n = normalizePlanText(next);
+  if (prev === null) return true;
+  if (n === '') return false;
+  return normalizePlanText(prev) !== n;
+}
 
 export const MAX_RESUMES = 2;
 /** After a conflict fix, GitHub may keep reporting the stale state for a while. */
@@ -25,6 +47,20 @@ export function queuePosition(queued: readonly QueuedLike[], jobId: number): num
 /** Number of build slots still free. */
 export function freeSlots(building: number, max: number): number {
   return Math.max(0, max - building);
+}
+
+/** Channel a job's reaction target lives in: the thread's starter message (id === thread id) is in the parent channel. */
+export function reactionChannelFor(messageId: string, threadId: string, parentChannelId: string): string {
+  return messageId === threadId ? parentChannelId : threadId;
+}
+
+/** Bot activity text for the jobs currently building; null when nothing is building. */
+export function buildingActivity(titles: readonly (string | null)[]): string | null {
+  if (titles.length === 0) return null;
+  if (titles.length > 1) return `Building ${titles.length} features`;
+  const title = (titles[0] ?? '').trim();
+  const text = `Building ${title || 'a feature'}`;
+  return text.length > 120 ? `${text.slice(0, 119)}…` : text;
 }
 
 /** The queued jobs (FIFO) that may start now. */

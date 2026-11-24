@@ -292,7 +292,11 @@ CREATE TABLE IF NOT EXISTS build_jobs (
   approved_at INTEGER,
   resume_count INTEGER NOT NULL DEFAULT 0,
   fix_attempts INTEGER NOT NULL DEFAULT 0,
-  conflict_notified INTEGER NOT NULL DEFAULT 0
+  conflict_notified INTEGER NOT NULL DEFAULT 0,
+  trigger_message_id TEXT,
+  plan_message_id TEXT,
+  plan_posted_at INTEGER,
+  last_plan TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_build_jobs_status ON build_jobs (status);
 CREATE INDEX IF NOT EXISTS idx_build_jobs_thread ON build_jobs (thread_id);
@@ -345,6 +349,14 @@ export interface BuildJob {
   updatedAt: number;
   /** When the plan was approved (queue order); null before approval. */
   approvedAt: number | null;
+  /** Discord message that caused the job (may be null). */
+  triggerMessageId: string | null;
+  /** Message id of the latest posted plan card. */
+  planMessageId: string | null;
+  /** When (ms) the latest plan card was posted. */
+  planPostedAt: number | null;
+  /** Plan text of the latest posted plan card. */
+  lastPlan: string | null;
   /** Resume attempts after restarts. */
   resumeCount: number;
   /** Automatic merge-conflict fix attempts (at most one). */
@@ -479,6 +491,10 @@ function buildJobFromRow(r: Record<string, unknown>): BuildJob {
     createdAt: r.created_at as number,
     updatedAt: r.updated_at as number,
     approvedAt: (r.approved_at as number | null) ?? null,
+    triggerMessageId: (r.trigger_message_id as string | null) ?? null,
+    planMessageId: (r.plan_message_id as string | null) ?? null,
+    planPostedAt: (r.plan_posted_at as number | null) ?? null,
+    lastPlan: (r.last_plan as string | null) ?? null,
     resumeCount: (r.resume_count as number | null) ?? 0,
     fixAttempts: (r.fix_attempts as number | null) ?? 0,
     conflictNotified: ((r.conflict_notified as number | null) ?? 0) === 1,
@@ -486,7 +502,7 @@ function buildJobFromRow(r: Record<string, unknown>): BuildJob {
 }
 
 /** Fields of a build job that callers may update (besides status/usage, which have their own methods). */
-export type BuildJobPatch = Partial<Pick<BuildJob, 'title' | 'sessionId' | 'worktreeDir' | 'branch' | 'prUrl' | 'error' | 'model' | 'approvedAt' | 'resumeCount' | 'fixAttempts' | 'conflictNotified'>>;
+export type BuildJobPatch = Partial<Pick<BuildJob, 'title' | 'sessionId' | 'worktreeDir' | 'branch' | 'prUrl' | 'error' | 'model' | 'approvedAt' | 'resumeCount' | 'fixAttempts' | 'conflictNotified' | 'triggerMessageId' | 'planMessageId' | 'planPostedAt' | 'lastPlan'>>;
 
 export type LogLevel = 'info' | 'warn' | 'error';
 export interface LogRow {
@@ -559,6 +575,10 @@ export class BotDatabase {
       ['resume_count', 'INTEGER NOT NULL DEFAULT 0'],
       ['fix_attempts', 'INTEGER NOT NULL DEFAULT 0'],
       ['conflict_notified', 'INTEGER NOT NULL DEFAULT 0'],
+      ['trigger_message_id', 'TEXT'],
+      ['plan_message_id', 'TEXT'],
+      ['plan_posted_at', 'INTEGER'],
+      ['last_plan', 'TEXT'],
     ] as const) {
       if (!queueCols.includes(name)) this.db.exec(`ALTER TABLE build_jobs ADD COLUMN ${name} ${ddl}`);
     }
@@ -1235,11 +1255,11 @@ export class BotDatabase {
     this.setState('chat:languages', JSON.stringify(s.chatLanguages));
   }
 
-  createBuildJob(j: { guildId: string; threadId: string; channelId: string; requesterId: string; request: string }, now = Date.now()): BuildJob {
+  createBuildJob(j: { guildId: string; threadId: string; channelId: string; requesterId: string; request: string; triggerMessageId?: string | null }, now = Date.now()): BuildJob {
     const res = this.db
-      .prepare(`INSERT INTO build_jobs (guild_id, thread_id, channel_id, requester_id, request, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'planning', ?, ?)`)
-      .run(j.guildId, j.threadId, j.channelId, j.requesterId, j.request, now, now);
+      .prepare(`INSERT INTO build_jobs (guild_id, thread_id, channel_id, requester_id, request, trigger_message_id, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'planning', ?, ?)`)
+      .run(j.guildId, j.threadId, j.channelId, j.requesterId, j.request, j.triggerMessageId ?? null, now, now);
     return this.getBuildJob(Number(res.lastInsertRowid)) as BuildJob;
   }
 
@@ -1271,6 +1291,10 @@ export class BotDatabase {
       resumeCount: 'resume_count',
       fixAttempts: 'fix_attempts',
       conflictNotified: 'conflict_notified',
+      triggerMessageId: 'trigger_message_id',
+      planMessageId: 'plan_message_id',
+      planPostedAt: 'plan_posted_at',
+      lastPlan: 'last_plan',
     };
     const sets: string[] = [];
     const values: (string | number | null)[] = [];

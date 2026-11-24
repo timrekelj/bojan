@@ -171,7 +171,8 @@ npm ci && npm run build && npm start    # with .env in place
    **Manage Messages** (the embed converter deletes the original message),
    **Manage Webhooks** (it reposts via webhook), Embed Links, **Attach Files**
    (the weekly stats post uploads a chart image), **Create Public Threads** and
-   **Send Messages in Threads** (self-building feature requests, see below).
+   **Send Messages in Threads** (self-building feature requests, see below), **Add Reactions** (status
+   emoji on messages the assistant is working on).
    Open the URL and invite the bot to your server.
 4. `GUILD_ID`: enable Discord Developer Mode, right-click your server →
    Copy Server ID.

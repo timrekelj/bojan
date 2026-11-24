@@ -31,8 +31,8 @@ import {
 import { extractReply, lastConversationIsAssistant } from './builder/opencode.js';
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
-import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, pickJobsToStart, queuePosition, sortQueue } from './builder/queue.js';
-import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
+import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
+import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
@@ -898,6 +898,14 @@ rmSync(dir, { recursive: true, force: true });
   check('formatBuildNote: pr_opened', bn === '[build update] job #7 "Ping": PR opened https://github.com/a/b/pull/9 — Adds /ping.');
   check('formatBuildNote: approved includes plan, others', formatBuildNote({ jobId: 1, title: null, event: 'approved', plan: '- do x' }).includes('plan approved, building now. Plan:\n- do x') && formatBuildNote({ jobId: 1, title: 'T', event: 'merged', prUrl: 'u' }) === '[build update] job #1 "T": PR merged u' && formatBuildNote({ jobId: 1, title: 'T', event: 'closed' }).includes('closed without merging') && formatBuildNote({ jobId: 1, title: 'T', event: 'failed', reason: 'boom\nbad' }) === '[build update] job #1 "T": failed — boom bad' && formatBuildNote({ jobId: 1, title: 'T', event: 'cancelled' }).endsWith('cancelled'));
   check('formatBuildNote: long plan clipped', formatBuildNote({ jobId: 1, title: 'T', event: 'approved', plan: 'p'.repeat(5000) }).length < 2700);
+  const js = (status: string, extra: Partial<{ queuePosition: number | null; sinceMs: number; prUrl: string | null; title: string | null }> = {}) =>
+    formatJobStatus({ jobId: 4, title: 'Ping', request: 'add /ping', status, queuePosition: null, sinceMs: 7 * 60_000, prUrl: null, ...extra });
+  check('formatJobStatus: planning', js('planning').startsWith('[build status] job #4 "Ping"') && js('planning').includes('context') && js('planning').includes('add /ping'));
+  check('formatJobStatus: awaiting_input', js('awaiting_input').includes('reply to the posted plan'));
+  check('formatJobStatus: queued', js('queued', { queuePosition: 2 }).includes('position 2') && !js('queued').includes('position'));
+  check('formatJobStatus: building', js('building').includes('7 min') && js('building', { title: null }).includes('job #4 —'));
+  check('formatJobStatus: pr_open', js('pr_open', { prUrl: 'https://x/pull/1' }).includes('https://x/pull/1'));
+  check('formatJobStatus: other statuses empty', js('merged') === '' && js('failed') === '');
   check('withNotes', withNotes([], 'hi') === 'hi' && withNotes(['a', 'b'], 'hi') === 'a\nb\n\nhi');
   check('languageDirective: empty list -> no rule', languageDirective([]) === '' && languageDirective(['Slovenian']).length > 0);
   check('withLanguageRule: untouched without languages, rule first otherwise', withLanguageRule('hi', []) === 'hi' && withLanguageRule('hi', ['Slovenian', 'English']).startsWith('[language rule]') && withLanguageRule('hi', ['Slovenian', 'English']).includes('Slovenian, English') && withLanguageRule('hi', ['Slovenian', 'English']).endsWith('\n\nhi'));
@@ -936,6 +944,10 @@ rmSync(dir, { recursive: true, force: true });
   check('formatBuildNote: queued / resumed', nt('queued', { position: 2, plan: '- x' }) === '[build update] job #4 "T": plan approved, queued for a build slot (#2 in line). Plan:\n- x' && nt('resumed').includes('restarted') && nt('resumed').includes('resuming'));
   check('formatBuildNote: conflict started / fixed / failed', nt('conflict_fix_started', { prUrl: 'u' }).includes('merge conflicts with main; trying to fix') && nt('conflict_fixed', { prUrl: 'u' }) === '[build update] job #4 "T": merge conflicts fixed. u' && nt('conflict_failed', { prUrl: 'u', reason: 'bad\nmerge' }).includes('needs a manual merge. u bad merge'));
 
+  check('guardPlanStatus: approval needs a plan card and a later user message', guardPlanStatus({ status: 'approved', planPostedAt: null, latestUserMessageAt: 5 }) === 'needs_input' && guardPlanStatus({ status: 'approved', planPostedAt: 10, latestUserMessageAt: 5 }) === 'needs_input' && guardPlanStatus({ status: 'approved', planPostedAt: 10, latestUserMessageAt: 10 }) === 'needs_input' && guardPlanStatus({ status: 'approved', planPostedAt: 10, latestUserMessageAt: null }) === 'needs_input' && guardPlanStatus({ status: 'approved', planPostedAt: 10, latestUserMessageAt: 11 }) === 'approved');
+  check('guardPlanStatus: cancelled and needs_input unaffected', guardPlanStatus({ status: 'cancelled', planPostedAt: null, latestUserMessageAt: null }) === 'cancelled' && guardPlanStatus({ status: 'needs_input', planPostedAt: 1, latestUserMessageAt: 2 }) === 'needs_input');
+  check('planChanged: first plan, whitespace-only diff, real diff, empty next', planChanged(null, 'a') && !planChanged('- a\n- b', '-  a   - b\n') && planChanged('- a', '- a\n- c') && !planChanged('- a', '  ') && planChanged(null, ''));
+
   // Several planning jobs run in parallel (different threads); one non-terminal job per thread.
   const pdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-par-')), 'p.db'));
   const pj1 = pdb.createBuildJob({ guildId: G, threadId: 'pt1', channelId: 'c', requesterId: 'u', request: 'a' });
@@ -954,6 +966,9 @@ rmSync(dir, { recursive: true, force: true });
   pdb.updateBuildJob(pj2.id, { resumeCount: 2, fixAttempts: 1, conflictNotified: true });
   const pj2b = pdb.getBuildJob(pj2.id)!;
   check('resume_count / fix_attempts / conflict_notified persist', pj2b.resumeCount === 2 && pj2b.fixAttempts === 1 && pj2b.conflictNotified === true);
+  pdb.updateBuildJob(pj2.id, { planMessageId: 'm9', planPostedAt: 77, lastPlan: '- p', triggerMessageId: 'm1' });
+  const pj2c = pdb.getBuildJob(pj2.id)!;
+  check('plan tracking columns persist (new default null)', pj2.planPostedAt === null && pj2.lastPlan === null && pj2.triggerMessageId === null && pj2c.planMessageId === 'm9' && pj2c.planPostedAt === 77 && pj2c.lastPlan === '- p' && pj2c.triggerMessageId === 'm1' && pdb.createBuildJob({ guildId: G, threadId: 'pt9', channelId: 'c', requesterId: 'u', request: 'z', triggerMessageId: 'tm' }).triggerMessageId === 'tm');
   pdb.updateBuildJob(pj2.id, { resumeCount: 0 });
   check('resume_count can be reset to 0 (per-phase budget)', pdb.getBuildJob(pj2.id)!.resumeCount === 0);
   const qhtml = requestsPage({ jobs: pdb.recentBuildJobs(G, 50), totals: pdb.buildUsageTotals(G), chatTotals: pdb.chatUsageTotals(G), chats: [], page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: 'a' }, queuePositions: { [pj3.id]: 1 } });
@@ -968,7 +983,8 @@ rmSync(dir, { recursive: true, force: true });
   const qdb = new BotDatabase(join(qdir, 'q.db'));
   const qold = qdb.getBuildJob(1)!;
   check('old build_jobs gets approved_at / resume_count / fix_attempts / conflict_notified', qold.approvedAt === null && qold.resumeCount === 0 && qold.fixAttempts === 0 && qold.conflictNotified === false && qdb.countBuildingJobs() === 1);
-  qdb.updateBuildJob(1, { approvedAt: 7, resumeCount: 1 });
+  check('old build_jobs gets plan tracking columns', qold.triggerMessageId === null && qold.planMessageId === null && qold.planPostedAt === null && qold.lastPlan === null);
+  qdb.updateBuildJob(1, { approvedAt: 7, resumeCount: 1, planPostedAt: 5, lastPlan: 'p' });
   check('migrated columns are writable', qdb.getBuildJob(1)!.approvedAt === 7 && qdb.getBuildJob(1)!.resumeCount === 1);
   qdb.close();
 
@@ -980,6 +996,19 @@ rmSync(dir, { recursive: true, force: true });
   const odb = new BotDatabase(join(odir, 'old.db'));
   check('old database gets build_jobs on open', odb.countBuildJobs(G) === 0 && !odb.getBuilderSettings().enabled);
   odb.close();
+}
+
+{
+  check('buildingActivity: none -> null', buildingActivity([]) === null);
+  check('buildingActivity: one title', buildingActivity(['Add dark mode']) === 'Building Add dark mode');
+  check('buildingActivity: untitled falls back', buildingActivity([null]) === 'Building a feature' && buildingActivity(['  ']) === 'Building a feature');
+  check('buildingActivity: several jobs', buildingActivity(['a', null, 'c']) === 'Building 3 features');
+  const longActivity = buildingActivity(['x'.repeat(300)]) ?? '';
+  check('buildingActivity: clipped to 120', longActivity.length === 120 && longActivity.endsWith('…'));
+  check('reactionChannelFor: starter message -> parent, others -> thread', reactionChannelFor('T1', 'T1', 'P1') === 'P1' && reactionChannelFor('M2', 'T1', 'P1') === 'T1');
+  check('pickReplyTarget: empty batch', pickReplyTarget([]) === null);
+  check('pickReplyTarget: latest directed wins', pickReplyTarget([{ messageId: '1', directed: true }, { messageId: '2', directed: true }, { messageId: '3', directed: false }]) === '2');
+  check('pickReplyTarget: falls back to last message', pickReplyTarget([{ messageId: '1', directed: false }, { messageId: '2', directed: false }]) === '2');
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

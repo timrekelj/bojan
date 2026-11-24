@@ -1,4 +1,4 @@
-import { Events, type Client, type SendableChannels } from 'discord.js';
+import { ActivityType, Events, type Client, type Message, type SendableChannels } from 'discord.js';
 import { config } from '../config.js';
 import type { BotDatabase, BuildJob } from '../db.js';
 import {
@@ -22,18 +22,30 @@ import { estimateCostUsd, getGoPrices, goPriceFor } from './pricing.js';
 import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
 import { formatBuildNote, type BuildNoteInfo } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prInfoFromJson, type PrInfo, type PrRef } from './parse.js';
-import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, pickJobsToStart, queuePosition } from './queue.js';
+import { BUILDING, DONE, FAILED, PLANNING, addReaction, removeOwnReaction } from './reactions.js';
+import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
 
 const PLAN_TIMEOUT_MS = 15 * 60_000;
 const BUILD_TIMEOUT_MS = 90 * 60_000;
 const PR_POLL_MS = 2 * 60_000;
-const TYPING_MS = 8_000;
 const QUEUE_TICK_MS = 30_000;
+
+interface BufferedItem {
+  text: string;
+  /** When the message was sent (ms). */
+  sentAt: number;
+  messageId?: string;
+}
 
 interface JobState {
   busy: boolean;
-  buffer: string[];
+  /** Messages that trigger the next planner turn. */
+  buffer: BufferedItem[];
+  /** Messages written while a turn was running: context for the next real turn, never a trigger or an approval. */
+  preContext: BufferedItem[];
 }
+
+const PRE_PLAN_HEADER = 'Messages written while you were working, before your latest plan was posted (context only; they can not approve the plan):';
 
 /** First ~500 chars of the visible text, for failure messages. */
 function excerpt(text: string): string {
@@ -105,7 +117,7 @@ export class BuilderRunner {
   private state(jobId: number): JobState {
     let s = this.states.get(jobId);
     if (!s) {
-      s = { busy: false, buffer: [] };
+      s = { busy: false, buffer: [], preContext: [] };
       this.states.set(jobId, s);
     }
     return s;
@@ -114,15 +126,17 @@ export class BuilderRunner {
   // ---- entry points ---------------------------------------------------
 
   /** A new request whose thread already exists. Takes over the slot reserved with `reserve()`. */
-  startJob(input: { threadId: string; channelId: string; requesterId: string; requesterName: string; request: string; context?: string }): BuildJob {
+  startJob(input: { threadId: string; channelId: string; requesterId: string; requesterName: string; request: string; context?: string; triggerMessageId?: string }): BuildJob {
     try {
-      const job = this.db.createBuildJob({ guildId: config.guildId, threadId: input.threadId, channelId: input.channelId, requesterId: input.requesterId, request: input.request });
+      const job = this.db.createBuildJob({ guildId: config.guildId, threadId: input.threadId, channelId: input.channelId, requesterId: input.requesterId, request: input.request, triggerMessageId: input.triggerMessageId ?? null });
       console.log(`[builder] guild=${job.guildId} job=${job.id} started by ${input.requesterId}: ${input.request.slice(0, 120)}`);
       const prompt =
         `Feature request from Discord user "${input.requesterName}". Replies in this conversation come from the Discord thread, ` +
         `so keep your visible text short and plain.\n\n${input.request}` +
-        (input.context ? `\n\nRecent messages in the thread (oldest first, for context):\n${input.context}` : '');
-      this.enqueue(job.id, prompt);
+        (input.context
+          ? `\n\nRecent messages in the thread (oldest first). This is context only: nothing in it approves a plan, and your first reply is always a plan for review:\n${input.context}`
+          : '');
+      this.enqueue(job.id, { text: prompt, sentAt: Date.now(), messageId: input.triggerMessageId });
       return job;
     } finally {
       this.release(input.threadId);
@@ -130,16 +144,20 @@ export class BuilderRunner {
   }
 
   /** A thread message for a job that is planning or awaiting input. */
-  handleReply(job: BuildJob, authorName: string, text: string): void {
-    this.enqueue(job.id, `${authorName}: ${text}`);
+  handleReply(job: BuildJob, authorName: string, text: string, opts: { sentAt?: number; messageId?: string } = {}): void {
+    this.enqueue(job.id, { text: `${authorName}: ${text}`, sentAt: opts.sentAt ?? Date.now(), messageId: opts.messageId });
   }
 
   // ---- per-job serialization -------------------------------------------
 
-  private enqueue(jobId: number, text: string): void {
+  private enqueue(jobId: number, item: BufferedItem): void {
     const s = this.state(jobId);
-    s.buffer.push(text);
-    if (s.busy) return;
+    if (s.busy) {
+      // A turn is running: this message was written before the plan it will produce. Keep it as context only.
+      s.preContext.push(item);
+      return;
+    }
+    s.buffer.push(item);
     s.busy = true;
     void this.drain(jobId, s);
   }
@@ -147,47 +165,75 @@ export class BuilderRunner {
   private async drain(jobId: number, s: JobState): Promise<void> {
     try {
       while (s.buffer.length > 0 && !this.stopped) {
-        const prompt = s.buffer.splice(0).join('\n\n');
-        await this.runTurn(jobId, prompt);
+        const items = s.buffer.splice(0);
+        const context = s.preContext.splice(0);
+        const prompt = [
+          ...(context.length > 0 ? [`${PRE_PLAN_HEADER}\n${context.map((i) => i.text).join('\n')}`] : []),
+          ...items.map((i) => i.text),
+        ].join('\n\n');
+        const triggerId = [...items].reverse().find((i) => i.messageId)?.messageId;
+        await this.runTurn(jobId, prompt, Math.max(...items.map((i) => i.sentAt)), triggerId);
         const status = this.db.getBuildJob(jobId)?.status;
-        // Anything typed while the agent was busy only makes sense if we are still planning.
-        if (status !== 'awaiting_input' && status !== 'planning') s.buffer.length = 0;
+        // Context only makes sense while we are still planning.
+        if (status !== 'awaiting_input' && status !== 'planning') s.preContext.length = 0;
       }
     } finally {
       s.busy = false;
-      if (s.buffer.length > 0 && !this.stopped) this.enqueue(jobId, s.buffer.splice(0).join('\n\n'));
     }
   }
 
   // ---- discord helpers --------------------------------------------------
 
-  private async post(job: BuildJob, message: BuilderMessage): Promise<void> {
+  /** Post a message to the job's thread (as a reply to `replyTo` when given); returns the sent message, or null when it could not be posted. */
+  private async post(job: BuildJob, message: BuilderMessage, replyTo?: string | null): Promise<Message | null> {
     try {
       const channel = await this.client.channels.fetch(job.threadId);
       if (!channel || !channel.isSendable()) {
         console.warn(`[builder] guild=${job.guildId} job=${job.id} thread ${job.threadId} is not sendable`);
-        return;
+        return null;
       }
-      await (channel as SendableChannels).send(message);
+      // The thread's starter message (id === thread id) can't be replied to from inside the thread.
+      const options = replyTo && replyTo !== job.threadId
+        ? { ...message, reply: { messageReference: replyTo, failIfNotExists: false }, allowedMentions: { parse: [] as never[], repliedUser: false } }
+        : message;
+      return await (channel as SendableChannels).send(options);
     } catch (err) {
       console.error(`[builder] guild=${job.guildId} job=${job.id} could not post to thread:`, err);
+      return null;
     }
   }
 
-  /** Keep the typing indicator alive until the returned function is called. */
-  private typing(job: BuildJob): () => void {
-    let channel: SendableChannels | null = null;
-    const tick = async (): Promise<void> => {
-      try {
-        channel ??= await this.client.channels.fetch(job.threadId).then((c) => (c && c.isSendable() ? (c as SendableChannels) : null));
-        await channel?.sendTyping();
-      } catch {
-        // typing is cosmetic
-      }
-    };
-    void tick();
-    const timer = setInterval(() => void tick(), TYPING_MS);
-    return () => clearInterval(timer);
+  // ---- reactions + presence -----------------------------------------------
+
+  private react(job: BuildJob, messageId: string | null | undefined, emoji: string): Promise<void> {
+    return messageId ? addReaction(this.client, reactionChannelFor(messageId, job.threadId, job.channelId), messageId, emoji, 'builder') : Promise.resolve();
+  }
+
+  private unreact(job: BuildJob, messageId: string | null | undefined, emoji: string): Promise<void> {
+    return messageId ? removeOwnReaction(this.client, reactionChannelFor(messageId, job.threadId, job.channelId), messageId, emoji, 'builder') : Promise.resolve();
+  }
+
+  /** 🔨 on the plan message while a build or conflict fix runs; also refreshes the bot activity. */
+  private buildStarted(job: BuildJob): void {
+    void this.react(job, job.planMessageId, BUILDING);
+    this.updatePresence();
+  }
+
+  /** Build/fix finished (any outcome): drop 🔨 and refresh the bot activity. */
+  private async buildEnded(jobId: number): Promise<void> {
+    const job = this.db.getBuildJob(jobId);
+    if (job) await this.unreact(job, job.planMessageId, BUILDING);
+    this.updatePresence();
+  }
+
+  /** Bot activity: "Building <title>" while jobs are building, cleared otherwise. */
+  updatePresence(): void {
+    try {
+      const text = buildingActivity(this.db.listBuildJobsByStatus(['building']).map((j) => j.title));
+      this.client.user?.setPresence({ activities: text ? [{ name: text, state: text, type: ActivityType.Custom }] : [] });
+    } catch (err) {
+      console.warn('[builder] could not update presence:', err instanceof Error ? err.message : err);
+    }
   }
 
   // ---- turns ------------------------------------------------------------
@@ -198,13 +244,16 @@ export class BuilderRunner {
     this.db.addChatNote(job.threadId, formatBuildNote({ ...info, jobId: job.id, title: fresh.title }));
   }
 
-  private fail(jobId: number, reason: string): Promise<void> {
+  private async fail(jobId: number, reason: string): Promise<void> {
+    const wasBuilding = this.db.getBuildJob(jobId)?.status === 'building';
     this.db.updateBuildJob(jobId, { error: reason.slice(0, 2000) });
     this.db.setBuildJobStatus(jobId, 'failed');
     const job = this.db.getBuildJob(jobId);
-    if (!job) return Promise.resolve();
+    if (!job) return;
+    if (wasBuilding && job.planMessageId) void this.react(job, job.planMessageId, FAILED);
+    this.updatePresence();
     this.note(job, { event: 'failed', reason });
-    return this.post(job, buildFailedCard({ reason, usage: this.usageOf(job) }));
+    await this.post(job, buildFailedCard({ reason, usage: this.usageOf(job) }), job.planMessageId);
   }
 
   private usageOf(job: BuildJob): { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number; costUsd: number } | null {
@@ -236,21 +285,23 @@ export class BuilderRunner {
   }
 
   /** One planning turn: set up on the first call, then prompt the planner and handle its reply. */
-  private async runTurn(jobId: number, prompt: string): Promise<void> {
+  private async runTurn(jobId: number, prompt: string, latestUserMessageAt: number, triggerId?: string): Promise<void> {
     let job = this.db.getBuildJob(jobId);
     if (!job) return;
-    const stopTyping = this.typing(job);
+    const trigger = triggerId ?? job.triggerMessageId;
+    const added = this.react(job, trigger, PLANNING);
     try {
       this.db.setBuildJobStatus(jobId, 'planning');
       if (!job.sessionId) job = await this.setup(job);
       const reply = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS);
       await this.saveUsage(job);
-      await this.handlePlanReply(this.db.getBuildJob(jobId) ?? job, reply);
+      await this.handlePlanReply(this.db.getBuildJob(jobId) ?? job, reply, latestUserMessageAt, trigger);
     } catch (err) {
       console.error(`[builder] guild=${job.guildId} job=${job.id} turn failed:`, err);
       await this.fail(jobId, err instanceof Error ? err.message : String(err));
     } finally {
-      stopTyping();
+      await added;
+      await this.unreact(job, trigger, PLANNING);
     }
   }
 
@@ -275,7 +326,12 @@ export class BuilderRunner {
     return this.db.getBuildJob(job.id) as BuildJob;
   }
 
-  private async handlePlanReply(job: BuildJob, reply: AgentReply): Promise<void> {
+  /**
+   * `latestUserMessageAt`: send time of the newest user message that triggered this turn. Restart recovery
+   * doesn't know the triggering messages and passes Date.now(), so a recovered turn may approve as long as
+   * a plan card was already posted.
+   */
+  private async handlePlanReply(job: BuildJob, reply: AgentReply, latestUserMessageAt: number, replyTo?: string | null): Promise<void> {
     if (reply.error) {
       await this.fail(job.id, `The agent reported an error: ${reply.error}`);
       return;
@@ -290,7 +346,7 @@ export class BuilderRunner {
       // No usable result block: show what it said and let the user continue the conversation.
       console.warn(`[builder] guild=${job.guildId} job=${job.id} planner reply had no valid result block`);
       this.db.setBuildJobStatus(job.id, 'awaiting_input');
-      await this.post(job, buildNoteCard(visible));
+      await this.post(job, buildNoteCard(visible), replyTo);
       return;
     }
     if (plan.title) this.db.updateBuildJob(job.id, { title: plan.title });
@@ -302,9 +358,21 @@ export class BuilderRunner {
       await this.post(job, buildCancelledCard(this.usageOf(this.db.getBuildJob(job.id) ?? job)));
       return;
     }
-    if (plan.status === 'needs_input') {
+    const status = guardPlanStatus({ status: plan.status, planPostedAt: job.planPostedAt, latestUserMessageAt });
+    const downgraded = plan.status === 'approved' && status === 'needs_input';
+    if (downgraded) console.warn(`[builder] guild=${job.guildId} job=${job.id} approval ignored: no user message after the plan`);
+    if (status === 'needs_input') {
       this.db.setBuildJobStatus(job.id, 'awaiting_input');
-      await this.post(job, buildPlanCard({ title, plan: plan.plan, questions: plan.questions, visible }));
+      if (downgraded || planChanged(job.lastPlan, plan.plan)) {
+        const sent = await this.post(job, buildPlanCard({ title, plan: plan.plan, questions: plan.questions, visible }), replyTo);
+        if (sent) {
+          this.db.updateBuildJob(job.id, { planMessageId: sent.id, planPostedAt: Date.now(), lastPlan: plan.plan || job.lastPlan || visible });
+        }
+      } else {
+        const questions = plan.questions.length > 0 ? `**Questions**\n${plan.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}` : '';
+        const text = [visible, questions].filter((t) => t.length > 0).join('\n\n');
+        if (text) await this.post(job, buildNoteCard(text), replyTo);
+      }
       return;
     }
     // approved: build now when a slot is free (and nobody is waiting ahead), otherwise queue up
@@ -339,22 +407,22 @@ export class BuilderRunner {
     this.db.updateBuildJob(job.id, { resumeCount: 0 });
     this.db.setBuildJobStatus(job.id, 'building');
     this.note(job, { event: 'approved', plan });
+    this.buildStarted(this.db.getBuildJob(job.id) ?? job);
     void this.inBackground(job, async (fresh) => {
-      await this.post(fresh, buildBuildingCard(fresh.title ?? ''));
+      await this.post(fresh, buildBuildingCard(fresh.title ?? ''), fresh.planMessageId);
       await this.runBuild(fresh);
     }, (reason) => this.fail(job.id, reason));
   }
 
-  /** Run a slot-holding task: typing indicator, failure handling, and start the next queued job afterwards. */
+  /** Run a slot-holding task: failure handling, reaction/presence cleanup, and start the next queued job afterwards. */
   private async inBackground(job: BuildJob, task: (fresh: BuildJob) => Promise<void>, onError: (reason: string) => Promise<void>): Promise<void> {
-    const stopTyping = this.typing(job);
     try {
       await task(this.db.getBuildJob(job.id) ?? job);
     } catch (err) {
       console.error(`[builder] guild=${job.guildId} job=${job.id} background run failed:`, err);
       await onError(err instanceof Error ? err.message : String(err)).catch(() => undefined);
     } finally {
-      stopTyping();
+      await this.buildEnded(job.id);
       this.drainQueue();
     }
   }
@@ -376,8 +444,9 @@ export class BuilderRunner {
     const fresh = this.db.getBuildJob(job.id) ?? job;
     console.log(`[builder] guild=${job.guildId} job=${job.id} PR ${job.prUrl} has conflicts, trying to fix`);
     this.note(fresh, { event: 'conflict_fix_started', prUrl: job.prUrl });
+    this.buildStarted(fresh);
     void this.inBackground(fresh, async (f) => {
-      await this.post(f, buildConflictFixCard(f.title ?? ''));
+      await this.post(f, buildConflictFixCard(f.title ?? ''), f.planMessageId);
       const agent = this.getAgent();
       await agent.switchAgent(f.sessionId as string, 'feature-build');
       const reply = await agent.promptAndWait(f.sessionId as string, conflictFixPrompt(f.prUrl as string), BUILD_TIMEOUT_MS);
@@ -435,13 +504,15 @@ export class BuilderRunner {
     const fresh = this.db.getBuildJob(job.id) ?? job;
     this.note(fresh, { event: 'pr_opened', prUrl: build.prUrl, summary: build.summary });
     console.log(`[builder] guild=${job.guildId} job=${job.id} PR opened: ${build.prUrl}`);
-    await this.post(fresh, buildPrOpenedCard({ title: fresh.title ?? '', prUrl: build.prUrl, summary: build.summary, usage: this.usageOf(fresh) }));
+    void this.react(fresh, fresh.planMessageId, DONE);
+    await this.post(fresh, buildPrOpenedCard({ title: fresh.title ?? '', prUrl: build.prUrl, summary: build.summary, usage: this.usageOf(fresh) }), fresh.planMessageId);
   }
 
   // ---- startup: recovery + PR tracking -----------------------------------
 
   start(): void {
     const go = (): void => {
+      this.updatePresence();
       void this.recover().catch((err) => console.error('[builder] recovery failed:', err));
       void this.pollPrs();
       this.prTimer = setInterval(() => void this.pollPrs(), PR_POLL_MS);
@@ -477,11 +548,11 @@ export class BuilderRunner {
       // Run each recovery in the background so one long build doesn't delay the others or startup.
       void this.recoverJob(job, s).finally(() => {
         s.busy = false;
-        if (s.buffer.length > 0 && !this.stopped) this.enqueue(job.id, s.buffer.splice(0).join('\n\n'));
         this.drainQueue();
       });
     }
     this.drainQueue();
+    this.updatePresence();
   }
 
   private async recoverJob(job: BuildJob, s: JobState): Promise<void> {
@@ -489,7 +560,10 @@ export class BuilderRunner {
     // A building job that already has a PR and a fix attempt was a conflict-fix run.
     const fix = kind === 'build' && job.prUrl !== null && job.fixAttempts > 0;
     const giveUp = (reason: string): Promise<void> => (fix ? this.failFix(job.id, reason) : this.fail(job.id, reason));
-    const stopTyping = this.typing(job);
+    // Reactions while recovering: 📝 on the triggering message until a plan was posted; 🔨 for builds and fixes.
+    const planning = kind === 'plan' && job.planPostedAt === null;
+    const added = planning ? this.react(job, job.triggerMessageId, PLANNING) : Promise.resolve();
+    if (kind === 'build') this.buildStarted(job);
     try {
       if (!job.sessionId || !(await this.getAgent().sessionExists(job.sessionId))) {
         await giveUp('The bot restarted while this request was being set up, and its agent session could not be recovered. Please ask again.');
@@ -522,14 +596,18 @@ export class BuilderRunner {
       const fresh = this.db.getBuildJob(job.id) ?? job;
       if (fix) await this.handleFixReply(fresh, reply);
       else if (kind === 'build') await this.handleBuildReply(fresh, reply);
-      else await this.handlePlanReply(fresh, reply);
+      else await this.handlePlanReply(fresh, reply, Date.now(), job.triggerMessageId);
     } catch (err) {
       console.error(`[builder] guild=${job.guildId} job=${job.id} recovery failed:`, err);
       await giveUp(err instanceof Error ? err.message : String(err));
     } finally {
-      stopTyping();
+      if (planning) {
+        await added;
+        await this.unreact(job, job.triggerMessageId, PLANNING);
+      }
+      if (kind === 'build') await this.buildEnded(job.id);
       const status = this.db.getBuildJob(job.id)?.status;
-      if (status !== 'awaiting_input' && status !== 'planning') s.buffer.length = 0;
+      if (status !== 'awaiting_input' && status !== 'planning') s.preContext.length = 0;
     }
   }
 
