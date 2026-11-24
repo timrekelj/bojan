@@ -1072,6 +1072,16 @@ export class BotDatabase {
     return row.xp;
   }
 
+  /** Total XP per member of a guild, for level tags next to stat rows. */
+  getUserXpTotals(guildId: string): Record<string, number> {
+    const rows = this.db
+      .prepare('SELECT user_id AS userId, xp FROM user_xp WHERE guild_id = ?')
+      .all(guildId) as unknown as { userId: string; xp: number }[];
+    const out: Record<string, number> = {};
+    for (const r of rows) out[r.userId] = r.xp;
+    return out;
+  }
+
   // ---- settings -------------------------------------------------------
 
   getSettings(guildId: string): Settings {
