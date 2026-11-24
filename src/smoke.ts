@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase, clampLimitThreshold, type WebSessionRow } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
-import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, steamLevelColors, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
+import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, steamLevelColors, steamLevelShape, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
@@ -131,15 +131,29 @@ check(
   `${levelTag(242_000)}`,
 );
 check(
-  'steam level badge colours by 10-level band',
+  'steam level badge colours cycle every 10 levels in each 100 band',
   steamLevelColors(0).from === steamLevelColors(9).from &&
     steamLevelColors(10).from !== steamLevelColors(9).from &&
-    steamLevelColors(69).from === '#c0564a' &&
-    steamLevelColors(69).to === '#8f352c' &&
-    steamLevelColors(100).from === '#d4af37' &&
-    steamLevelColors(500).to === '#a3821f' &&
+    steamLevelColors(69).from === '#7d5fb8' &&
+    steamLevelColors(69).to === '#4f3a86' &&
+    steamLevelColors(100).from === steamLevelColors(0).from &&
+    steamLevelColors(190).from === steamLevelColors(90).from &&
+    steamLevelColors(90).from === '#a89536' &&
+    steamLevelColors(500).from === steamLevelColors(0).from &&
     steamLevelColors(-5).from === steamLevelColors(0).from,
   JSON.stringify(steamLevelColors(69)),
+);
+check(
+  'steam level badge shape changes every 100 levels',
+  steamLevelShape(0) === 'circle' &&
+    steamLevelShape(99) === 'circle' &&
+    steamLevelShape(100) === 'hex' &&
+    steamLevelShape(199) === 'hex' &&
+    steamLevelShape(200) === 'squircle' &&
+    steamLevelShape(800) === 'bevel' &&
+    steamLevelShape(5000) === 'bevel' &&
+    steamLevelShape(-5) === 'circle',
+  `${steamLevelShape(0)} ${steamLevelShape(100)} ${steamLevelShape(200)} ${steamLevelShape(5000)}`,
 );
 const x1 = awardMessageXp(db, G, 'gamer', now);
 check('first message earns 5-10 xp', x1 !== null && x1.xpGained >= 5 && x1.xpGained <= 10 && x1.xp === x1.xpGained && x1.newLevel === 0 && !x1.leveledUp, JSON.stringify(x1));
@@ -886,8 +900,8 @@ rmSync(dir, { recursive: true, force: true });
   check(
     'youSection: level row with role-colored rounded progress bar',
     youLvl.includes('<div class="levelrow">') &&
-      youLvl.includes('class="levelbadge" data-len="2" role="img" aria-label="Level 69"') &&
-      youLvl.includes('--lv-from:#c0564a;--lv-to:#8f352c') &&
+      youLvl.includes('class="levelbadge" data-shape="circle" data-len="2" role="img" aria-label="Level 69"') &&
+      youLvl.includes('--lv-from:#7d5fb8;--lv-to:#4f3a86') &&
       youLvl.includes('<span class="levelcap">Level</span>') &&
       youLvl.includes('500 / 7,000 XP') &&
       youLvl.includes('role="progressbar"') &&
@@ -918,10 +932,10 @@ rmSync(dir, { recursive: true, force: true });
     { total: 100, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check(
-    'youSection: 100+ gets the gold badge and a three-digit layout',
-    youMax.includes('class="levelbadge" data-len="3"') &&
+    'youSection: 100+ wraps the palette and gets a hex badge with a three-digit layout',
+    youMax.includes('class="levelbadge" data-shape="hex" data-len="3"') &&
       youMax.includes('aria-label="Level 100"') &&
-      youMax.includes('--lv-to:#a3821f'),
+      youMax.includes('--lv-to:#565c66'),
   );
   const youNoXp = youSection(
     {
