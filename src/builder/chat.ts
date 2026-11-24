@@ -3,7 +3,7 @@
 // and whether the conversation is a feature request that should be handed to the build runner.
 import { PermissionFlagsBits, type Client, type Message, type SendableChannels } from 'discord.js';
 import { config } from '../config.js';
-import type { BotDatabase, ChatThread } from '../db.js';
+import { ACTIVE_BUILD_STATUSES, type BotDatabase, type ChatThread } from '../db.js';
 import {
   chatThreadNameFor,
   chunkMessage,
@@ -233,7 +233,7 @@ export class ChatRunner {
         const batch = s.buffer.splice(0);
         // While a build job owns the thread, its messages belong to the build runner.
         const job = this.db.getBuildJobByThread(threadId);
-        if (job && (job.status === 'planning' || job.status === 'awaiting_input' || job.status === 'building')) continue;
+        if (job && ACTIVE_BUILD_STATUSES.includes(job.status)) continue;
         await this.runTurn(threadId, batch);
       }
     } finally {

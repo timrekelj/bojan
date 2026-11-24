@@ -846,6 +846,8 @@ rmSync(dir, { recursive: true, force: true });
   pdb.updateBuildJob(pj2.id, { resumeCount: 2, fixAttempts: 1, conflictNotified: true });
   const pj2b = pdb.getBuildJob(pj2.id)!;
   check('resume_count / fix_attempts / conflict_notified persist', pj2b.resumeCount === 2 && pj2b.fixAttempts === 1 && pj2b.conflictNotified === true);
+  pdb.updateBuildJob(pj2.id, { resumeCount: 0 });
+  check('resume_count can be reset to 0 (per-phase budget)', pdb.getBuildJob(pj2.id)!.resumeCount === 0);
   const qhtml = requestsPage({ jobs: pdb.recentBuildJobs(G, 50), totals: pdb.buildUsageTotals(G), chatTotals: pdb.chatUsageTotals(G), chats: [], page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: 'a' }, queuePositions: { [pj3.id]: 1 } });
   check('requests page shows queued position', qhtml.includes('queued #1'));
 

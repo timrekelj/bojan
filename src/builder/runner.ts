@@ -320,6 +320,7 @@ export class BuilderRunner {
     console.log(`[builder] guild=${job.guildId} job=${job.id} approved, queued #${position}`);
     this.note(queued, { event: 'queued', plan: plan.plan, position });
     await this.post(queued, buildQueuedCard({ title, position }));
+    this.drainQueue();
   }
 
   /** Start queued jobs (FIFO) while build slots are free. Synchronous, so slots can't be double-booked. */
@@ -335,6 +336,7 @@ export class BuilderRunner {
 
   /** Take a build slot (status `building`) and run the build in the background. */
   private launchBuild(job: BuildJob, plan?: string): void {
+    this.db.updateBuildJob(job.id, { resumeCount: 0 });
     this.db.setBuildJobStatus(job.id, 'building');
     this.note(job, { event: 'approved', plan });
     void this.inBackground(job, async (fresh) => {
@@ -369,7 +371,7 @@ export class BuilderRunner {
 
   /** The single automatic attempt: the job takes a build slot again and the agent merges main into its branch. */
   private launchFix(job: BuildJob): void {
-    this.db.updateBuildJob(job.id, { fixAttempts: job.fixAttempts + 1 });
+    this.db.updateBuildJob(job.id, { fixAttempts: job.fixAttempts + 1, resumeCount: 0 });
     this.db.setBuildJobStatus(job.id, 'building');
     const fresh = this.db.getBuildJob(job.id) ?? job;
     console.log(`[builder] guild=${job.guildId} job=${job.id} PR ${job.prUrl} has conflicts, trying to fix`);
@@ -390,6 +392,10 @@ export class BuilderRunner {
     const build = normalizeBuildResult(result);
     if (!build) return this.failFix(job.id, `The build agent did not report a result.${visible ? `\n\n${excerpt(visible)}` : ''}`);
     if (build.status === 'failed') return this.failFix(job.id, build.reason);
+    if (job.prUrl && build.prUrl !== job.prUrl) {
+      console.warn(`[builder] guild=${job.guildId} job=${job.id} conflict fix reported a different PR (keeping ${job.prUrl}, agent said ${build.prUrl})`);
+      return this.failFix(job.id, `The build agent reported a different pull request (${build.prUrl}) than the one being tracked (${job.prUrl}).`);
+    }
     this.db.updateBuildJob(job.id, { prUrl: build.prUrl, error: null });
     this.db.setBuildJobStatus(job.id, 'pr_open');
     const fresh = this.db.getBuildJob(job.id) ?? job;

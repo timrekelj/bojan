@@ -247,7 +247,7 @@ export class OpenCodeAgent {
       const res = await this.client.message.list({ sessionID, order: 'desc', limit: 20 });
       return lastConversationIsAssistant(res.data as unknown as MessageLike[]);
     } catch {
-      return true;
+      return false;
     }
   }
 
