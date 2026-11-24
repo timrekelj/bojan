@@ -24,6 +24,7 @@ import { maybeConvert } from './embeds/converter.js';
 import { awardMessageXp, awardReactionXp, buildLevelUpMessage, levelProgress, levelTag, XP_BACKFILL_PER_MESSAGE } from './levels.js';
 import { handleBuilderMessage } from './builder/handler.js';
 import type { BuilderRunner } from './builder/runner.js';
+import { rolesToSwap } from './colors.js';
 
 export function createClient(): Client {
   return new Client({
@@ -393,6 +394,46 @@ async function handleReactionXp(client: Client, db: BotDatabase, guildId: string
   });
 }
 
+/**
+ * Assign (or drop) the name-colour role of a picker message. A member keeps at
+ * most one colour role. Best-effort: a missing permission or a role above the
+ * bot's highest role only logs, it never breaks reaction tracking.
+ */
+async function applyColorRole(client: Client, db: BotDatabase, guildId: string, userId: string, messageId: string, on: boolean): Promise<void> {
+  const roleId = db.colorRoleForMessage(guildId, messageId);
+  if (!roleId) return;
+  const guild = client.guilds.cache.get(guildId) ?? (await client.guilds.fetch(guildId));
+  const me = guild.members.me ?? (await guild.members.fetchMe());
+  if (!me.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    console.error(`[colors] missing Manage Roles permission in guild ${guildId}`);
+    return;
+  }
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return;
+  if (!on) {
+    if (member.roles.cache.has(roleId)) {
+      await member.roles.remove(roleId, 'Name colour removed (reaction removed)');
+      console.log(`[colors] ${userId} dropped a name colour in guild ${guildId}`);
+    }
+    return;
+  }
+  const role = guild.roles.cache.get(roleId) ?? (await guild.roles.fetch(roleId).catch(() => null));
+  if (!role) {
+    console.error(`[colors] role ${roleId} no longer exists in guild ${guildId}`);
+    return;
+  }
+  if (role.position >= me.roles.highest.position) {
+    console.error(`[colors] role ${role.name} (${roleId}) is not below the bot's highest role in guild ${guildId}`);
+    return;
+  }
+  const { remove, add } = rolesToSwap([...member.roles.cache.keys()], db.getColorRoles(guildId).map((r) => r.roleId), roleId);
+  if (remove.length > 0) await member.roles.remove(remove, 'Name colour changed');
+  if (add.length > 0) {
+    await member.roles.add(add, 'Name colour picked');
+    console.log(`[colors] ${userId} -> ${role.name} in guild ${guildId}`);
+  }
+}
+
 export function registerEvents(client: Client, db: BotDatabase, builder: BuilderRunner): void {
   client.once(Events.ClientReady, async (ready) => {
     console.log(`[bot] logged in as ${ready.user.tag} (${ready.user.id})`);
@@ -432,6 +473,9 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
         let message = reaction.message;
         if (message.partial) message = await message.fetch();
         if (!message.guildId) return;
+        // Name-colour pickers: reacting to a picker message assigns its role.
+        void applyColorRole(client, db, message.guildId, user.id, message.id, true)
+          .catch((err) => console.error(`[colors] reaction add failed in guild ${message.guildId}:`, err));
         // Reaction XP: every guild reaction by a member has the 1% chance,
         // including reactions on the bot's own messages.
         const settings = db.getSettings(message.guildId);
@@ -453,6 +497,20 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
         });
       } catch {
         // reaction tracking is best-effort (partials, deleted messages, ...)
+      }
+    })();
+  });
+
+  client.on(Events.MessageReactionRemove, (reaction, user) => {
+    void (async () => {
+      try {
+        if (user.bot) return;
+        let message = reaction.message;
+        if (message.partial) message = await message.fetch();
+        if (!message.guildId) return;
+        await applyColorRole(client, db, message.guildId, user.id, message.id, false);
+      } catch (err) {
+        console.error('[colors] reaction remove failed:', err);
       }
     })();
   });

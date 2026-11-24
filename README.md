@@ -35,6 +35,12 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   (settings section) — until one is set, XP is tracked silently. XP is not
   retroactive by itself, but admins can run the one-time `/backfill xp` to
   grant 10 XP for every already-recorded message.
+- **Name-colour roles** — the roles are made by hand; in the dashboard you
+  tick which ones are name colours and pick a channel. The bot then posts one
+  Components V2 message per role there with a 🎨 marker reaction: reacting
+  gives the member that role and removes their other name-colour roles (one
+  colour per member), removing the reaction drops it. Needs **Manage Roles**,
+  and the colour roles must sit below the bot's highest role.
 - **Weekly stats message** — on a configurable day/hour (per guild timezone,
   weeks run Monday–Sunday) the bot posts last week's recap to a configured
   channel: total messages and reactions, top-5 messagers, top-5 channels,
@@ -215,7 +221,8 @@ npm ci && npm run build && npm start    # with .env in place
    **Manage Webhooks** (it reposts via webhook), Embed Links, **Attach Files**
    (the weekly stats post uploads a chart image), **Create Public Threads** and
    **Send Messages in Threads** (self-building feature requests, see below), **Add Reactions** (status
-   emoji on messages the assistant is working on).
+   emoji on messages the assistant is working on), **Manage Roles** (name-colour pickers; the colour
+   roles must sit below the bot's highest role).
    Open the URL and invite the bot to your server.
 4. `GUILD_ID`: enable Discord Developer Mode, right-click your server →
    Copy Server ID.

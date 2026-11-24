@@ -77,6 +77,19 @@ export interface ReactionCountRow {
   count: number;
 }
 
+/** A pre-made role used as a name colour, plus the picker message posted for it. */
+export interface ColorRoleRow {
+  roleId: string;
+  messageId: string | null;
+  postedAt: number | null;
+}
+
+export interface ColorSettings {
+  guildId: string;
+  /** Channel the per-role picker messages are posted in. */
+  channelId: string | null;
+}
+
 export interface DayCount {
   day: string; // YYYY-MM-DD in the guild timezone
   count: number;
@@ -235,6 +248,19 @@ CREATE TABLE IF NOT EXISTS free_posted (
   game_key TEXT NOT NULL,
   posted_at INTEGER NOT NULL,
   PRIMARY KEY (guild_id, game_key)
+);
+
+CREATE TABLE IF NOT EXISTS color_roles (
+  guild_id TEXT NOT NULL,
+  role_id TEXT NOT NULL,
+  message_id TEXT,
+  posted_at INTEGER,
+  PRIMARY KEY (guild_id, role_id)
+);
+CREATE INDEX IF NOT EXISTS idx_color_roles_message ON color_roles (guild_id, message_id);
+CREATE TABLE IF NOT EXISTS color_settings (
+  guild_id TEXT PRIMARY KEY,
+  channel_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS bot_state (
@@ -1226,6 +1252,66 @@ export class BotDatabase {
 
   countFreePosted(guildId: string): number {
     return (this.db.prepare('SELECT COUNT(*) AS n FROM free_posted WHERE guild_id = ?').get(guildId) as { n: number }).n;
+  }
+
+  // ---- name colours ---------------------------------------------------
+
+  getColorSettings(guildId: string): ColorSettings {
+    const row = this.db.prepare('SELECT channel_id FROM color_settings WHERE guild_id = ?').get(guildId) as { channel_id: string | null } | undefined;
+    return { guildId, channelId: row?.channel_id ?? null };
+  }
+
+  saveColorSettings(s: ColorSettings): void {
+    this.db
+      .prepare(`INSERT INTO color_settings (guild_id, channel_id) VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id`)
+      .run(s.guildId, s.channelId);
+  }
+
+  getColorRoles(guildId: string): ColorRoleRow[] {
+    const rows = this.db.prepare('SELECT role_id, message_id, posted_at FROM color_roles WHERE guild_id = ? ORDER BY role_id').all(guildId) as {
+      role_id: string;
+      message_id: string | null;
+      posted_at: number | null;
+    }[];
+    return rows.map((r) => ({ roleId: r.role_id, messageId: r.message_id, postedAt: r.posted_at }));
+  }
+
+  /** Keep only `roleIds`; returns the dropped roles so their picker messages can be deleted. */
+  saveColorSelection(guildId: string, roleIds: readonly string[]): ColorRoleRow[] {
+    const keep = new Set(roleIds);
+    const dropped = this.getColorRoles(guildId).filter((r) => !keep.has(r.roleId));
+    this.db.exec('BEGIN');
+    try {
+      const insert = this.db.prepare('INSERT OR IGNORE INTO color_roles (guild_id, role_id) VALUES (?, ?)');
+      for (const roleId of roleIds) insert.run(guildId, roleId);
+      const remove = this.db.prepare('DELETE FROM color_roles WHERE guild_id = ? AND role_id = ?');
+      for (const r of dropped) remove.run(guildId, r.roleId);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return dropped;
+  }
+
+  setColorMessage(guildId: string, roleId: string, messageId: string | null, ts = Date.now()): void {
+    this.db
+      .prepare('UPDATE color_roles SET message_id = ?, posted_at = ? WHERE guild_id = ? AND role_id = ?')
+      .run(messageId, messageId ? ts : null, guildId, roleId);
+  }
+
+  /** Forget every stored picker message (the channel changed); returns the old rows. */
+  clearColorMessages(guildId: string): ColorRoleRow[] {
+    const posted = this.getColorRoles(guildId).filter((r) => r.messageId);
+    this.db.prepare('UPDATE color_roles SET message_id = NULL, posted_at = NULL WHERE guild_id = ?').run(guildId);
+    return posted;
+  }
+
+  /** Role id claimed by reacting to `messageId`, or null when it is not a colour message. */
+  colorRoleForMessage(guildId: string, messageId: string): string | null {
+    const row = this.db.prepare('SELECT role_id FROM color_roles WHERE guild_id = ? AND message_id = ?').get(guildId, messageId) as { role_id: string } | undefined;
+    return row?.role_id ?? null;
   }
 
   // ---- embed conversion log -------------------------------------------

@@ -38,6 +38,7 @@ import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpProm
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
+import { buildColorMessage, rolesToSwap, sortColorRoles } from './colors.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'bojan-smoke-'));
 const db = new BotDatabase(join(dir, 'test.db'));
@@ -503,6 +504,38 @@ rmSync(dir, { recursive: true, force: true });
   const plain = buildFreeGameMessage(fixtures[0]!);
   check('announcement card: no ping → no mentions', 'parse' in plain.allowedMentions && plain.allowedMentions.parse.length === 0);
 
+  // ---- name colours ---------------------------------------------------
+  const swap = rolesToSwap(['r1', 'x'], ['r1', 'r2', 'r3'], 'r2');
+  check('colors: rolesToSwap drops other colour roles and adds the chosen one', swap.remove.join() === 'r1' && swap.add.join() === 'r2');
+  const same = rolesToSwap(['r2'], ['r1', 'r2'], 'r2');
+  check('colors: rolesToSwap is a no-op when the colour is already worn', same.remove.length === 0 && same.add.length === 0);
+  const unrelated = rolesToSwap(['x'], ['r1', 'r2'], 'r1');
+  check('colors: rolesToSwap leaves unrelated roles alone', unrelated.remove.length === 0 && unrelated.add.join() === 'r1');
+  check('colors: sortColorRoles by position then name',
+    sortColorRoles([{ name: 'b', position: 1 }, { name: 'a', position: 3 }, { name: 'a', position: 1 }]).map((r) => `${r.name}${r.position}`).join() === 'a3,a1,b1');
+  const colorMsg = buildColorMessage('r9');
+  const colorJson = JSON.stringify(colorMsg.components.map((c) => c.toJSON()));
+  check('colors: picker message is a V2 card mentioning the role without pings',
+    colorMsg.flags === MessageFlags.IsComponentsV2 && colorJson.includes('<@&r9>') && JSON.stringify(colorMsg.allowedMentions) === '{"parse":[],"repliedUser":false}');
+
+  const cdir = mkdtempSync(join(tmpdir(), 'bojan-colors-'));
+  const cdb = new BotDatabase(join(cdir, 'colors.db'));
+  check('colors: settings default to no channel and no roles', cdb.getColorSettings(G).channelId === null && cdb.getColorRoles(G).length === 0);
+  cdb.saveColorSettings({ guildId: G, channelId: 'ch1' });
+  check('colors: selection saved', cdb.saveColorSelection(G, ['r1', 'r2', 'r3']).length === 0 && cdb.getColorRoles(G).length === 3 && cdb.getColorSettings(G).channelId === 'ch1');
+  cdb.setColorMessage(G, 'r1', 'm1');
+  cdb.setColorMessage(G, 'r2', 'm2');
+  check('colors: picker message maps back to its role',
+    cdb.colorRoleForMessage(G, 'm1') === 'r1' && cdb.colorRoleForMessage(G, 'm2') === 'r2' && cdb.colorRoleForMessage(G, 'nope') === null);
+  const droppedColors = cdb.saveColorSelection(G, ['r1', 'r3']);
+  check('colors: unselected role is dropped with its message',
+    droppedColors.length === 1 && droppedColors[0]!.roleId === 'r2' && droppedColors[0]!.messageId === 'm2' && cdb.getColorRoles(G).length === 2);
+  const clearedColors = cdb.clearColorMessages(G);
+  check('colors: a channel change clears stored messages',
+    clearedColors.length === 1 && clearedColors[0]!.roleId === 'r1' && cdb.getColorRoles(G).every((r) => r.messageId === null));
+  cdb.close();
+  rmSync(cdir, { recursive: true, force: true });
+
   const fdir = mkdtempSync(join(tmpdir(), 'bojan-free-'));
   const fdb = new BotDatabase(join(fdir, 'free.db'));
   const fs0 = fdb.getFreeSettings(G);
@@ -923,6 +956,7 @@ rmSync(dir, { recursive: true, force: true });
     saved: true,
     weeklyFlash: null,
     free: { settings: { guildId: G, channelId: 'c1', pingRoleId: 'r1', stores: ['steam'], includeDlc: false, includeBeta: true, includeMobile: false }, roles: [{ id: 'r1', name: 'Gamers' }], webhookEnabled: false, postedCount: 3, flash: null },
+    color: { channelId: 'c2', roles: [{ id: 'r1', name: 'Gamers' }, { id: 'cr1', name: 'Red <x>' }], selected: ['cr1'], posted: 1, canManage: true, flash: null },
     builder: {
       settings: { enabled: true, model: 'opencode-go/m"1', chatEnabled: false, chatModel: 'opencode-go/c', chatDecisionModel: 'opencode-go/d', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 2, limitThreshold: 90 },
       passwordSet: true,
@@ -964,6 +998,13 @@ rmSync(dir, { recursive: true, force: true });
       freeForm.includes('name="includeDlc" value="1">') && freeForm.includes('name="includeBeta" value="1" checked>') && freeForm.includes('name="includeMobile" value="1">') &&
       (freeForm.match(/type="submit"/g) ?? []).length === 1 && setHtmlV.includes('FreeStuff webhook disabled (set FREESTUFF_PUBLIC_KEY)') && setHtmlV.includes('3 recorded as announced'),
   );
+  const colorForm = formOf('/color-settings');
+  check(
+    'settingsPage: name colour form keeps channel and role chips, status sits above it',
+    colorForm.includes('<select id="colorChannel" name="channel"') && colorForm.includes('<option value="c2" selected>#bots &lt;b&gt;</option>') &&
+      colorForm.includes('name="colorRoles" value="cr1" checked><span>@Red &lt;x&gt;</span>') && colorForm.includes('name="colorRoles" value="r1"><span>@Gamers</span>') &&
+      setHtmlV.includes('Manage Roles granted') && setHtmlV.includes('1 of 1 messages posted') && !colorForm.includes('@Red <x>'),
+  );
   check(
     'settingsPage: AI assistant form keeps its field names, escapes values, shows limit meters',
     aiForm.includes('name="chatEnabled" value="1">') && aiForm.includes('name="enabled" value="1" checked>') &&
@@ -977,7 +1018,7 @@ rmSync(dir, { recursive: true, force: true });
   check(
     'settingsPage: section nav, labels tied to inputs, flash, no live polling without Dokploy',
     setHtmlV.includes('<nav class="secnav" aria-label="Settings sections">') &&
-      ['weekly', 'embeds', 'leveling', 'free', 'builder'].every((id) => setHtmlV.includes(`<a href="#${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
+      ['weekly', 'embeds', 'leveling', 'colors', 'free', 'builder'].every((id) => setHtmlV.includes(`<a href="#${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
       ['statsChannel', 'timezone', 'levelupChannel', 'freeChannel', 'freeRole', 'chatModel', 'chatDecisionModel', 'chatLanguages', 'builderModel', 'maxParallelBuilds', 'limitThreshold'].every((id) => setHtmlV.includes(`<label for="${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
       setHtmlV.includes('<div class="flash" role="status">Settings saved.</div>') && setHtmlV.includes("searchParams.delete('saved')") &&
       setHtmlV.includes('<a href="/dashboard/settings" aria-current="page">') && (setHtmlV.match(/<h1/g) ?? []).length === 1 &&
