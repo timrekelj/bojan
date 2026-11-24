@@ -24,25 +24,37 @@ export function parseChatReply(text: string): ChatReply {
 export const FEATURE_REQUEST_QUESTION = {
   name: 'feature_request',
   instructions:
-    'Does the LATEST message ask for a new feature, a change or a bug fix in this Discord bot itself (not a general question, not just discussing an idea, not about other software)?',
+    'Does this message ask for a new feature, a change or a bug fix in this Discord bot itself (not a general question, not just discussing an idea, not about other software)?',
   criteria: {
-    true: 'The latest message clearly asks for the Discord bot to gain a feature, change its behavior or get a bug fixed.',
+    true: 'The message clearly asks for the Discord bot to gain a feature, change its behavior or get a bug fixed.',
     false: 'A general question, small talk, only discussing an idea, or about anything other than this bot.',
   },
 };
 
 /** Probability from the decision model -> yes/no (null = no decision = no). */
-export function isFeatureRequest(probability: number | null, threshold = 0.7): boolean {
+export function isFeatureRequest(probability: number | null, threshold = 0.5): boolean {
   return probability !== null && Number.isFinite(probability) && probability >= threshold;
 }
 
-/** Recent messages (last `maxMessages`, trimmed) followed by the latest one, clearly marked. */
-export function formatDecisionInput(entries: readonly ChatMessageInfo[], latest: string, maxMessages = 10): string {
-  const context = formatTranscript(entries, { maxMessages, maxChars: 3000, perMessage: 400 });
+/** The decision model runs only for a directed message from an admin while building is enabled, with text to judge. */
+export function shouldRunDecision(opts: { directed: boolean; admin: boolean; buildingEnabled: boolean; text: string }): boolean {
+  return opts.directed && opts.admin && opts.buildingEnabled && opts.text.trim().length > 0;
+}
+
+/** Plain decision-model input: the replied-to message (if any) and the message itself. */
+export function formatDecisionInput(opts: { text: string; replyTo?: { name: string; text: string } | null }): string {
   const parts: string[] = [];
-  if (context.length > 0) parts.push(`Recent messages (oldest first):\n${context}`);
-  parts.push(`LATEST message:\n${latest.trim()}`);
+  const ref = opts.replyTo?.text.trim();
+  if (opts.replyTo && ref) parts.push(`Replying to ${opts.replyTo.name}: ${ref}`);
+  parts.push(`Message:\n${opts.text.trim()}`);
   return parts.join('\n\n');
+}
+
+/** The build request text: what the requester wrote, prefixed by the message it replies to. */
+export function featureRequestText(opts: { text: string; replyTo?: { name: string; text: string } | null }): string {
+  const ref = opts.replyTo?.text.trim();
+  const own = opts.text.trim();
+  return opts.replyTo && ref ? `In reply to ${opts.replyTo.name}: ${ref}\n\n${own}` : own;
 }
 
 /** Split text into chunks of at most `max` chars, breaking at line boundaries (long lines at spaces, then hard). */

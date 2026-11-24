@@ -31,7 +31,7 @@ import { extractReply, lastConversationIsAssistant } from './builder/opencode.js
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
 import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, pickJobsToStart, queuePosition, sortQueue } from './builder/queue.js';
-import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, formatDecisionInput, formatInitialPrompt, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, replaceBotMention, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
+import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
@@ -765,10 +765,12 @@ rmSync(dir, { recursive: true, force: true });
   const cr5 = parseChatReply('Text\n```json\n{not json}\n```');
   check('parseChatReply: invalid json -> never posted, flagged', !cr5.reply && cr5.visible === '' && cr5.missingBlock);
   check('parseChatReply: empty -> flagged; block with no text -> no reply', !parseChatReply('').reply && parseChatReply('').missingBlock && !parseChatReply('```json\n{"reply": true}\n```').reply);
-  check('isFeatureRequest: threshold, null = no', isFeatureRequest(0.96) && isFeatureRequest(0.7) && !isFeatureRequest(0.69) && !isFeatureRequest(null) && !isFeatureRequest(NaN) && isFeatureRequest(0.5, 0.5));
-  check('FEATURE_REQUEST_QUESTION: predicate text mentions the latest message', FEATURE_REQUEST_QUESTION.name === 'feature_request' && FEATURE_REQUEST_QUESTION.instructions.includes('LATEST'));
-  const di = formatDecisionInput(Array.from({ length: 15 }, (_, i) => ({ name: `u${i}`, id: String(i), text: `msg ${i}` })), 'u99 (99): add a beer reaction');
-  check('formatDecisionInput: last 10 context lines + marked latest', di.includes('u14 (14): msg 14') && di.includes('u5 (5): msg 5') && !di.includes('u4 (4)') && di.endsWith('LATEST message:\nu99 (99): add a beer reaction') && formatDecisionInput([], 'hi') === 'LATEST message:\nhi');
+  check('isFeatureRequest: threshold 0.5, null = no', isFeatureRequest(0.96) && isFeatureRequest(0.5) && !isFeatureRequest(0.49) && !isFeatureRequest(null) && !isFeatureRequest(NaN) && isFeatureRequest(0.7, 0.7));
+  check('FEATURE_REQUEST_QUESTION: shape', FEATURE_REQUEST_QUESTION.name === 'feature_request' && !FEATURE_REQUEST_QUESTION.instructions.includes('LATEST'));
+  check('formatDecisionInput: plain message only', formatDecisionInput({ text: ' add a beer reaction ' }) === 'Message:\nadd a beer reaction');
+  check('formatDecisionInput: with reply line', formatDecisionInput({ text: 'do this', replyTo: { name: 'Ana', text: 'we need dark mode' } }) === 'Replying to Ana: we need dark mode\n\nMessage:\ndo this' && formatDecisionInput({ text: 'x', replyTo: { name: 'Ana', text: '  ' } }) === 'Message:\nx');
+  check('featureRequestText: plain and with reply', featureRequestText({ text: ' add x ' }) === 'add x' && featureRequestText({ text: 'do this', replyTo: { name: 'Ana', text: 'dark mode' } }) === 'In reply to Ana: dark mode\n\ndo this');
+  check('shouldRunDecision: needs directed + admin + enabled + text', shouldRunDecision({ directed: true, admin: true, buildingEnabled: true, text: 'x' }) && !shouldRunDecision({ directed: false, admin: true, buildingEnabled: true, text: 'x' }) && !shouldRunDecision({ directed: true, admin: false, buildingEnabled: true, text: 'x' }) && !shouldRunDecision({ directed: true, admin: true, buildingEnabled: false, text: 'x' }) && !shouldRunDecision({ directed: true, admin: true, buildingEnabled: true, text: '  ' }));
 
   const long = Array.from({ length: 60 }, (_, i) => `line ${i} ${'x'.repeat(60)}`).join('\n');
   const chunks = chunkMessage(long, 2000);
