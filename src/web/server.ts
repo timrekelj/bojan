@@ -37,7 +37,8 @@ const SESSION_TTL_MS = 7 * 86400_000; // session lifetime, matched by the cookie
 const sessions = new Map<string, Session>(); // sid -> session (runtime cache; the DB is the source of truth)
 const startedAt = Date.now();
 const EMBEDS_PAGE_SIZE = 10;
-const REQUESTS_PAGE_SIZE = 50;
+const REQUESTS_PAGE_SIZE = 20;
+const LOGS_PAGE_SIZE = 50;
 const DEPLOY_PAGE_WAIT_MS = 1200; // a page render waits this long for Dokploy, then shows "unavailable"
 const DEPLOY_LIVE_WAIT_MS = 4000;
 const FAVICON = faviconSvg();
@@ -390,34 +391,44 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     };
   };
 
-  const loadLogs = (session: Session, q: { level: string | undefined; tag: string | undefined }, deploy: DeployStatus): LogsPageData => {
+  const loadLogs = (session: Session, q: { level: string | undefined; tag: string | undefined; page: string | undefined }, deploy: DeployStatus): LogsPageData => {
     const level = q.level === 'warn' || q.level === 'error' ? q.level : 'all';
     const tag = q.tag?.trim().slice(0, 64) || null;
+    const total = db.countLogs({ level, tag });
+    const pages = Math.max(1, Math.ceil(total / LOGS_PAGE_SIZE));
+    const page = parsePage(q.page, pages);
     return {
-      rows: db.recentLogs({ limit: 300, level, tag }),
+      rows: db.recentLogs({ limit: LOGS_PAGE_SIZE, offset: (page - 1) * LOGS_PAGE_SIZE, level, tag }),
       tags: db.logTags(),
       level,
       tag,
+      page,
+      pages,
+      pageSize: LOGS_PAGE_SIZE,
+      total,
       timezone: db.getSettings(config.guildId).timezone,
       user: { username: session.username, avatar: session.avatar },
       deploy,
     };
   };
 
-  const loadRequests = (session: Session, pageQ: string | undefined, deploy: DeployStatus): RequestsPageData => {
+  const loadRequests = (session: Session, pageQ: string | undefined, chatPageQ: string | undefined, deploy: DeployStatus): RequestsPageData => {
     const guild = client.guilds.cache.get(config.guildId);
     const totals = db.buildUsageTotals(config.guildId);
+    const chatTotals = db.chatUsageTotals(config.guildId);
+    const chatPages = Math.max(1, Math.ceil((chatTotals.threads + chatTotals.oneOffs) / REQUESTS_PAGE_SIZE));
+    const chatPage = parsePage(chatPageQ, chatPages);
     const pages = Math.max(1, Math.ceil(totals.jobs / REQUESTS_PAGE_SIZE));
     const page = parsePage(pageQ, pages);
     const jobs = db.recentBuildJobs(config.guildId, REQUESTS_PAGE_SIZE, (page - 1) * REQUESTS_PAGE_SIZE);
     const members: Record<string, string> = {};
-    const chats = db.recentChatThreads(config.guildId, REQUESTS_PAGE_SIZE);
+    const chats = db.recentChatThreads(config.guildId, REQUESTS_PAGE_SIZE, (chatPage - 1) * REQUESTS_PAGE_SIZE);
     for (const id of [...jobs.map((j) => j.requesterId), ...chats.map((ch) => ch.startedBy)]) {
       if (members[id]) continue;
       const name = guild?.members.cache.get(id)?.displayName ?? client.users.cache.get(id)?.displayName;
       if (name) members[id] = name;
     }
-    return { queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals: db.chatUsageTotals(config.guildId), chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar }, deploy };
+    return { queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals, chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, chatPage, chatPages, chatPageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar }, deploy };
   };
 
   const SESSION_ID_RE = /^ses_[A-Za-z0-9]+$/;
@@ -465,9 +476,9 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       case 'overview':
         return c.json({ parts: overviewParts(loadOverview(session, { week: c.req.query('week'), embedsPage: null, deploy })) });
       case 'logs':
-        return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag') }, deploy)) });
+        return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page') }, deploy)) });
       case 'requests':
-        return c.json({ parts: requestsParts(loadRequests(session, c.req.query('page'), deploy)) });
+        return c.json({ parts: requestsParts(loadRequests(session, c.req.query('page'), c.req.query('chatPage'), deploy)) });
       case 'session': {
         if (c.req.query('cursor')) return c.json({ error: 'older pages do not refresh' }, 400);
         const data = await loadSession(session, c.req.query('id') ?? '', undefined, deploy);
@@ -511,11 +522,11 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   });
 
   app.get('/dashboard/logs', requireAdmin, async (c) => {
-    return c.html(logsPage(loadLogs(c.get('session'), { level: c.req.query('level'), tag: c.req.query('tag') }, await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+    return c.html(logsPage(loadLogs(c.get('session'), { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page') }, await deployStatus(DEPLOY_PAGE_WAIT_MS))));
   });
 
   app.get('/dashboard/requests', requireAdmin, async (c) => {
-    return c.html(requestsPage(loadRequests(c.get('session'), c.req.query('page'), await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+    return c.html(requestsPage(loadRequests(c.get('session'), c.req.query('page'), c.req.query('chatPage'), await deployStatus(DEPLOY_PAGE_WAIT_MS))));
   });
 
   app.get('/dashboard/sessions/:id', requireAdmin, async (c) => {

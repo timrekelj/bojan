@@ -861,17 +861,28 @@ function embedRows(d: OverviewData): string {
   return `<div class="tbl"><table><thead><tr><th scope="col">Time</th><th scope="col">Channel</th><th scope="col">Provider</th><th scope="col">URL</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
 }
 
+/**
+ * Shared Previous / "Page X of Y" / Next pager. `href` builds the (unescaped) link of a page;
+ * it is escaped here. One page: just the summary when `showSingle`, otherwise nothing. Pure.
+ */
+export function pagerHtml(o: { page: number; pages: number; summary: string; href: (page: number) => string; label: string; showSingle?: boolean }): string {
+  const showing = `<p class="muted">${escapeHtml(o.summary)}</p>`;
+  if (o.pages <= 1) return o.showSingle ? `<div class="pager">${showing}</div>` : '';
+  const step = (label: string, target: number, enabled: boolean): string =>
+    enabled ? `<a class="pager-btn" href="${escapeHtml(o.href(target))}">${label}</a>` : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
+  return `<div class="pager">${showing}<nav class="pager-nav" aria-label="${escapeHtml(o.label)}">${step('Previous', o.page - 1, o.page > 1)}<span>Page ${o.page} of ${o.pages}</span>${step('Next', o.page + 1, o.page < o.pages)}</nav></div>`;
+}
+
+/** "1–50 of 1,234" (or "0" when empty). */
+export function rangeSummary(page: number, pageSize: number, shown: number, total: number): string {
+  if (total === 0 || shown === 0) return `${fmt(total)}`;
+  const from = (page - 1) * pageSize + 1;
+  return `${fmt(from)}–${fmt(from + shown - 1)} of ${fmt(total)}`;
+}
+
 function embedPager(d: OverviewData): string {
   const { page, pages, total, pageSize } = d.embedPage;
-  const from = (page - 1) * pageSize + 1;
-  const to = Math.min(total, from + d.recentEmbeds.length - 1);
-  const showing = `<p class="muted">Showing ${fmt(from)}–${fmt(to)} of ${fmt(total)}</p>`;
-  if (pages <= 1) return `<div class="pager">${showing}</div>`;
-  const step = (label: string, target: number, enabled: boolean): string =>
-    enabled
-      ? `<a class="pager-btn" href="/dashboard?embedsPage=${target}#h-embeds">${label}</a>`
-      : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
-  return `<div class="pager">${showing}<nav class="pager-nav" aria-label="Embed conversions pages">${step('Previous', page - 1, page > 1)}<span>Page ${page} of ${pages}</span>${step('Next', page + 1, page < pages)}</nav></div>`;
+  return pagerHtml({ page, pages, summary: `Showing ${rangeSummary(page, pageSize, d.recentEmbeds.length, total)}`, href: (p) => `/dashboard?embedsPage=${p}#h-embeds`, label: 'Embed conversions pages', showSingle: true });
 }
 
 const region = (id: string, parts: Record<string, string>, cls = ''): string => `<div class="live${cls ? ' ' + cls : ''}" id="${id}">${parts[id] ?? ''}</div>`;
@@ -1049,9 +1060,24 @@ export interface LogsPageData {
   tags: string[];
   level: 'all' | 'warn' | 'error';
   tag: string | null;
+  page: number;
+  pages: number;
+  pageSize: number;
+  /** Rows matching the level/tag filter, all pages. */
+  total: number;
   timezone: string;
   user: { username: string; avatar: string | null };
   deploy?: DeployStatus;
+}
+
+/** Link to a Logs page; filters are kept, page 1 is the default. */
+function logsHref(level: string, tag: string | null, page = 1): string {
+  const q = new URLSearchParams();
+  if (level !== 'all') q.set('level', level);
+  if (tag) q.set('tag', tag);
+  if (page > 1) q.set('page', String(page));
+  const qs = q.toString();
+  return `/dashboard/logs${qs ? '?' + qs : ''}`;
 }
 
 /** Live regions of the Logs page, keyed by element id. */
@@ -1064,17 +1090,12 @@ export function logsParts(d: LogsPageData, now: number = Date.now()): Record<str
     rows.length === 0
       ? emptyState('No log entries match.')
       : `<div class="tbl"><table class="logs"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Tag</th><th scope="col">Message</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
-  return { ...chromeParts(d.deploy, now), 'live-logs': table, 'live-logcount': `newest ${fmt(d.rows.length)} ${d.rows.length === 1 ? 'entry' : 'entries'}` };
+  const pager = pagerHtml({ page: d.page, pages: d.pages, summary: `${fmt(d.total)} ${d.total === 1 ? 'entry' : 'entries'}`, href: (p) => logsHref(d.level, d.tag, p) + '#h-logs', label: 'Log pages' });
+  return { ...chromeParts(d.deploy, now), 'live-logs': table + pager, 'live-logcount': rangeSummary(d.page, d.pageSize, d.rows.length, d.total) };
 }
 
 export function logsPage(d: LogsPageData, now: number = Date.now()): string {
-  const href = (level: string, tag: string | null): string => {
-    const q = new URLSearchParams();
-    if (level !== 'all') q.set('level', level);
-    if (tag) q.set('tag', tag);
-    const qs = q.toString();
-    return `/dashboard/logs${qs ? '?' + qs : ''}`;
-  };
+  const href = (level: string, tag: string | null): string => logsHref(level, tag);
   const levelLinks = (['all', 'warn', 'error'] as const)
     .map((l) => {
       const label = l === 'all' ? 'All' : l === 'warn' ? 'Warnings + errors' : 'Errors';
@@ -1099,11 +1120,16 @@ export interface RequestsPageData {
   jobs: BuildJob[];
   totals: BuildUsage & { jobs: number };
   chatTotals: BuildUsage & { threads: number; oneOffs: number };
-  /** Most recently active chat threads (already limited). */
+  /** The current page of chat threads, most recently active first. */
   chats: ChatThread[];
+  /** Feature request pager (`?page=`). */
   page: number;
   pages: number;
   pageSize: number;
+  /** Chat pager (`?chatPage=`); total is threads + one-off replies. */
+  chatPage: number;
+  chatPages: number;
+  chatPageSize: number;
   guildId: string;
   timezone: string;
   /** job id -> 1-based place in the build queue (queued jobs only) */
@@ -1144,6 +1170,15 @@ const TOKENS_HEAD = `<th scope="col" title="input / output / reasoning / cache %
 const sessionHref = (sessionId: string, cursor?: string | null): string => `/dashboard/sessions/${encodeURIComponent(sessionId)}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
 const sessionLink = (sessionId: string): string => `<a href="${escapeHtml(sessionHref(sessionId))}">Session</a>`;
 
+/** Link to the Requests page with both pagers' positions (page 1 is omitted). */
+function requestsHref(page: number, chatPage: number): string {
+  const q = new URLSearchParams();
+  if (page > 1) q.set('page', String(page));
+  if (chatPage > 1) q.set('chatPage', String(chatPage));
+  const qs = q.toString();
+  return `/dashboard/requests${qs ? '?' + qs : ''}`;
+}
+
 /** Live regions of the Chats & requests page, keyed by element id. */
 export function requestsParts(d: RequestsPageData, now: number = Date.now()): Record<string, string> {
   const t = d.totals;
@@ -1171,12 +1206,9 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
     chatRows.length === 0
       ? emptyState('No chats yet.')
       : `<div class="tbl"><table><thead><tr><th scope="col">Thread</th><th scope="col">Started by</th><th scope="col">Last active</th>${TOKENS_HEAD}</tr></thead><tbody>${chatRows.join('')}</tbody></table></div>`;
-  const step = (label: string, target: number, enabled: boolean): string =>
-    enabled ? `<a class="pager-btn" href="/dashboard/requests?page=${target}">${label}</a>` : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
-  const pager =
-    d.pages > 1
-      ? `<div class="pager"><p class="muted">${fmt(t.jobs)} requests</p><nav class="pager-nav" aria-label="Feature request pages">${step('Previous', d.page - 1, d.page > 1)}<span>Page ${d.page} of ${d.pages}</span>${step('Next', d.page + 1, d.page < d.pages)}</nav></div>`
-      : '';
+  const chatTotal = ct.threads + ct.oneOffs;
+  const pager = pagerHtml({ page: d.page, pages: d.pages, summary: rangeSummary(d.page, d.pageSize, d.jobs.length, t.jobs) + ' requests', href: (p) => requestsHref(p, d.chatPage) + '#h-req', label: 'Feature request pages' });
+  const chatPager = pagerHtml({ page: d.chatPage, pages: d.chatPages, summary: rangeSummary(d.chatPage, d.chatPageSize, d.chats.length, chatTotal) + ' chats', href: (p) => requestsHref(d.page, p) + '#h-chat', label: 'Chat pages' });
   return {
     ...chromeParts(d.deploy, now),
     'live-chat-kpis': [
@@ -1186,7 +1218,7 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
       kpi(fmtCachePercent(ct), 'Cache hits', 'share of prompt tokens from cache'),
       kpi(fmtUsd(ct.costUsd), 'Est. cost'),
     ].join(''),
-    'live-chats': `<section class="card" aria-labelledby="h-chat"><div class="card-head"><h2 id="h-chat">Chats</h2><span class="sub">${d.chats.length > 0 ? `the ${fmt(d.chats.length)} most recently active` : ''}</span></div>${chatTable}</section>`,
+    'live-chats': `<section class="card" aria-labelledby="h-chat"><div class="card-head"><h2 id="h-chat">Chats</h2><span class="sub">${fmt(chatTotal)} total</span></div>${chatTable}${chatPager}</section>`,
     'live-req-kpis': [
       kpi(fmt(t.jobs), 'Requests'),
       kpi(fmt(t.input), 'Input tokens'),
@@ -1297,6 +1329,7 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
   const head = `<section class="card" aria-labelledby="h-session"><div class="card-head">${heading}</div>${dl}</section>`;
 
   let timeline: string;
+  // Entries arrive newest first; parts inside one assistant message stay chronological.
   if (d.error) timeline = `<div class="err-t" role="alert">${escapeHtml(d.error)}</div>`;
   else if (d.entries.length === 0) timeline = emptyState('No messages yet.');
   else {
@@ -1304,12 +1337,12 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
     if (d.cursor) nav.push(`<a class="pager-btn" href="${escapeHtml(sessionHref(d.sessionId))}">Latest messages</a>`);
     if (d.olderCursor) nav.push(`<a class="pager-btn" href="${escapeHtml(sessionHref(d.sessionId, d.olderCursor))}">Older messages</a>`);
     const navHtml = nav.length > 0 ? `<div class="pager">${nav.join('')}</div>` : '';
-    timeline = `${d.olderCursor ? navHtml : ''}<div class="tl">${d.entries.map((e) => entryHtml(e, d.timezone)).join('')}</div>${!d.olderCursor && d.cursor ? navHtml : ''}`;
+    timeline = `<div class="tl">${d.entries.map((e) => entryHtml(e, d.timezone)).join('')}</div>${navHtml}`;
   }
   return {
     ...chromeParts(d.deploy, now),
     'live-session-head': head,
-    'live-session': `<section class="card" aria-labelledby="h-transcript"><div class="card-head"><h2 id="h-transcript">Transcript</h2><span class="sub">oldest first${d.cursor ? ' · older page' : ''}</span></div>${timeline}</section>`,
+    'live-session': `<section class="card" aria-labelledby="h-transcript"><div class="card-head"><h2 id="h-transcript">Transcript</h2><span class="sub">newest first${d.cursor ? ' · older page' : ''}</span></div>${timeline}</section>`,
   };
 }
 

@@ -470,6 +470,19 @@ function parseChatLanguages(raw: string | null): string[] {
   }
 }
 
+/** WHERE clause (with leading space, or empty) and params for the logs level/tag filter. */
+function logFilter(opts: { level?: 'all' | 'warn' | 'error'; tag?: string | null }): { clause: string; params: string[] } {
+  const where: string[] = [];
+  const params: string[] = [];
+  if (opts.level === 'error') where.push(`level = 'error'`);
+  else if (opts.level === 'warn') where.push(`level IN ('warn', 'error')`);
+  if (opts.tag) {
+    where.push('tag = ?');
+    params.push(opts.tag);
+  }
+  return { clause: where.length ? ' WHERE ' + where.join(' AND ') : '', params };
+}
+
 function chatThreadFromRow(r: Record<string, unknown>): ChatThread {
   return {
     threadId: r.thread_id as string,
@@ -1460,8 +1473,8 @@ export class BotDatabase {
   }
 
   /** Most recently active first. */
-  recentChatThreads(guildId: string, limit: number): ChatThread[] {
-    const rows = this.db.prepare('SELECT * FROM chat_threads WHERE guild_id = ? ORDER BY last_active_at DESC LIMIT ?').all(guildId, limit) as Record<string, unknown>[];
+  recentChatThreads(guildId: string, limit: number, offset = 0): ChatThread[] {
+    const rows = this.db.prepare('SELECT * FROM chat_threads WHERE guild_id = ? ORDER BY last_active_at DESC LIMIT ? OFFSET ?').all(guildId, limit, offset) as Record<string, unknown>[];
     return rows.map(chatThreadFromRow);
   }
 
@@ -1487,17 +1500,16 @@ export class BotDatabase {
   }
 
   /** Newest first. `level` 'warn' means warn + error. */
-  recentLogs(opts: { limit: number; level?: 'all' | 'warn' | 'error'; tag?: string | null }): LogRow[] {
-    const where: string[] = [];
-    const params: (string | number)[] = [];
-    if (opts.level === 'error') where.push(`level = 'error'`);
-    else if (opts.level === 'warn') where.push(`level IN ('warn', 'error')`);
-    if (opts.tag) {
-      where.push('tag = ?');
-      params.push(opts.tag);
-    }
-    const sql = `SELECT id, ts, level, tag, message FROM logs${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`;
-    return this.db.prepare(sql).all(...params, opts.limit) as unknown as LogRow[];
+  recentLogs(opts: { limit: number; offset?: number; level?: 'all' | 'warn' | 'error'; tag?: string | null }): LogRow[] {
+    const { clause, params } = logFilter(opts);
+    const sql = `SELECT id, ts, level, tag, message FROM logs${clause} ORDER BY id DESC LIMIT ? OFFSET ?`;
+    return this.db.prepare(sql).all(...params, opts.limit, opts.offset ?? 0) as unknown as LogRow[];
+  }
+
+  /** Number of stored logs matching the same level/tag filter as `recentLogs`. */
+  countLogs(opts: { level?: 'all' | 'warn' | 'error'; tag?: string | null } = {}): number {
+    const { clause, params } = logFilter(opts);
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM logs${clause}`).get(...params) as { n: number }).n;
   }
 
   /** Distinct tags seen in the stored logs, for the filter UI. */

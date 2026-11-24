@@ -6,7 +6,7 @@ export const MAX_TEXT_CHARS = 20_000;
 export const MAX_TOOL_INPUT_CHARS = 4_000;
 export const MAX_TOOL_OUTPUT_CHARS = 6_000;
 const MAX_EVENT_CHARS = 300;
-export const TRANSCRIPT_PAGE_SIZE = 60;
+export const TRANSCRIPT_PAGE_SIZE = 30;
 export const TRANSCRIPT_TIMEOUT_MS = 8_000;
 
 export interface TranscriptTokens {
@@ -195,13 +195,13 @@ export interface MessageListClient {
 }
 
 export interface TranscriptPage {
-  /** Oldest first. */
+  /** Newest first (the order the page shows them). */
   entries: TranscriptEntry[];
   /** Pass as `cursor` to load the next older page; null when this is the oldest page. */
   olderCursor: string | null;
 }
 
-/** Newest-first page of messages, returned oldest-first for display. Throws on failure or timeout. */
+/** Newest-first page of messages, returned newest-first for display. Throws on failure or timeout. */
 export async function fetchTranscript(
   client: MessageListClient,
   sessionID: string,
@@ -218,7 +218,8 @@ export async function fetchTranscript(
     const data = Array.isArray(res.data) ? res.data : [];
     // Descending order: `next` continues towards older messages.
     const older = data.length >= limit ? (res.cursor?.next ?? null) : null;
-    return { entries: normalizeTranscript([...data].reverse()), olderCursor: older };
+    // The API already returns newest first; normalize in chronological order, then flip back.
+    return { entries: normalizeTranscript([...data].reverse()).reverse(), olderCursor: older };
   } finally {
     clearTimeout(timer);
   }
