@@ -375,7 +375,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const form = await c.req.parseBody();
     const { settings, modelError } = parseBuilderForm(form, db.getBuilderSettings());
     db.setBuilderSettings(settings);
-    console.log(`[web] AI assistant settings updated by ${c.get('session').username} (chat=${settings.chatEnabled} chatModel=${settings.chatModel} builds=${settings.enabled} model=${settings.model})`);
+    console.log(`[web] AI assistant settings updated by ${c.get('session').username} (chat=${settings.chatEnabled} chatModel=${settings.chatModel} chatLangs=${settings.chatLanguages.join(',') || 'any'} builds=${settings.enabled} model=${settings.model})`);
     return c.redirect(modelError ? `/dashboard?builderError=${encodeURIComponent(`${modelError} — model not changed`)}#builder` : '/dashboard?builderSaved=1#builder');
   });
 
