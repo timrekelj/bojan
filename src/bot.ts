@@ -19,7 +19,7 @@ import { config } from './config.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
-import { awardMessageXp, buildLevelUpMessage, levelProgress, levelTag } from './levels.js';
+import { awardMessageXp, buildLevelUpMessage, levelProgress, levelTag, XP_BACKFILL_PER_MESSAGE } from './levels.js';
 import { handleBuilderMessage } from './builder/handler.js';
 import type { BuilderRunner } from './builder/runner.js';
 
@@ -53,10 +53,14 @@ const commands = [
     .addUserOption((o) => o.setName('user').setDescription('Member to look up (defaults to you)').setRequired(false)),
   new SlashCommandBuilder()
     .setName('backfill')
-    .setDescription('(Admin) Record old messages and reactions from channel history into the stats database')
+    .setDescription('(Admin) One-time backfills: record old messages, or grant XP for them')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addChannelOption((o) => o.setName('channel').setDescription('Only this channel (default: all text channels)').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(false))
-    .addIntegerOption((o) => o.setName('days').setDescription('Only messages from the last N days (default: all history)').setMinValue(1).setRequired(false)),
+    .addSubcommand((sc) =>
+      sc.setName('messages')
+        .setDescription('Record old messages and reactions from channel history into the stats database')
+        .addChannelOption((o) => o.setName('channel').setDescription('Only this channel (default: all text channels)').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(false))
+        .addIntegerOption((o) => o.setName('days').setDescription('Only messages from the last N days (default: all history)').setMinValue(1).setRequired(false)))
+    .addSubcommand((sc) => sc.setName('xp').setDescription(`One-time: grant ${XP_BACKFILL_PER_MESSAGE} XP for every recorded message`)),
 ];
 
 let backfillRunning = false;
@@ -199,6 +203,38 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
   if (interaction.commandName === 'backfill') {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
       await interaction.reply({ content: 'This command is admin-only.', ephemeral: true });
+      return;
+    }
+    if (interaction.options.getSubcommand() === 'xp') {
+      if (backfillRunning) {
+        await interaction.reply({ content: 'A backfill is already running — check the other invocation.', ephemeral: true });
+        return;
+      }
+      const stateKey = `xpbackfill:${guildId}`;
+      if (db.getState(stateKey) !== null) {
+        await interaction.reply({ content: 'The XP backfill already ran in this server — it only runs once. New messages keep earning XP normally.', ephemeral: true });
+        return;
+      }
+      backfillRunning = true;
+      try {
+        const res = db.backfillMessageXp(guildId, Date.now());
+        if (res.messages === 0) {
+          console.log(`[bot] xp backfill skipped: no recorded messages in guild ${guildId}`);
+          await interaction.reply({ content: 'No recorded messages yet — run /backfill messages first, then try again.', ephemeral: true });
+          return;
+        }
+        db.setState(stateKey, new Date().toISOString());
+        console.log(`[bot] xp backfill: granted ${res.xpGranted} XP to ${res.members} member(s) for ${res.messages} messages in guild ${guildId}`);
+        await interaction.reply({
+          content: `XP backfill complete: granted **${fmt(res.xpGranted)} XP** to **${res.members}** member${res.members === 1 ? '' : 's'} — ${fmt(res.messages)} recorded message${res.messages === 1 ? '' : 's'} × ${XP_BACKFILL_PER_MESSAGE} XP. New levels show up on /stats right away; this only runs once.`,
+          ephemeral: true,
+        });
+      } catch (err) {
+        console.error('[bot] xp backfill failed:', err);
+        await interaction.reply({ content: 'XP backfill failed — see bot logs.', ephemeral: true }).catch(() => undefined);
+      } finally {
+        backfillRunning = false;
+      }
       return;
     }
     if (backfillRunning) {

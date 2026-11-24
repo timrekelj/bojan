@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { statSync } from 'node:fs';
+import { XP_BACKFILL_PER_MESSAGE } from './levels.js';
 import { localParts, zonedToUtcMs } from './stats.js';
 import { ALL_STORES, type FreeSettings, type Store } from './freegames/types.js';
 
@@ -1103,6 +1104,26 @@ export class BotDatabase {
     const out: Record<string, number> = {};
     for (const r of rows) out[r.userId] = r.xp;
     return out;
+  }
+
+  /**
+   * One-time XP backfill: grant `XP_BACKFILL_PER_MESSAGE` XP for every recorded
+   * message of the guild, added on top of XP already earned. A no-op returning
+   * zeroes when the guild has no recorded messages. "Only once" is the caller's
+   * job (it marks the `xpbackfill:<guild>` bot_state key).
+   */
+  backfillMessageXp(guildId: string, ts: number): { members: number; messages: number; xpGranted: number } {
+    const agg = this.db
+      .prepare('SELECT COUNT(*) AS members, COALESCE(SUM(cnt), 0) AS messages FROM (SELECT COUNT(*) AS cnt FROM messages WHERE guild_id = ? GROUP BY user_id)')
+      .get(guildId) as { members: number; messages: number };
+    if (agg.messages > 0) {
+      this.db
+        .prepare(`INSERT INTO user_xp (guild_id, user_id, xp, last_xp_at)
+                  SELECT guild_id, user_id, COUNT(*) * ?, ? FROM messages WHERE guild_id = ? GROUP BY user_id
+                  ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = xp + excluded.xp, last_xp_at = excluded.last_xp_at`)
+        .run(XP_BACKFILL_PER_MESSAGE, ts, guildId);
+    }
+    return { members: agg.members, messages: agg.messages, xpGranted: agg.messages * XP_BACKFILL_PER_MESSAGE };
   }
 
   // ---- settings -------------------------------------------------------
