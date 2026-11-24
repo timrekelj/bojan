@@ -176,8 +176,16 @@ check(
   badgeMarkup,
 );
 check(
+  'level badge centers the level number in the circle',
+  /<text x="26" y="26"[^>]*text-anchor="middle"/.test(badgeMarkup) && badgeMarkup.includes('dominant-baseline="central"'),
+  badgeMarkup,
+);
+check(
   'level badge shrinks the font for long level numbers',
-  levelBadge(1050).includes('data-len="4"') && levelBadge(1050).includes('font-size="12"'),
+  levelBadge(1050).includes('data-len="4"') &&
+    levelBadge(1050).includes('font-size="12"') &&
+    /<text x="26" y="26"[^>]*text-anchor="middle"/.test(levelBadge(1050)) &&
+    levelBadge(1050).includes('dominant-baseline="central"'),
   levelBadge(1050),
 );
 const x1 = awardMessageXp(db, G, 'gamer', now);

@@ -775,7 +775,7 @@ export function levelBadge(level: number): string {
   const outline = steamLevelOutline(level);
   const digits = String(level).length;
   const fontSize = digits <= 2 ? 19 : digits === 3 ? 15 : 12;
-  return `<svg class="levelbadge" viewBox="0 0 52 52" data-shape="${escapeHtml(steamLevelShape(level))}" data-len="${digits}" role="img" aria-label="Level ${level}" style="--lv-from:${escapeHtml(steam.from)};--lv-to:${escapeHtml(steam.to)}"><${outline.tag} ${outline.attrs} fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"></${outline.tag}><text x="26" y="27" text-anchor="middle" font-size="${fontSize}" fill="currentColor">${level}</text></svg>`;
+  return `<svg class="levelbadge" viewBox="0 0 52 52" data-shape="${escapeHtml(steamLevelShape(level))}" data-len="${digits}" role="img" aria-label="Level ${level}" style="--lv-from:${escapeHtml(steam.from)};--lv-to:${escapeHtml(steam.to)}"><${outline.tag} ${outline.attrs} fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"></${outline.tag}><text x="26" y="26" text-anchor="middle" dominant-baseline="central" font-size="${fontSize}" fill="currentColor">${level}</text></svg>`;
 }
 
 /** Level and XP progress as one row: level on the left, rounded bar with the numbers above it. */
