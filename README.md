@@ -86,13 +86,15 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   login**; only server administrators (or a configured admin role) get in.
   Sessions are stored in the database (7-day lifetime), so restarting or
   redeploying the bot doesn't log you out.
-  Shows bot status (ping, uptime, DB size), leaderboards (all-time, plus a
-  this-week/last-week tab switch, with 🥇🥈🥉 medals for the top 3), recent
-  embed conversions, and a settings form (stats channel,
-  weekly day/hour/timezone, embed-conversion channels, leveling on/off plus
-  its level-up channel), and a separate
+  Four pages (see [Dashboard pages](#dashboard-pages)), usable on a phone.
+  The Overview shows bot status (ping, uptime, DB size, errors, optional
+  deployment status), leaderboards (all-time, plus a
+  this-week/last-week tab switch, with 🥇🥈🥉 medals for the top 3) and recent
+  embed conversions, and refreshes itself. The Settings page has the settings
+  forms (stats channel, weekly day/hour/timezone, embed-conversion channels,
+  leveling on/off plus its level-up channel), a separate
   "Free games" section (announcement channel, ping role, stores, DLC / beta /
-  mobile, status line). JSON API at
+  mobile, status line) and the AI assistant section. JSON API at
   `/api/stats.json` (includes `freeGames` settings).
 - **URL converter (embeddo-style)** — in the channels you pick, messages
   containing a supported social link are reposted via a webhook **as the
@@ -135,7 +137,38 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
    ```
 
 4. Open the dashboard at `http://localhost:3000` and sign in with Discord.
-   Pick the weekly-stats channel and the channels for embed conversion there.
+   Pick the weekly-stats channel and the channels for embed conversion on the
+   **Settings** page.
+
+### Dashboard pages
+
+| Page | Path | What it shows |
+| --- | --- | --- |
+| Overview | `/dashboard` | bot health, server totals, your own stats, leaderboards, reactions, embed conversions |
+| Settings | `/dashboard/settings` | weekly stats, link embeds, leveling (one form), free games, AI assistant |
+| Requests | `/dashboard/requests` | chats and feature requests with token usage and estimated cost |
+| Logs | `/dashboard/logs` | console output, filterable by level and tag |
+
+Overview, Requests and Logs refresh their numbers every 15 seconds while the
+tab is visible (`GET /dashboard/live`), without reloading the page. During a
+redeploy they show "Reconnecting…" and pick up again when the bot is back.
+
+### Deployment status (optional, Dokploy)
+
+If the bot is deployed with [Dokploy](https://dokploy.com), the dashboard can
+show the state of the latest deployment ("Deploying · title", "Deployed 5 min
+ago · title", "Deploy failed · title"). Set all three variables in `.env`;
+with any of them missing the indicator is hidden:
+
+| Variable | Value |
+| --- | --- |
+| `DOKPLOY_URL` | base URL of your Dokploy instance, e.g. `https://dokploy.example.com` (no `/api`) |
+| `DOKPLOY_API_KEY` | an API key generated in Dokploy (Settings → Profile → API/CLI) |
+| `DOKPLOY_COMPOSE_ID` | the id of the compose service (it is in the service's URL in Dokploy) |
+
+The bot calls `GET <DOKPLOY_URL>/api/deployment.allByCompose?composeId=...`
+with the `x-api-key` header (5 s timeout, cached for 10 s). `docker-compose.yml`
+needs no change: the bot service reads `.env` through `env_file`.
 
 ## Run on a server (Docker)
 
@@ -294,7 +327,9 @@ src/
   freegames/freestuff.ts FreeStuff webhook signature check + product normalizer
   freegames/form.ts     dashboard form parser
   web/server.ts       Hono dashboard, Discord OAuth2, DB-persisted signed-cookie sessions
-  web/views.ts        HTML templates
+  web/views.ts        HTML templates, CSS, live-refresh script, favicon
+  web/assets/         static files served under /assets (copied to dist/ by `npm run build`)
+  dokploy.ts          optional Dokploy deployment status for the dashboard
   smoke.ts            offline test
 ```
 
@@ -306,6 +341,15 @@ src/
 - The dashboard binds `0.0.0.0` on `DASHBOARD_PORT`; put it behind a reverse
   proxy with HTTPS if you expose it publicly, and set `DASHBOARD_URL` to the
   public https URL (it is used for the OAuth redirect).
+
+## Credits
+
+The dashboard background (`src/web/assets/clouds.png`) is a 1-bit dithered
+rendering of the photo
+["Cumulus congestus clouds (27075262952)"](https://commons.wikimedia.org/wiki/File:Cumulus_congestus_clouds_(27075262952).jpg)
+by HO JJ (Taipei, Taiwan), published on Wikimedia Commons under
+[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) (public domain
+dedication). Only the processed image is in this repository.
 
 ## FreeStuff webhook (optional)
 

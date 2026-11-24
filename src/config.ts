@@ -27,6 +27,10 @@ export const config = {
   opencodeUrl: optional('OPENCODE_URL', 'http://opencode:4096').replace(/\/+$/, ''),
   /** Basic-auth password for the OpenCode server. null = self-building unavailable. */
   opencodePassword: process.env.OPENCODE_PASSWORD?.trim() || null,
+  /** Dokploy deployment status pill (optional; all three must be set). */
+  dokployUrl: process.env.DOKPLOY_URL?.trim().replace(/\/+$/, '') || null,
+  dokployApiKey: process.env.DOKPLOY_API_KEY?.trim() || null,
+  dokployComposeId: process.env.DOKPLOY_COMPOSE_ID?.trim() || null,
   databasePath: resolve(optional('DATABASE_PATH', 'data/bot.db')),
 };
 
