@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase, clampLimitThreshold, type WebSessionRow } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
-import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
+import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, steamLevelColors, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
@@ -129,6 +129,17 @@ check(
     levelTag(650) === 'lvl 3 · 50/400' &&
     levelTag(242_000) === 'lvl 69 · 500/7,000',
   `${levelTag(242_000)}`,
+);
+check(
+  'steam level badge colours by 10-level band',
+  steamLevelColors(0).from === steamLevelColors(9).from &&
+    steamLevelColors(10).from !== steamLevelColors(9).from &&
+    steamLevelColors(69).from === '#c0564a' &&
+    steamLevelColors(69).to === '#8f352c' &&
+    steamLevelColors(100).from === '#d4af37' &&
+    steamLevelColors(500).to === '#a3821f' &&
+    steamLevelColors(-5).from === steamLevelColors(0).from,
+  JSON.stringify(steamLevelColors(69)),
 );
 const x1 = awardMessageXp(db, G, 'gamer', now);
 check('first message earns 5-10 xp', x1 !== null && x1.xpGained >= 5 && x1.xpGained <= 10 && x1.xp === x1.xpGained && x1.newLevel === 0 && !x1.leveledUp, JSON.stringify(x1));
@@ -875,7 +886,9 @@ rmSync(dir, { recursive: true, force: true });
   check(
     'youSection: level row with role-colored rounded progress bar',
     youLvl.includes('<div class="levelrow">') &&
-      youLvl.includes('<span>Level</span><b>69</b>') &&
+      youLvl.includes('class="levelbadge" data-len="2" role="img" aria-label="Level 69"') &&
+      youLvl.includes('--lv-from:#c0564a;--lv-to:#8f352c') &&
+      youLvl.includes('<span class="levelcap">Level</span>') &&
       youLvl.includes('500 / 7,000 XP') &&
       youLvl.includes('role="progressbar"') &&
       youLvl.includes('aria-valuenow="500"') &&
@@ -896,6 +909,20 @@ rmSync(dir, { recursive: true, force: true });
     { total: 100, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check('youSection: level bar falls back to the accent color', youNoColor.includes('<i style="width:7.1%"></i>'));
+  const youMax = youSection(
+    {
+      allRank: null, currentWeekRank: null, lastWeekRank: null, xp: 505_000, roleColor: null,
+      stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
+      reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
+    },
+    { total: 100, timezone: 'UTC', channelNames: {}, username: 'Nine' },
+  );
+  check(
+    'youSection: 100+ gets the gold badge and a three-digit layout',
+    youMax.includes('class="levelbadge" data-len="3"') &&
+      youMax.includes('aria-label="Level 100"') &&
+      youMax.includes('--lv-to:#a3821f'),
+  );
   const youNoXp = youSection(
     {
       allRank: null, currentWeekRank: null, lastWeekRank: null, xp: null, roleColor: '#5865f2',
