@@ -127,7 +127,7 @@ from Node itself. Build and run:
 ```bash
 cp .env.example .env   # fill in real values, never commit .env
 docker compose up -d --build
-curl http://localhost:3000/health   # {"ok":true,...}
+curl http://localhost:3001/health   # {"ok":true,...}
 docker compose logs -f              # watch the bot
 docker compose down                 # stop
 ```
