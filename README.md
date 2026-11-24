@@ -86,7 +86,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   login**; only server administrators (or a configured admin role) get in.
   Sessions are stored in the database (7-day lifetime), so restarting or
   redeploying the bot doesn't log you out.
-  Four pages (see [Dashboard pages](#dashboard-pages)), usable on a phone.
+  Five pages (see [Dashboard pages](#dashboard-pages)), usable on a phone.
   The Overview shows bot status (ping, uptime, DB size, errors, optional
   deployment status), leaderboards (all-time, plus a
   this-week/last-week tab switch, with 🥇🥈🥉 medals for the top 3) and recent
@@ -148,6 +148,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
 | Settings | `/dashboard/settings` | weekly stats, link embeds, leveling (one form), free games, AI assistant |
 | Requests | `/dashboard/requests` | chats and feature requests with token usage and estimated cost |
 | Logs | `/dashboard/logs` | console output, filterable by level and tag |
+| Session | `/dashboard/sessions/<id>` | full transcript of one OpenCode session (prompts, thinking, tool calls with input/output, tokens, errors); linked from each row of the Requests tables |
 
 Overview, Requests and Logs refresh their numbers every 15 seconds while the
 tab is visible (`GET /dashboard/live`), without reloading the page. During a
@@ -329,6 +330,7 @@ src/
   web/server.ts       Hono dashboard, Discord OAuth2, DB-persisted signed-cookie sessions
   web/views.ts        HTML templates, CSS, live-refresh script, favicon
   web/assets/         static files served under /assets (copied to dist/ by `npm run build`)
+  builder/transcript.ts OpenCode session transcript view model for the dashboard
   dokploy.ts          optional Dokploy deployment status for the dashboard
   smoke.ts            offline test
 ```

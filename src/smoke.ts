@@ -37,6 +37,8 @@ import { blockingLimit, formatLimitDenial, LimitGate } from './builder/limits.js
 import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
+import { cachePercent, sessionParts, tokensCell, type SessionPageData } from './web/views.js';
+import { clipText, fetchTranscript, MAX_TEXT_CHARS, MAX_TOOL_INPUT_CHARS, MAX_TOOL_OUTPUT_CHARS, normalizeTranscript } from './builder/transcript.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'bojan-smoke-'));
@@ -1412,6 +1414,95 @@ rmSync(dir, { recursive: true, force: true });
     check('selectImages: capped at 4', selectImages(Array.from({ length: 7 }, (_, i) => att(`${i}.png`, 'image/png', 1))).length === 4);
     check('selectImages: empty', selectImages([]).length === 0);
   }
+}
+
+{
+  // ---- session transcript page + cache percent ----
+  check('cachePercent: zero denominator', cachePercent({ input: 0, cacheRead: 0, cacheWrite: 0 }) === 0);
+  check('cachePercent: normal case', cachePercent({ input: 100, cacheRead: 700, cacheWrite: 200 }) === 70);
+  check('cachePercent: rounds to whole percent', cachePercent({ input: 2, cacheRead: 1, cacheWrite: 0 }) === 33 && cachePercent({ input: 1, cacheRead: 2, cacheWrite: 0 }) === 67 && cachePercent({ input: 0, cacheRead: 5, cacheWrite: 0 }) === 100);
+  check('tokensCell: last value is cache %', tokensCell({ input: 1000, output: 50, reasoning: 10, cacheRead: 9000, cacheWrite: 0 }) === '1,000 / 50 / 10 / 90%' || tokensCell({ input: 1000, output: 50, reasoning: 10, cacheRead: 9000, cacheWrite: 0 }).endsWith('/ 90%'), tokensCell({ input: 1000, output: 50, reasoning: 10, cacheRead: 9000, cacheWrite: 0 }));
+
+  const raw: unknown[] = [
+    { id: 'm1', type: 'user', time: { created: 1000 }, text: 'build it', files: [{ name: 'a.png', mime: 'image/png' }] },
+    {
+      id: 'm2', type: 'assistant', time: { created: 2000 }, agent: 'build', model: { id: 'glm', providerID: 'opencode-go' }, finish: 'stop', cost: 0.01,
+      tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 300, write: 0 } },
+      content: [
+        { type: 'reasoning', text: 'hmm <script>alert(1)</script>' },
+        { type: 'text', text: 'hello' },
+        { type: 'tool', id: 't1', name: 'read', state: { status: 'completed', input: { path: 'a.ts' }, content: [{ type: 'text', text: 'line1' }, { type: 'file', uri: 'x', mime: 'image/png', name: 'pic.png' }, { type: 'file', uri: 'y', mime: 'application/pdf' }] }, time: { created: 2100, ran: 2200, completed: 2700 } },
+        { type: 'tool', id: 't2', name: 'bash', state: { status: 'error', input: { command: 'ls' }, error: { type: 'ToolError', message: 'boom' } }, time: { created: 2800 } },
+      ],
+    },
+    { id: 'm3', type: 'assistant', time: { created: 3000 }, model: { id: 'glm', providerID: 'p' }, content: [], error: { type: 'ProviderError', message: 'rate limited' } },
+    { id: 'm4', type: 'agent-switched', time: { created: 4000 }, agent: 'plan', previous: 'build' },
+    { id: 'm5', type: 'brand-new-type', time: { created: 5000 } },
+    null,
+    { type: 'assistant' },
+  ];
+  const tr = normalizeTranscript(raw);
+  check('transcript: skips non-objects, keeps order', tr.length === 6 && tr.map((e) => e.kind).join() === 'user,assistant,assistant,event,event,assistant');
+  const u0 = tr[0]!;
+  check('transcript: user text + attachment', u0.kind === 'user' && u0.text === 'build it' && u0.attachments[0] === '[file: a.png]');
+  const a1 = tr[1]!;
+  check('transcript: assistant meta', a1.kind === 'assistant' && a1.agent === 'build' && a1.model === 'opencode-go/glm' && a1.finish === 'stop' && a1.cost === 0.01 && a1.tokens?.cacheRead === 300 && a1.parts.length === 4);
+  const tool1 = a1.kind === 'assistant' ? a1.parts[2] : undefined;
+  check('transcript: completed tool has pretty input, joined output, files and duration', tool1?.kind === 'tool' && tool1.status === 'completed' && tool1.input.includes('"path": "a.ts"') && tool1.output === 'line1\n[file: pic.png]\n[file: application/pdf]' && tool1.durationMs === 500 && tool1.error === null);
+  const tool2 = a1.kind === 'assistant' ? a1.parts[3] : undefined;
+  check('transcript: tool error', tool2?.kind === 'tool' && tool2.status === 'error' && tool2.error === 'ToolError: boom' && tool2.durationMs === null);
+  check('transcript: assistant error string', tr[2]!.kind === 'assistant' && (tr[2] as { error: string | null }).error === 'ProviderError: rate limited');
+  check('transcript: events (known and unknown type) render a label', tr[3]!.kind === 'event' && (tr[3] as { label: string }).label === 'Agent: build → plan' && tr[4]!.kind === 'event' && (tr[4] as { label: string }).label === 'brand-new-type');
+  check('transcript: malformed assistant tolerated', tr[5]!.kind === 'assistant' && (tr[5] as { parts: unknown[] }).parts.length === 0);
+  const big = normalizeTranscript([
+    { id: 'b1', type: 'user', text: 'x'.repeat(MAX_TEXT_CHARS + 50) },
+    { id: 'b2', type: 'assistant', content: [{ type: 'tool', name: 'big', state: { status: 'completed', input: 'i'.repeat(MAX_TOOL_INPUT_CHARS + 10), content: [{ type: 'text', text: 'o'.repeat(MAX_TOOL_OUTPUT_CHARS + 7) }] }, time: { created: 1 } }] },
+  ]);
+  const bt = big[1]!.kind === 'assistant' ? big[1]!.parts[0] : undefined;
+  check('transcript: clipping with marker', big[0]!.kind === 'user' && big[0]!.text.endsWith('… (50 more chars)') && bt?.kind === 'tool' && bt.input.endsWith('… (10 more chars)') && bt.output.endsWith('… (7 more chars)') && clipText('abc', 5) === 'abc');
+
+  const calls: unknown[] = [];
+  const fakeClient = { message: { list: async (input: unknown) => { calls.push(input); return { data: [{ id: 'n2', type: 'user', text: 'new' }, { id: 'n1', type: 'user', text: 'old' }], cursor: { next: 'CUR', previous: null } }; } } };
+  const page = await fetchTranscript(fakeClient, 'ses_abc', { limit: 2, cursor: 'C0' });
+  check('fetchTranscript: newest-first request, oldest-first result, older cursor', (calls[0] as { order: string; limit: number; cursor: string }).order === 'desc' && (calls[0] as { cursor: string }).cursor === 'C0' && page.entries.map((e) => e.id).join() === 'n1,n2' && page.olderCursor === 'CUR');
+  const short = await fetchTranscript(fakeClient, 'ses_abc', { limit: 60 });
+  check('fetchTranscript: no older cursor on a short page', short.olderCursor === null);
+  let timedOut = false;
+  try {
+    await fetchTranscript({ message: { list: () => new Promise(() => {}) } }, 'ses_abc', { timeoutMs: 20 });
+  } catch (err) {
+    timedOut = err instanceof Error && err.message.includes('timed out');
+  }
+  check('fetchTranscript: times out', timedOut);
+
+  const job = { id: 7, guildId: G, threadId: 'th7', channelId: 'c', requesterId: 'u1', request: 'req', title: 'T <i>', status: 'building', sessionId: 'ses_job7', worktreeDir: null, branch: null, prUrl: 'https://github.com/x/y/pull/1', error: null, model: 'opencode-go/glm', tokensInput: 100, tokensOutput: 20, tokensReasoning: 5, tokensCacheRead: 300, tokensCacheWrite: 0, costUsd: 0.5, createdAt: 1, updatedAt: 1, approvedAt: null, triggerMessageId: null, planMessageId: null, planPostedAt: null, lastPlan: null, resumeCount: 0, fixAttempts: 0, conflictNotified: false } as const;
+  const sdata: SessionPageData = {
+    sessionId: 'ses_job7', owner: { kind: 'job', job }, entries: normalizeTranscript([
+      { id: 'e1', type: 'assistant', time: { created: 1 }, tokens: { input: 100, output: 1, reasoning: 0, cache: { read: 300, write: 0 } }, content: [
+        { type: 'reasoning', text: '<script>alert("r")</script>' },
+        { type: 'tool', name: 'bash', state: { status: 'completed', input: { command: '<b>x</b>' }, content: [{ type: 'text', text: '<script>alert(1)</script>' }] }, time: { created: 1 } },
+      ] },
+    ]), olderCursor: 'OLD', cursor: null, error: null, guildId: G, timezone: 'UTC', members: { u1: 'Ann' }, user: { username: 'x', avatar: null },
+  };
+  const sp = sessionParts(sdata);
+  const all = Object.values(sp).join('');
+  check('sessionParts: escapes tool output, input and reasoning', !all.includes('<script>') && !all.includes('<b>x</b>') && all.includes('&lt;script&gt;alert(1)&lt;/script&gt;') && all.includes('&lt;b&gt;x&lt;/b&gt;'));
+  check('sessionParts: stable details ids, thinking summary, escaped title', all.includes('<details id="d-e1-0">') && all.includes('<details id="d-e1-1">') && all.includes('Thinking · ') && all.includes('T &lt;i&gt;') && !all.includes('T <i>'));
+  check('sessionParts: cache % in header and per message, older link', all.includes('75%') && all.includes('cache 75%') && all.includes('/dashboard/sessions/ses_job7?cursor=OLD'));
+  check('sessionParts: fetch error is shown instead of the timeline', sessionParts({ ...sdata, entries: [], error: 'agent <down>' })['live-session']!.includes('agent &lt;down&gt;'));
+  const rhtml = requestsParts({ jobs: [job], totals: { jobs: 1, input: 100, output: 20, reasoning: 5, cacheRead: 300, cacheWrite: 0, costUsd: 0.5 }, chatTotals: { threads: 1, oneOffs: 0, input: 10, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [{ threadId: 'ct9', guildId: G, channelId: 'c', sessionId: 'ses_chat9', startedBy: 'u1', model: null, oneOff: false, tokensInput: 10, tokensOutput: 1, tokensReasoning: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0, createdAt: 1, lastActiveAt: 1 }], page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } });
+  const requestsHtml = Object.values(rhtml).join('');
+  check('requestsParts: session links for jobs and chats', requestsHtml.includes('href="/dashboard/sessions/ses_job7"') && requestsHtml.includes('href="/dashboard/sessions/ses_chat9"'));
+  check('requestsParts: tokens cell and KPI use cache %', requestsHtml.includes('<td data-label="Tokens">100 / 20 / 5 / 75%</td>') && requestsHtml.includes('Cache hits') && !requestsHtml.includes('Cached tokens'));
+  console.log('sample tokens cells:', (requestsHtml.match(/<td data-label="Tokens">[^<]*<\/td>/g) ?? []).join(' | '));
+  const ownerDb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-owner-')), 'owner.db'));
+  const oj = ownerDb.createBuildJob({ guildId: G, threadId: 'tx', channelId: 'c', requesterId: 'u', request: 'r' });
+  ownerDb.updateBuildJob(oj.id, { sessionId: 'ses_own1' });
+  ownerDb.createChatThread({ threadId: 'cx', guildId: G, channelId: 'c', sessionId: 'ses_own2', startedBy: 'u', model: null });
+  const o1 = ownerDb.findSessionOwner(G, 'ses_own1');
+  const o2 = ownerDb.findSessionOwner(G, 'ses_own2');
+  check('findSessionOwner: job, chat, other guild, unknown', o1?.kind === 'job' && o2?.kind === 'chat' && ownerDb.findSessionOwner('other', 'ses_own1') === null && ownerDb.findSessionOwner(G, 'ses_nope') === null);
+  ownerDb.close();
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

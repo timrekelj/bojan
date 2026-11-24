@@ -1451,6 +1451,14 @@ export class BotDatabase {
     this.db.prepare('UPDATE chat_threads SET pending_notes = ? WHERE thread_id = ?').run(JSON.stringify(notes), threadId);
   }
 
+  /** The build job or chat thread of `guildId` that owns an OpenCode session id; null for any other id. */
+  findSessionOwner(guildId: string, sessionId: string): { kind: 'job'; job: BuildJob } | { kind: 'chat'; thread: ChatThread } | null {
+    const job = this.db.prepare('SELECT * FROM build_jobs WHERE guild_id = ? AND session_id = ? ORDER BY id DESC LIMIT 1').get(guildId, sessionId) as Record<string, unknown> | undefined;
+    if (job) return { kind: 'job', job: buildJobFromRow(job) };
+    const chat = this.db.prepare('SELECT * FROM chat_threads WHERE guild_id = ? AND session_id = ? ORDER BY last_active_at DESC LIMIT 1').get(guildId, sessionId) as Record<string, unknown> | undefined;
+    return chat ? { kind: 'chat', thread: chatThreadFromRow(chat) } : null;
+  }
+
   /** Most recently active first. */
   recentChatThreads(guildId: string, limit: number): ChatThread[] {
     const rows = this.db.prepare('SELECT * FROM chat_threads WHERE guild_id = ? ORDER BY last_active_at DESC LIMIT ?').all(guildId, limit) as Record<string, unknown>[];

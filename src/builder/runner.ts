@@ -335,7 +335,8 @@ export class BuilderRunner {
     try {
       this.db.setBuildJobStatus(jobId, 'planning');
       if (!job.sessionId) job = await this.setup(job);
-      const reply = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS, images);
+      const current = job;
+      const reply = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS, images, () => this.saveUsage(current));
       await this.saveUsage(job);
       // Directed messages arrived during this turn: its reply is stale, the follow-up turn posts the plan.
       const pending = this.state(jobId).followUps.length;
@@ -503,7 +504,7 @@ export class BuilderRunner {
   private async runBuild(job: BuildJob): Promise<void> {
     const agent = this.getAgent();
     await agent.switchAgent(job.sessionId as string, 'feature-build');
-    const reply = await agent.promptAndWait(job.sessionId as string, 'The user approved the plan above. Implement it now following your instructions.', BUILD_TIMEOUT_MS);
+    const reply = await agent.promptAndWait(job.sessionId as string, 'The user approved the plan above. Implement it now following your instructions.', BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(job));
     await this.saveUsage(job);
     await this.handleBuildReply(this.db.getBuildJob(job.id) ?? job, reply);
   }
@@ -522,7 +523,7 @@ export class BuilderRunner {
       await this.post(f, buildConflictFixCard(f.title ?? ''), f.planMessageId);
       const agent = this.getAgent();
       await agent.switchAgent(f.sessionId as string, 'feature-build');
-      const reply = await agent.promptAndWait(f.sessionId as string, conflictFixPrompt(f.prUrl as string), BUILD_TIMEOUT_MS);
+      const reply = await agent.promptAndWait(f.sessionId as string, conflictFixPrompt(f.prUrl as string), BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(f));
       await this.saveUsage(f);
       await this.handleFixReply(this.db.getBuildJob(f.id) ?? f, reply);
     }, (reason) => this.failFix(job.id, reason));
@@ -645,7 +646,7 @@ export class BuilderRunner {
       console.log(`[builder] guild=${job.guildId} job=${job.id} recovering ${job.status} session ${job.sessionId}`);
       const agent = this.getAgent();
       const timeout = kind === 'build' ? BUILD_TIMEOUT_MS : PLAN_TIMEOUT_MS;
-      await agent.waitIdle(job.sessionId, timeout);
+      await agent.waitIdle(job.sessionId, timeout, undefined, () => this.saveUsage(job));
       let reply = await agent.latestReply(job.sessionId);
       let lastIsAssistant = await agent.lastIsAssistant(job.sessionId);
       for (;;) {
@@ -662,7 +663,7 @@ export class BuilderRunner {
         await this.post(current, buildResumingCard(current.title ?? ''));
         if (kind === 'build') await agent.switchAgent(job.sessionId, 'feature-build');
         const prompt = kind === 'build' ? (fix ? `${BUILD_RESUME_PROMPT} This run was resolving merge conflicts on ${job.prUrl}.` : BUILD_RESUME_PROMPT) : PLAN_RESUME_PROMPT;
-        reply = await agent.promptAndWait(job.sessionId, prompt, timeout);
+        reply = await agent.promptAndWait(job.sessionId, prompt, timeout, undefined, () => this.saveUsage(job));
         lastIsAssistant = true;
       }
       await this.saveUsage(job);
