@@ -11,6 +11,8 @@ export interface Settings {
   weeklyHour: number; // 0-23, local time
   timezone: string;
   embedChannels: string[];
+  levelingEnabled: boolean;
+  levelupChannelId: string | null; // null = track XP but never announce
 }
 
 export interface UserRow {
@@ -23,6 +25,12 @@ export interface UserStats {
   messages: number;
   firstTs: number | null;
   lastTs: number | null;
+}
+
+/** Leveling XP for one member: permanent total plus when XP was last awarded. */
+export interface UserXp {
+  xp: number;
+  lastXpAt: number; // 0 = XP was never awarded
 }
 
 export interface EmbedLogRow {
@@ -160,7 +168,17 @@ CREATE TABLE IF NOT EXISTS settings (
   weekly_day INTEGER NOT NULL DEFAULT 1,
   weekly_hour INTEGER NOT NULL DEFAULT 9,
   timezone TEXT NOT NULL DEFAULT 'UTC',
-  embed_channels TEXT NOT NULL DEFAULT '[]'
+  embed_channels TEXT NOT NULL DEFAULT '[]',
+  leveling_enabled INTEGER NOT NULL DEFAULT 1,
+  levelup_channel_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS user_xp (
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  xp INTEGER NOT NULL DEFAULT 0,
+  last_xp_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (guild_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS embed_log (
@@ -484,6 +502,8 @@ const DEFAULT_SETTINGS: Omit<Settings, 'guildId'> = {
   weeklyHour: 9,
   timezone: 'UTC',
   embedChannels: [],
+  levelingEnabled: true,
+  levelupChannelId: null,
 };
 
 export class BotDatabase {
@@ -514,6 +534,15 @@ export class BotDatabase {
     const freeCols = this.db.prepare('PRAGMA table_info(free_settings)').all() as { name: string }[];
     if (!freeCols.some((c) => c.name === 'include_beta')) {
       this.db.exec('ALTER TABLE free_settings ADD COLUMN include_beta INTEGER NOT NULL DEFAULT 0');
+    }
+    // Migration for settings created before leveling existed. The `user_xp`
+    // table is new, so the CREATE TABLE IF NOT EXISTS above already covers it.
+    const settingsCols = this.db.prepare('PRAGMA table_info(settings)').all() as { name: string }[];
+    if (!settingsCols.some((c) => c.name === 'leveling_enabled')) {
+      this.db.exec('ALTER TABLE settings ADD COLUMN leveling_enabled INTEGER NOT NULL DEFAULT 1');
+    }
+    if (!settingsCols.some((c) => c.name === 'levelup_channel_id')) {
+      this.db.exec('ALTER TABLE settings ADD COLUMN levelup_channel_id TEXT');
     }
     // Migration for build_jobs created before the model column existed.
     const jobCols = this.db.prepare('PRAGMA table_info(build_jobs)').all() as { name: string }[];
@@ -1023,11 +1052,31 @@ export class BotDatabase {
     return row ?? null;
   }
 
+  // ---- leveling (XP) ---------------------------------------------------
+
+  /** A member's permanent XP total; null when they have never earned XP. */
+  getUserXp(guildId: string, userId: string): UserXp | null {
+    const row = this.db
+      .prepare('SELECT xp, last_xp_at AS lastXpAt FROM user_xp WHERE guild_id = ? AND user_id = ?')
+      .get(guildId, userId) as UserXp | undefined;
+    return row ?? null;
+  }
+
+  /** Add XP to a member (creating their row); returns the new total. */
+  addUserXp(guildId: string, userId: string, amount: number, ts: number): number {
+    this.db
+      .prepare(`INSERT INTO user_xp (guild_id, user_id, xp, last_xp_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = xp + excluded.xp, last_xp_at = excluded.last_xp_at`)
+      .run(guildId, userId, amount, ts);
+    const row = this.db.prepare('SELECT xp FROM user_xp WHERE guild_id = ? AND user_id = ?').get(guildId, userId) as { xp: number };
+    return row.xp;
+  }
+
   // ---- settings -------------------------------------------------------
 
   getSettings(guildId: string): Settings {
     const row = this.db.prepare('SELECT * FROM settings WHERE guild_id = ?').get(guildId) as
-      | { stats_channel_id: string | null; weekly_enabled: number; weekly_day: number; weekly_hour: number; timezone: string; embed_channels: string }
+      | { stats_channel_id: string | null; weekly_enabled: number; weekly_day: number; weekly_hour: number; timezone: string; embed_channels: string; leveling_enabled: number; levelup_channel_id: string | null }
       | undefined;
     if (!row) return { guildId, ...DEFAULT_SETTINGS };
     return {
@@ -1038,21 +1087,25 @@ export class BotDatabase {
       weeklyHour: row.weekly_hour,
       timezone: row.timezone,
       embedChannels: JSON.parse(row.embed_channels) as string[],
+      levelingEnabled: row.leveling_enabled === 1,
+      levelupChannelId: row.levelup_channel_id,
     };
   }
 
   saveSettings(s: Settings): void {
     this.db
-      .prepare(`INSERT INTO settings (guild_id, stats_channel_id, weekly_enabled, weekly_day, weekly_hour, timezone, embed_channels)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+      .prepare(`INSERT INTO settings (guild_id, stats_channel_id, weekly_enabled, weekly_day, weekly_hour, timezone, embed_channels, leveling_enabled, levelup_channel_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                   stats_channel_id = excluded.stats_channel_id,
                   weekly_enabled = excluded.weekly_enabled,
                   weekly_day = excluded.weekly_day,
                   weekly_hour = excluded.weekly_hour,
                   timezone = excluded.timezone,
-                  embed_channels = excluded.embed_channels`)
-      .run(s.guildId, s.statsChannelId, s.weeklyEnabled ? 1 : 0, s.weeklyDay, s.weeklyHour, s.timezone, JSON.stringify(s.embedChannels));
+                  embed_channels = excluded.embed_channels,
+                  leveling_enabled = excluded.leveling_enabled,
+                  levelup_channel_id = excluded.levelup_channel_id`)
+      .run(s.guildId, s.statsChannelId, s.weeklyEnabled ? 1 : 0, s.weeklyDay, s.weeklyHour, s.timezone, JSON.stringify(s.embedChannels), s.levelingEnabled ? 1 : 0, s.levelupChannelId);
   }
 
   // ---- free games -----------------------------------------------------

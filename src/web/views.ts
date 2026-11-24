@@ -502,6 +502,9 @@ export function dashboardPage(d: DashboardData): string {
   const channelOptions = d.channels
     .map((c) => `<option value="${escapeHtml(c.id)}"${s.statsChannelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`)
     .join('');
+  const levelupOptions = d.channels
+    .map((c) => `<option value="${escapeHtml(c.id)}"${s.levelupChannelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`)
+    .join('');
   const embedChecks = d.channels
     .map((c) => `<label class="opt"><input type="checkbox" name="embedChannels" value="${escapeHtml(c.id)}"${s.embedChannels.includes(c.id) ? ' checked' : ''}><span>#${escapeHtml(c.name)}</span></label>`)
     .join('');
@@ -558,6 +561,13 @@ export function dashboardPage(d: DashboardData): string {
         <legend>Link embeds</legend>
         <p class="sub">Social links posted in the checked channels are converted to rich embeds.</p>
         <div class="checks">${embedChecks || '<p class="muted">No text channels found.</p>'}</div>
+      </fieldset>
+      <fieldset>
+        <legend>Leveling</legend>
+        <p class="sub">Members earn a random 5–10 XP per message, at most once every 30 seconds. Each level needs more XP than the last.</p>
+        <label class="switch"><input type="checkbox" name="levelingEnabled" value="1"${s.levelingEnabled ? ' checked' : ''}><span class="track"></span><span><span class="lbl">Award XP for messages</span><span class="help">XP is stored permanently per member.</span></span></label>
+        <div class="field"><label for="levelupChannel">Level-up announcements</label><span class="help">Where level-ups are posted (e.g. #bot-testing). Empty = track XP silently.</span>
+          <select id="levelupChannel" name="levelupChannel"><option value="">— silent —</option>${levelupOptions}</select></div>
       </fieldset>
       <div class="actions"><button type="submit">Save settings</button></div>
     </form>

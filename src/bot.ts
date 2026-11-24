@@ -11,6 +11,7 @@ import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
   type Message,
+  type SendableChannels,
   type TextChannel,
 } from 'discord.js';
 import type { BotDatabase } from './db.js';
@@ -18,6 +19,7 @@ import { config } from './config.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
+import { awardMessageXp, buildLevelUpMessage, levelProgress } from './levels.js';
 import { handleBuilderMessage } from './builder/handler.js';
 import type { BuilderRunner } from './builder/runner.js';
 
@@ -288,6 +290,38 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
   }
 }
 
+/**
+ * Award MEE6-style leveling XP for one eligible message and, when the member
+ * levelled up, post the announcement in the configured channel. Best-effort:
+ * a failed announcement never breaks message tracking.
+ */
+async function handleMessageXp(message: Message, db: BotDatabase, levelupChannelId: string | null): Promise<void> {
+  const guildId = message.guildId;
+  if (!guildId) return;
+  const award = awardMessageXp(db, guildId, message.author.id, Date.now());
+  if (!award?.leveledUp || !levelupChannelId) return;
+  try {
+    const guild = message.client.guilds.cache.get(guildId) ?? (await message.client.guilds.fetch(guildId));
+    const channel = await guild.channels.fetch(levelupChannelId).catch(() => null);
+    if (!channel || !channel.isSendable()) {
+      console.error(`[levels] level-up channel ${levelupChannelId} unavailable in guild ${guildId}`);
+      return;
+    }
+    await (channel as SendableChannels).send(
+      buildLevelUpMessage({
+        userId: message.author.id,
+        username: message.member?.displayName ?? message.author.displayName,
+        level: award.newLevel,
+        xp: award.xp,
+        nextLevelXp: levelProgress(award.xp).nextLevelXp,
+      }),
+    );
+    console.log(`[levels] ${message.author.id} reached level ${award.newLevel} in guild ${guildId}`);
+  } catch (err) {
+    console.error(`[levels] level-up announcement failed in guild ${guildId}:`, err);
+  }
+}
+
 export function registerEvents(client: Client, db: BotDatabase, builder: BuilderRunner): void {
   client.once(Events.ClientReady, async (ready) => {
     console.log(`[bot] logged in as ${ready.user.tag} (${ready.user.id})`);
@@ -311,6 +345,9 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
     if (!message.guildId || message.author.bot || message.webhookId) return;
     db.recordMessage(message.guildId, message.channelId, message.author.id, message.createdTimestamp, message.id);
     const settings = db.getSettings(message.guildId);
+    if (settings.levelingEnabled) {
+      void handleMessageXp(message, db, settings.levelupChannelId).catch((err) => console.error(`[levels] xp handling failed in guild ${message.guildId}:`, err));
+    }
     if (settings.embedChannels.length > 0) {
       void maybeConvert(message, db, settings.embedChannels);
     }
