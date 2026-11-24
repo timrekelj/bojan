@@ -1,11 +1,20 @@
-import { DEFAULT_BUILDER_MODEL, type BuilderSettings } from '../db.js';
+import { DEFAULT_BUILDER_MODEL, DEFAULT_CHAT_MODEL, type BuilderSettings } from '../db.js';
 import { parseModelRef } from './parse.js';
 
-/** Parse the dashboard "Self-building" form. An invalid model keeps `current` (the saved value). */
+/** Empty -> default; invalid -> keep `current` and report; otherwise the trimmed value. */
+function pickModel(raw: unknown, fallback: string, current: string, label: string): { model: string; error: string | null } {
+  const v = typeof raw === 'string' ? raw.trim() : '';
+  if (v === '') return { model: fallback, error: null };
+  if (!parseModelRef(v) || /\s/.test(v)) return { model: current, error: `${label} must look like provider/model` };
+  return { model: v, error: null };
+}
+
+/** Parse the dashboard "AI assistant" form. An invalid model keeps `current` (the saved value). */
 export function parseBuilderForm(form: Record<string, unknown>, current: BuilderSettings): { settings: BuilderSettings; modelError: string | null } {
-  const raw = typeof form.model === 'string' ? form.model.trim() : '';
-  const enabled = form.enabled === '1';
-  if (raw === '') return { settings: { enabled, model: DEFAULT_BUILDER_MODEL }, modelError: null };
-  if (!parseModelRef(raw) || /\s/.test(raw)) return { settings: { enabled, model: current.model }, modelError: 'Model must look like provider/model' };
-  return { settings: { enabled, model: raw }, modelError: null };
+  const build = pickModel(form.model, DEFAULT_BUILDER_MODEL, current.model, 'Build model');
+  const chat = pickModel(form.chatModel, DEFAULT_CHAT_MODEL, current.chatModel, 'Chat model');
+  return {
+    settings: { enabled: form.enabled === '1', model: build.model, chatEnabled: form.chatEnabled === '1', chatModel: chat.model },
+    modelError: build.error ?? chat.error,
+  };
 }

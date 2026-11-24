@@ -360,13 +360,14 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const page = parsePage(c.req.query('page'), pages);
     const jobs = db.recentBuildJobs(config.guildId, REQUESTS_PAGE_SIZE, (page - 1) * REQUESTS_PAGE_SIZE);
     const members: Record<string, string> = {};
-    for (const { requesterId } of jobs) {
-      if (members[requesterId]) continue;
-      const name = guild?.members.cache.get(requesterId)?.displayName ?? client.users.cache.get(requesterId)?.displayName;
-      if (name) members[requesterId] = name;
+    const chats = db.recentChatThreads(config.guildId, REQUESTS_PAGE_SIZE);
+    for (const id of [...jobs.map((j) => j.requesterId), ...chats.map((ch) => ch.startedBy)]) {
+      if (members[id]) continue;
+      const name = guild?.members.cache.get(id)?.displayName ?? client.users.cache.get(id)?.displayName;
+      if (name) members[id] = name;
     }
     return c.html(
-      requestsPage({ jobs, totals, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar } }),
+      requestsPage({ jobs, totals, chatTotals: db.chatUsageTotals(config.guildId), chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar } }),
     );
   });
 
@@ -374,7 +375,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const form = await c.req.parseBody();
     const { settings, modelError } = parseBuilderForm(form, db.getBuilderSettings());
     db.setBuilderSettings(settings);
-    console.log(`[web] self-building settings updated by ${c.get('session').username} (enabled=${settings.enabled} model=${settings.model})`);
+    console.log(`[web] AI assistant settings updated by ${c.get('session').username} (chat=${settings.chatEnabled} chatModel=${settings.chatModel} builds=${settings.enabled} model=${settings.model})`);
     return c.redirect(modelError ? `/dashboard?builderError=${encodeURIComponent(`${modelError} — model not changed`)}#builder` : '/dashboard?builderSaved=1#builder');
   });
 

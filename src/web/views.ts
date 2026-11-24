@@ -1,4 +1,4 @@
-import type { BuildJob, BuildUsage, BuilderSettings, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
+import type { BuildJob, BuildUsage, BuilderSettings, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, lastWeekBounds, weekRangeLabel } from '../stats.js';
 import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
@@ -194,7 +194,7 @@ function page(title: string, body: string): string {
 }
 
 function layout(title: string, body: string, user: { username: string; avatar: string }): string {
-  const header = `<header class="topbar"><div class="topbar-in"><div class="brand">${mark(3)}Bojan</div><div class="me"><img src="${escapeHtml(user.avatar)}" alt=""><span>${escapeHtml(user.username)}</span><a href="/dashboard/requests">Feature requests</a><a href="/dashboard/logs">Logs</a><a href="/logout">Log out</a></div></div></header>`;
+  const header = `<header class="topbar"><div class="topbar-in"><div class="brand">${mark(3)}Bojan</div><div class="me"><img src="${escapeHtml(user.avatar)}" alt=""><span>${escapeHtml(user.username)}</span><a href="/dashboard/requests">Chats &amp; requests</a><a href="/dashboard/logs">Logs</a><a href="/logout">Log out</a></div></div></header>`;
   return page(title, `${header}<main class="wrap">${body}</main>`);
 }
 
@@ -420,14 +420,17 @@ export function builderSection(d: DashboardData): string {
   const limits = a?.limits
     ? `<p class="muted">OpenCode Go usage: ${[limitMeter('5h', a.limits.rolling, d.settings.timezone), limitMeter('weekly', a.limits.weekly, d.settings.timezone), limitMeter('monthly', a.limits.monthly, d.settings.timezone)].join(' · ')}</p>`
     : '';
-  return `<section id="builder" aria-labelledby="h-builder"><div class="sec-head"><h2 id="h-builder">Self-building</h2><span class="sub">${escapeHtml(status)}</span></div>
+  return `<section id="builder" aria-labelledby="h-builder"><div class="sec-head"><h2 id="h-builder">AI assistant</h2><span class="sub">${escapeHtml(status)}</span></div>
     ${flash}
     <form class="panel" method="post" action="/builder-settings">
-      <label class="switch"><input type="checkbox" name="enabled" value="1"${b.settings.enabled ? ' checked' : ''}><span class="track"></span><span><span class="lbl">Let admins request features by mentioning the bot</span><span class="help">Each request runs an OpenCode agent that opens a pull request.</span></span></label>
-      <div class="field"><label for="builderModel">Model</label><span class="help">provider/model, e.g. opencode-go/glm-5.3. Applies to new requests.</span>
+      <label class="switch"><input type="checkbox" name="chatEnabled" value="1"${b.settings.chatEnabled ? ' checked' : ''}><span class="track"></span><span><span class="lbl">Chat with members when the bot is mentioned</span><span class="help">A mention opens a thread where an OpenCode agent answers (with web search) and follows the conversation.</span></span></label>
+      <div class="field"><label for="chatModel">Chat model</label><span class="help">provider/model, e.g. opencode-go/glm-5.3-flash. Applies to new chats.</span>
+        <input type="text" id="chatModel" name="chatModel" value="${escapeHtml(b.settings.chatModel)}" autocomplete="off" spellcheck="false"></div>
+      <label class="switch"><input type="checkbox" name="enabled" value="1"${b.settings.enabled ? ' checked' : ''}><span class="track"></span><span><span class="lbl">Let admins turn chats into feature requests</span><span class="help">When an admin asks for a change to the bot, an OpenCode agent plans it, then opens a pull request.</span></span></label>
+      <div class="field"><label for="builderModel">Build model</label><span class="help">provider/model, e.g. opencode-go/glm-5.3. Applies to new requests.</span>
         <input type="text" id="builderModel" name="model" value="${escapeHtml(b.settings.model)}" autocomplete="off" spellcheck="false"></div>
       ${limits}
-      <div class="actions"><button type="submit">Save self-building settings</button> <a class="btn ghost" href="/dashboard/requests">View feature requests</a></div>
+      <div class="actions"><button type="submit">Save AI assistant settings</button> <a class="btn ghost" href="/dashboard/requests">View chats and feature requests</a></div>
     </form>
   </section>`;
 }
@@ -568,12 +571,15 @@ export function dashboardPage(d: DashboardData): string {
 export interface RequestsPageData {
   jobs: BuildJob[];
   totals: BuildUsage & { jobs: number };
+  chatTotals: BuildUsage & { threads: number; oneOffs: number };
+  /** Most recently active chat threads (already limited). */
+  chats: ChatThread[];
   page: number;
   pages: number;
   pageSize: number;
   guildId: string;
   timezone: string;
-  /** requesterId -> cached display name */
+  /** requesterId / startedBy -> cached display name */
   members: Record<string, string>;
   user: { username: string; avatar: string };
 }
@@ -603,7 +609,25 @@ export function requestsPage(d: RequestsPageData): string {
     d.pages > 1
       ? `<div class="pager"><p class="muted">${fmt(t.jobs)} requests</p><nav class="pager-nav" aria-label="Feature request pages">${step('Previous', d.page - 1, d.page > 1)}<span>Page ${d.page} of ${d.pages}</span>${step('Next', d.page + 1, d.page < d.pages)}</nav></div>`
       : '';
-  const body = `<div class="head"><h1 class="title">Feature requests</h1><p class="lede"><a href="/dashboard">← Back to dashboard</a> · costs are estimates from OpenCode Go list prices</p></div>
+  const ct = d.chatTotals;
+  const chatRows = d.chats.map((c) => {
+    const thread = `https://discord.com/channels/${d.guildId}/${c.threadId.split(':')[0]}`;
+    const tokens = `${fmt(c.tokensInput)} / ${fmt(c.tokensOutput)} / ${fmt(c.tokensReasoning)} / ${fmt(c.tokensCacheRead + c.tokensCacheWrite)}`;
+    return `<tr><td><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${c.oneOff ? ' <span class="badge">one-off</span>' : ''}</td><td>${escapeHtml(d.members[c.startedBy] ?? c.startedBy)}</td><td>${escapeHtml(fmtDate(c.lastActiveAt, d.timezone))}</td><td>${escapeHtml(tokens)}</td><td>${escapeHtml(fmtUsd(c.costUsd))}</td></tr>`;
+  });
+  const chatTable =
+    chatRows.length === 0
+      ? emptyState('No chats yet.')
+      : `<div class="scroll"><table><thead><tr><th scope="col">Thread</th><th scope="col">Started by</th><th scope="col">Last active</th><th scope="col" title="input / output / reasoning / cached">Tokens (in / out / reasoning / cached)</th><th scope="col" title="Estimated from OpenCode Go list prices">Est. cost</th></tr></thead><tbody>${chatRows.join('')}</tbody></table></div><p class="muted">Showing the ${d.chats.length} most recently active.</p>`;
+  const body = `<div class="head"><h1 class="title">Chats and feature requests</h1><p class="lede"><a href="/dashboard">← Back to dashboard</a> · costs are estimates from OpenCode Go list prices</p></div>
+  <section aria-labelledby="h-chat"><div class="sec-head"><h2 id="h-chat">Chats</h2></div>
+  <div class="kpis">
+    ${kpi(fmt(ct.threads), 'Chat threads')}
+    ${kpi(fmt(ct.oneOffs), 'One-off replies')}
+    ${kpi(fmt(ct.input + ct.output + ct.reasoning), 'Tokens (in + out + reasoning)')}
+    ${kpi(fmt(cached(ct)), 'Cached tokens')}
+    ${kpi(fmtUsd(ct.costUsd), 'Est. cost')}
+  </div>${chatTable}</section>
   <div class="kpis">
     ${kpi(fmt(t.jobs), 'Requests')}
     ${kpi(fmt(t.input), 'Input tokens')}
@@ -613,5 +637,5 @@ export function requestsPage(d: RequestsPageData): string {
     ${kpi(fmtUsd(t.costUsd), 'Est. cost')}
   </div>
   <section aria-labelledby="h-req"><div class="sec-head"><h2 id="h-req">Requests</h2></div>${table}${pager}</section>`;
-  return layout('Feature requests', body, d.user);
+  return layout('Chats and feature requests', body, d.user);
 }

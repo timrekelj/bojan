@@ -21,6 +21,9 @@ services:
       GH_TOKEN: ${GH_TOKEN:-}
       REPO_URL: ${REPO_URL:-https://github.com/timrekelj/bojan.git}
       GIT_EMAIL: ${GIT_EMAIL:-bojan-bot@users.noreply.github.com}
+      WEBSEARCH_PROVIDER: ${WEBSEARCH_PROVIDER:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      EXA_API_KEY: ${EXA_API_KEY:-}
     volumes:
       - opencode-workspace:/workspace
       - opencode-state:/home/node/.local/share/opencode

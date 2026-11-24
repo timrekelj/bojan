@@ -251,7 +251,7 @@ CREATE INDEX IF NOT EXISTS idx_voice_open ON voice_sessions (guild_id, user_id, 
 CREATE TABLE IF NOT EXISTS build_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
-  thread_id TEXT NOT NULL UNIQUE,
+  thread_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
   requester_id TEXT NOT NULL,
   request TEXT NOT NULL,
@@ -273,6 +273,27 @@ CREATE TABLE IF NOT EXISTS build_jobs (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_build_jobs_status ON build_jobs (status);
+CREATE INDEX IF NOT EXISTS idx_build_jobs_thread ON build_jobs (thread_id);
+
+CREATE TABLE IF NOT EXISTS chat_threads (
+  thread_id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  started_by TEXT NOT NULL,
+  model TEXT,
+  one_off INTEGER NOT NULL DEFAULT 0,
+  pending_notes TEXT NOT NULL DEFAULT '[]',
+  tokens_input INTEGER NOT NULL DEFAULT 0,
+  tokens_output INTEGER NOT NULL DEFAULT 0,
+  tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+  tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+  tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_threads_guild ON chat_threads (guild_id, last_active_at);
 `;
 
 export type BuildJobStatus = 'planning' | 'awaiting_input' | 'building' | 'pr_open' | 'merged' | 'closed' | 'failed' | 'cancelled';
@@ -312,11 +333,66 @@ export interface BuildUsage {
 }
 
 export interface BuilderSettings {
+  /** Admins may request features (build jobs). */
   enabled: boolean;
-  model: string; // "providerID/modelID"
+  /** Plan/build model, "providerID/modelID". */
+  model: string;
+  /** Members can chat with the bot by mentioning it. */
+  chatEnabled: boolean;
+  /** Chat model, "providerID/modelID". */
+  chatModel: string;
 }
 
 export const DEFAULT_BUILDER_MODEL = 'opencode-go/glm-5.3';
+export const DEFAULT_CHAT_MODEL = 'opencode-go/glm-5.3-flash';
+
+export interface ChatThread {
+  threadId: string;
+  guildId: string;
+  channelId: string;
+  sessionId: string;
+  startedBy: string;
+  model: string | null;
+  /** A one-off reply in a thread the bot does not own (thread_id is "<thread>:<message>"). */
+  oneOff: boolean;
+  tokensInput: number;
+  tokensOutput: number;
+  tokensReasoning: number;
+  tokensCacheRead: number;
+  tokensCacheWrite: number;
+  costUsd: number;
+  createdAt: number;
+  lastActiveAt: number;
+}
+
+function parseNotes(raw: string): string[] {
+  try {
+    const v: unknown = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function chatThreadFromRow(r: Record<string, unknown>): ChatThread {
+  return {
+    threadId: r.thread_id as string,
+    guildId: r.guild_id as string,
+    channelId: r.channel_id as string,
+    sessionId: r.session_id as string,
+    startedBy: r.started_by as string,
+    model: (r.model as string | null) ?? null,
+    oneOff: (r.one_off as number) === 1,
+    tokensInput: r.tokens_input as number,
+    tokensOutput: r.tokens_output as number,
+    tokensReasoning: r.tokens_reasoning as number,
+    tokensCacheRead: r.tokens_cache_read as number,
+    tokensCacheWrite: r.tokens_cache_write as number,
+    costUsd: r.cost_usd as number,
+    createdAt: r.created_at as number,
+    lastActiveAt: r.last_active_at as number,
+  };
+}
 
 /** Statuses in which a job occupies the single builder slot. */
 export const ACTIVE_BUILD_STATUSES: readonly BuildJobStatus[] = ['planning', 'awaiting_input', 'building'];
@@ -403,6 +479,36 @@ export class BotDatabase {
     const jobCols = this.db.prepare('PRAGMA table_info(build_jobs)').all() as { name: string }[];
     if (!jobCols.some((c) => c.name === 'model')) {
       this.db.exec('ALTER TABLE build_jobs ADD COLUMN model TEXT');
+    }
+    // Migration for chat_threads created before pending_notes existed.
+    const chatCols = this.db.prepare('PRAGMA table_info(chat_threads)').all() as { name: string }[];
+    if (!chatCols.some((c) => c.name === 'pending_notes')) {
+      this.db.exec(`ALTER TABLE chat_threads ADD COLUMN pending_notes TEXT NOT NULL DEFAULT '[]'`);
+    }
+    // build_jobs.thread_id used to be UNIQUE; a thread may now hold several jobs over time. SQLite
+    // cannot drop a constraint, so rebuild the table (same columns) when the old unique index exists.
+    const jobIdx = this.db.prepare('PRAGMA index_list(build_jobs)').all() as { name: string; unique: number }[];
+    const threadUnique = jobIdx.some((ix) => {
+      if (ix.unique !== 1) return false;
+      const cols = this.db.prepare(`PRAGMA index_info(${JSON.stringify(ix.name)})`).all() as { name: string }[];
+      return cols.length === 1 && cols[0]!.name === 'thread_id';
+    });
+    if (threadUnique) {
+      const names = (this.db.prepare('PRAGMA table_info(build_jobs)').all() as { name: string }[]).map((c) => c.name).join(', ');
+      this.db.exec('BEGIN');
+      try {
+        this.db.exec(`ALTER TABLE build_jobs RENAME TO build_jobs_old`);
+        this.db.exec('DROP INDEX IF EXISTS idx_build_jobs_status');
+        this.db.exec('DROP INDEX IF EXISTS idx_build_jobs_thread');
+        this.db.exec(SCHEMA.slice(SCHEMA.indexOf('CREATE TABLE IF NOT EXISTS build_jobs'), SCHEMA.indexOf('CREATE TABLE IF NOT EXISTS chat_threads')));
+        this.db.exec(`INSERT INTO build_jobs (${names}) SELECT ${names} FROM build_jobs_old`);
+        this.db.exec('DROP TABLE build_jobs_old');
+        this.db.exec('COMMIT');
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      }
+      console.log('[db] build_jobs: thread_id is no longer unique');
     }
     // Console support was removed: drop the now-unused column (after the include_beta migration above).
     if (freeCols.some((c) => c.name === 'include_console')) {
@@ -990,15 +1096,20 @@ export class BotDatabase {
 
   getBuilderSettings(): BuilderSettings {
     const model = this.getState('builder:model');
+    const chatModel = this.getState('chat:model');
     return {
       enabled: this.getState('builder:enabled') === '1',
       model: model && model.length > 0 ? model : DEFAULT_BUILDER_MODEL,
+      chatEnabled: this.getState('chat:enabled') === '1',
+      chatModel: chatModel && chatModel.length > 0 ? chatModel : DEFAULT_CHAT_MODEL,
     };
   }
 
   setBuilderSettings(s: BuilderSettings): void {
     this.setState('builder:enabled', s.enabled ? '1' : '0');
     this.setState('builder:model', s.model.trim().length > 0 ? s.model.trim() : DEFAULT_BUILDER_MODEL);
+    this.setState('chat:enabled', s.chatEnabled ? '1' : '0');
+    this.setState('chat:model', s.chatModel.trim().length > 0 ? s.chatModel.trim() : DEFAULT_CHAT_MODEL);
   }
 
   createBuildJob(j: { guildId: string; threadId: string; channelId: string; requesterId: string; request: string }, now = Date.now()): BuildJob {
@@ -1015,7 +1126,8 @@ export class BotDatabase {
   }
 
   getBuildJobByThread(threadId: string): BuildJob | null {
-    const row = this.db.prepare('SELECT * FROM build_jobs WHERE thread_id = ?').get(threadId) as Record<string, unknown> | undefined;
+    // A thread can hold several jobs over time; the newest one is the one that matters.
+    const row = this.db.prepare('SELECT * FROM build_jobs WHERE thread_id = ? ORDER BY id DESC LIMIT 1').get(threadId) as Record<string, unknown> | undefined;
     return row ? buildJobFromRow(row) : null;
   }
 
@@ -1088,6 +1200,72 @@ export class BotDatabase {
                 FROM build_jobs WHERE guild_id = ?`)
       .get(guildId) as { jobs: number; i: number; o: number; r: number; cr: number; cw: number; c: number };
     return { jobs: r.jobs, input: r.i, output: r.o, reasoning: r.r, cacheRead: r.cr, cacheWrite: r.cw, costUsd: r.c };
+  }
+
+  // ---- chat threads (AI assistant) ------------------------------------
+
+  createChatThread(c: { threadId: string; guildId: string; channelId: string; sessionId: string; startedBy: string; model: string | null; oneOff?: boolean }, now = Date.now()): ChatThread {
+    this.db
+      .prepare(`INSERT INTO chat_threads (thread_id, guild_id, channel_id, session_id, started_by, model, one_off, created_at, last_active_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(c.threadId, c.guildId, c.channelId, c.sessionId, c.startedBy, c.model, c.oneOff ? 1 : 0, now, now);
+    return this.getChatThread(c.threadId) as ChatThread;
+  }
+
+  getChatThread(threadId: string): ChatThread | null {
+    const row = this.db.prepare('SELECT * FROM chat_threads WHERE thread_id = ?').get(threadId) as Record<string, unknown> | undefined;
+    return row ? chatThreadFromRow(row) : null;
+  }
+
+  /** Overwrite the stored usage with the session totals and mark the thread active. */
+  setChatThreadUsage(threadId: string, u: BuildUsage, now = Date.now()): void {
+    this.db
+      .prepare(`UPDATE chat_threads SET tokens_input = ?, tokens_output = ?, tokens_reasoning = ?, tokens_cache_read = ?,
+                tokens_cache_write = ?, cost_usd = ?, last_active_at = ? WHERE thread_id = ?`)
+      .run(u.input, u.output, u.reasoning, u.cacheRead, u.cacheWrite, u.costUsd, now, threadId);
+  }
+
+  /** Queue a context note (e.g. a build update) for the thread's chat session. False when the thread has no chat. */
+  addChatNote(threadId: string, note: string): boolean {
+    const row = this.db.prepare('SELECT pending_notes FROM chat_threads WHERE thread_id = ?').get(threadId) as { pending_notes: string } | undefined;
+    if (!row) return false;
+    const notes = parseNotes(row.pending_notes);
+    notes.push(note);
+    this.db.prepare('UPDATE chat_threads SET pending_notes = ? WHERE thread_id = ?').run(JSON.stringify(notes), threadId);
+    return true;
+  }
+
+  pendingChatNotes(threadId: string): string[] {
+    const row = this.db.prepare('SELECT pending_notes FROM chat_threads WHERE thread_id = ?').get(threadId) as { pending_notes: string } | undefined;
+    return row ? parseNotes(row.pending_notes) : [];
+  }
+
+  /** Drop the first `count` pending notes (those that were sent); notes queued meanwhile stay. */
+  consumeChatNotes(threadId: string, count: number): void {
+    const notes = this.pendingChatNotes(threadId).slice(count);
+    this.db.prepare('UPDATE chat_threads SET pending_notes = ? WHERE thread_id = ?').run(JSON.stringify(notes), threadId);
+  }
+
+  touchChatThread(threadId: string, now = Date.now()): void {
+    this.db.prepare('UPDATE chat_threads SET last_active_at = ? WHERE thread_id = ?').run(now, threadId);
+  }
+
+  /** Most recently active first. */
+  recentChatThreads(guildId: string, limit: number): ChatThread[] {
+    const rows = this.db.prepare('SELECT * FROM chat_threads WHERE guild_id = ? ORDER BY last_active_at DESC LIMIT ?').all(guildId, limit) as Record<string, unknown>[];
+    return rows.map(chatThreadFromRow);
+  }
+
+  /** `threads` counts real chat threads; one-off replies add to the token/cost totals only. */
+  chatUsageTotals(guildId: string): BuildUsage & { threads: number; oneOffs: number } {
+    const r = this.db
+      .prepare(`SELECT COALESCE(SUM(CASE WHEN one_off = 0 THEN 1 ELSE 0 END), 0) AS threads, COALESCE(SUM(one_off), 0) AS oneoffs,
+                COALESCE(SUM(tokens_input), 0) AS i, COALESCE(SUM(tokens_output), 0) AS o,
+                COALESCE(SUM(tokens_reasoning), 0) AS r, COALESCE(SUM(tokens_cache_read), 0) AS cr,
+                COALESCE(SUM(tokens_cache_write), 0) AS cw, COALESCE(SUM(cost_usd), 0) AS c
+                FROM chat_threads WHERE guild_id = ?`)
+      .get(guildId) as { threads: number; oneoffs: number; i: number; o: number; r: number; cr: number; cw: number; c: number };
+    return { threads: r.threads, oneOffs: r.oneoffs, input: r.i, output: r.o, reasoning: r.r, cacheRead: r.cr, cacheWrite: r.cw, costUsd: r.c };
   }
 
   // ---- captured console logs ------------------------------------------

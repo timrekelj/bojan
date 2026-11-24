@@ -12,8 +12,10 @@ import {
   buildPrOpenedCard,
   type BuilderMessage,
 } from './cards.js';
+import { ChatRunner } from './chat.js';
 import { estimateCostUsd, getGoPrices, goPriceFor } from './pricing.js';
 import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
+import { formatBuildNote, type BuildNoteInfo } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prStateFromJson, type PrRef, type PrState } from './parse.js';
 
 const PLAN_TIMEOUT_MS = 15 * 60_000;
@@ -41,10 +43,15 @@ export class BuilderRunner {
   /** Set synchronously while a new job is being set up, so two quick mentions can't both start one. */
   private starting = false;
 
+  /** The chat assistant; hands feature requests to this runner. */
+  readonly chat: ChatRunner;
+
   constructor(
     private readonly client: Client,
     private readonly db: BotDatabase,
-  ) {}
+  ) {
+    this.chat = new ChatRunner(client, db, this);
+  }
 
   /** True when the OpenCode password is configured (the dashboard switch is checked separately). */
   get configured(): boolean {
@@ -86,13 +93,14 @@ export class BuilderRunner {
   // ---- entry points ---------------------------------------------------
 
   /** A new request whose thread already exists. Takes over the slot reserved with `reserve()`. */
-  startJob(input: { threadId: string; channelId: string; requesterId: string; requesterName: string; request: string }): BuildJob {
+  startJob(input: { threadId: string; channelId: string; requesterId: string; requesterName: string; request: string; context?: string }): BuildJob {
     try {
       const job = this.db.createBuildJob({ guildId: config.guildId, threadId: input.threadId, channelId: input.channelId, requesterId: input.requesterId, request: input.request });
       console.log(`[builder] guild=${job.guildId} job=${job.id} started by ${input.requesterId}: ${input.request.slice(0, 120)}`);
       const prompt =
         `Feature request from Discord user "${input.requesterName}". Replies in this conversation come from the Discord thread, ` +
-        `so keep your visible text short and plain.\n\n${input.request}`;
+        `so keep your visible text short and plain.\n\n${input.request}` +
+        (input.context ? `\n\nRecent messages in the thread (oldest first, for context):\n${input.context}` : '');
       this.enqueue(job.id, prompt);
       return job;
     } finally {
@@ -163,11 +171,18 @@ export class BuilderRunner {
 
   // ---- turns ------------------------------------------------------------
 
+  /** Tell the thread's chat session (if it has one) what happened; delivered with its next prompt, no model call now. */
+  private note(job: BuildJob, info: Omit<BuildNoteInfo, 'jobId' | 'title'>): void {
+    const fresh = this.db.getBuildJob(job.id) ?? job;
+    this.db.addChatNote(job.threadId, formatBuildNote({ ...info, jobId: job.id, title: fresh.title }));
+  }
+
   private fail(jobId: number, reason: string): Promise<void> {
     this.db.updateBuildJob(jobId, { error: reason.slice(0, 2000) });
     this.db.setBuildJobStatus(jobId, 'failed');
     const job = this.db.getBuildJob(jobId);
     if (!job) return Promise.resolve();
+    this.note(job, { event: 'failed', reason });
     return this.post(job, buildFailedCard({ reason, usage: this.usageOf(job) }));
   }
 
@@ -262,6 +277,7 @@ export class BuilderRunner {
 
     if (plan.status === 'cancelled') {
       this.db.setBuildJobStatus(job.id, 'cancelled');
+      this.note(job, { event: 'cancelled' });
       await this.post(job, buildCancelledCard(this.usageOf(this.db.getBuildJob(job.id) ?? job)));
       return;
     }
@@ -272,6 +288,7 @@ export class BuilderRunner {
     }
     // approved
     this.db.setBuildJobStatus(job.id, 'building');
+    this.note(job, { event: 'approved', plan: plan.plan });
     await this.post(job, buildBuildingCard(title));
     await this.runBuild(this.db.getBuildJob(job.id) ?? job);
   }
@@ -302,6 +319,7 @@ export class BuilderRunner {
     this.db.updateBuildJob(job.id, { prUrl: build.prUrl });
     this.db.setBuildJobStatus(job.id, 'pr_open');
     const fresh = this.db.getBuildJob(job.id) ?? job;
+    this.note(fresh, { event: 'pr_opened', prUrl: build.prUrl, summary: build.summary });
     console.log(`[builder] guild=${job.guildId} job=${job.id} PR opened: ${build.prUrl}`);
     await this.post(fresh, buildPrOpenedCard({ title: fresh.title ?? '', prUrl: build.prUrl, summary: build.summary, usage: this.usageOf(fresh) }));
   }
@@ -320,6 +338,7 @@ export class BuilderRunner {
 
   stop(): void {
     this.stopped = true;
+    this.chat.stop();
     if (this.prTimer) clearInterval(this.prTimer);
     this.prTimer = null;
   }
@@ -384,10 +403,12 @@ export class BuilderRunner {
           }
           if (state === 'merged') {
             this.db.setBuildJobStatus(job.id, 'merged');
+            this.note(job, { event: 'merged', prUrl: job.prUrl });
             console.log(`[builder] guild=${job.guildId} job=${job.id} PR merged`);
             await this.post(job, buildMergedCard({ title: job.title ?? '', prUrl: job.prUrl as string, usage: this.usageOf(job) }));
           } else if (state === 'closed') {
             this.db.setBuildJobStatus(job.id, 'closed');
+            this.note(job, { event: 'closed', prUrl: job.prUrl });
             console.log(`[builder] guild=${job.guildId} job=${job.id} PR closed without merge`);
             await this.post(job, buildClosedCard({ title: job.title ?? '', prUrl: job.prUrl as string, usage: this.usageOf(job) }));
           }

@@ -30,6 +30,7 @@ import {
 import { extractReply } from './builder/opencode.js';
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm } from './builder/form.js';
+import { chatThreadNameFor, chunkMessage, formatChatMessage, formatInitialPrompt, formatTranscript, parseChatReply, replaceBotMention, formatBuildNote, withNotes } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
@@ -639,11 +640,11 @@ rmSync(dir, { recursive: true, force: true });
 
   // DB: build_jobs + settings
   const bdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-builder-')), 'b.db'));
-  check('builder settings defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3');
-  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ' });
-  check('builder settings roundtrip', bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'prov/model');
-  bdb.setBuilderSettings({ enabled: false, model: '' });
-  check('builder settings: empty model falls back to default', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3');
+  check('builder settings defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && !bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash');
+  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ' });
+  check('builder settings roundtrip', bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'prov/model' && bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'p/chat');
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '' });
+  check('builder settings: empty models fall back to defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash');
   check('no active job initially', bdb.activeBuildJob(G) === null && bdb.countBuildJobs(G) === 0);
   const j1 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c1', requesterId: 'u1', request: 'add ping' }, 1000);
   check('createBuildJob defaults', j1.id > 0 && j1.status === 'planning' && j1.tokensInput === 0 && j1.costUsd === 0 && j1.sessionId === null && j1.createdAt === 1000);
@@ -661,12 +662,32 @@ rmSync(dir, { recursive: true, force: true });
   const tot = bdb.buildUsageTotals(G);
   check('buildUsageTotals', tot.jobs === 2 && tot.input === 110 && tot.output === 22 && tot.reasoning === 5 && tot.cacheRead === 7 && tot.cacheWrite === 3 && Math.abs(tot.costUsd - 0.3) < 1e-9);
   check('recentBuildJobs newest first + paging', bdb.recentBuildJobs(G, 10)[0]!.id === j2.id && bdb.recentBuildJobs(G, 1, 1)[0]!.id === j1.id && bdb.recentBuildJobs('other', 10).length === 0);
-  let dup = false;
-  try { bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c', requesterId: 'u', request: 'x' }); } catch { dup = true; }
-  check('thread_id is unique', dup);
+  // A thread may hold several jobs over time; the newest one wins.
+  const j3 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c', requesterId: 'u', request: 'again' });
+  check('several build jobs per thread; getBuildJobByThread returns the newest', j3.id > j2.id && bdb.getBuildJobByThread('t1')?.id === j3.id && bdb.countBuildJobs(G) === 3);
+  bdb.setBuildJobStatus(j3.id, 'cancelled');
   bdb.updateBuildJob(j1.id, { model: 'opencode-go/glm-5.3' });
   check('build job model column', bdb.getBuildJob(j1.id)!.model === 'opencode-go/glm-5.3' && bdb.getBuildJob(j2.id)!.model === null);
-  const html = requestsPage({ jobs: bdb.recentBuildJobs(G, 50), totals: bdb.buildUsageTotals(G), page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: { u1: '<b>Ann</b>' }, user: { username: 'x', avatar: 'a' } });
+  // chat_threads
+  check('chat totals empty', bdb.chatUsageTotals(G).threads === 0 && bdb.getChatThread('ct1') === null && bdb.recentChatThreads(G, 10).length === 0);
+  const c1 = bdb.createChatThread({ threadId: 'ct1', guildId: G, channelId: 'c1', sessionId: 'ses_c1', startedBy: 'u1', model: 'opencode-go/glm-5.3-flash' }, 100);
+  check('createChatThread defaults', c1.sessionId === 'ses_c1' && !c1.oneOff && c1.tokensInput === 0 && c1.costUsd === 0 && c1.createdAt === 100 && c1.lastActiveAt === 100);
+  bdb.setChatThreadUsage('ct1', { input: 1000, output: 50, reasoning: 10, cacheRead: 200, cacheWrite: 0, costUsd: 0.002 }, 500);
+  bdb.createChatThread({ threadId: 'ct1:m9', guildId: G, channelId: 'c1', sessionId: 'ses_o', startedBy: 'u2', model: null, oneOff: true }, 200);
+  bdb.setChatThreadUsage('ct1:m9', { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.001 }, 300);
+  const ctot = bdb.chatUsageTotals(G);
+  check('chatUsageTotals counts threads and one-offs separately', ctot.threads === 1 && ctot.oneOffs === 1 && ctot.input === 1010 && ctot.output === 55 && ctot.reasoning === 10 && ctot.cacheRead === 200 && Math.abs(ctot.costUsd - 0.003) < 1e-9 && bdb.chatUsageTotals('other').threads === 0);
+  check('recentChatThreads by last activity; one-off flag; getChatThread exact id', bdb.recentChatThreads(G, 10)[0]!.threadId === 'ct1' && bdb.recentChatThreads(G, 10)[1]!.oneOff && bdb.recentChatThreads(G, 1).length === 1 && bdb.getChatThread('ct1')!.lastActiveAt === 500 && bdb.getChatThread('ct1:m9')!.oneOff);
+  // chat notes in the DB
+  check('addChatNote: unknown thread -> false', !bdb.addChatNote('nope', 'x'));
+  check('chat notes: queue, survive reopen order, consume only the sent ones', (() => { bdb.addChatNote('ct1', 'n1'); bdb.addChatNote('ct1', 'n2'); const sent = bdb.pendingChatNotes('ct1'); bdb.addChatNote('ct1', 'n3'); bdb.consumeChatNotes('ct1', sent.length); return sent.join(',') === 'n1,n2' && bdb.pendingChatNotes('ct1').join(',') === 'n3'; })());
+  bdb.touchChatThread('ct1', 900);
+  check('touchChatThread', bdb.getChatThread('ct1')!.lastActiveAt === 900);
+  let cdup = false;
+  try { bdb.createChatThread({ threadId: 'ct1', guildId: G, channelId: 'c', sessionId: 's', startedBy: 'u', model: null }); } catch { cdup = true; }
+  check('chat thread id is unique', cdup);
+  const html = requestsPage({ jobs: bdb.recentBuildJobs(G, 50), totals: bdb.buildUsageTotals(G), chatTotals: bdb.chatUsageTotals(G), chats: bdb.recentChatThreads(G, 50), page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: { u1: '<b>Ann</b>' }, user: { username: 'x', avatar: 'a' } });
+  check('requestsPage renders chat summary + rows', html.includes('Chat threads') && html.includes('$0.0030') && html.includes(`discord.com/channels/${G}/ct1"`) && html.includes('one-off'));
   check('requestsPage renders rows, cost and escapes names', html.includes('$0.2500') && html.includes('&lt;b&gt;Ann&lt;/b&gt;') && !html.includes('<b>Ann</b>') && html.includes(`discord.com/channels/${G}/t1`));
   bdb.close();
 
@@ -679,7 +700,13 @@ rmSync(dir, { recursive: true, force: true });
   const mj = mdb.createBuildJob({ guildId: G, threadId: 'm1', channelId: 'c', requesterId: 'u', request: 'x' });
   mdb.updateBuildJob(mj.id, { model: 'a/b' });
   check('model column migration on old build_jobs', mdb.getBuildJob(mj.id)!.model === 'a/b');
+  // The same old table also had a UNIQUE thread_id: the migration rebuilt it, keeping rows.
+  const mj2 = mdb.createBuildJob({ guildId: G, threadId: 'm1', channelId: 'c', requesterId: 'u', request: 'second in same thread' });
+  check('old build_jobs: UNIQUE thread_id dropped by migration, rows kept', mj2.id > mj.id && mdb.getBuildJobByThread('m1')?.id === mj2.id && mdb.getBuildJob(mj.id)!.request === 'x' && mdb.getBuildJob(mj.id)!.model === 'a/b');
   mdb.close();
+  const mdb2 = new BotDatabase(join(mdir, 'm.db'));
+  check('thread_id migration is idempotent', mdb2.countBuildJobs(G) === 2);
+  mdb2.close();
 
   // Pricing
   const prices = parseGoPrices({
@@ -701,10 +728,52 @@ rmSync(dir, { recursive: true, force: true });
   check('goPriceFor: only opencode-go/*', goPriceFor('opencode-go/glm-5.3', prices) === glm && goPriceFor('anthropic/glm-5.3', prices) === null && goPriceFor('opencode-go/none', prices) === null && goPriceFor(null, prices) === null);
 
   // Settings form
-  const cur = { enabled: false, model: 'opencode-go/glm-5.3' };
-  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m' }, modelError: null }));
-  check('parseBuilderForm: invalid model keeps current + error', (() => { const r = parseBuilderForm({ model: 'nomodel' }, { enabled: true, model: 'x/y' }); return !r.settings.enabled && r.settings.model === 'x/y' && r.modelError !== null; })());
-  check('parseBuilderForm: empty -> default', parseBuilderForm({ enabled: '1', model: '' }, { enabled: false, model: 'x/y' }).settings.model === 'opencode-go/glm-5.3');
+  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash' };
+  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c' }, modelError: null }));
+  check('parseBuilderForm: invalid model keeps current + error', (() => { const r = parseBuilderForm({ model: 'nomodel' }, { ...cur, enabled: true, model: 'x/y' }); return !r.settings.enabled && r.settings.model === 'x/y' && r.modelError !== null; })());
+  check('parseBuilderForm: invalid chat model keeps current + error', (() => { const r = parseBuilderForm({ chatEnabled: '1', chatModel: 'bad model/x' }, { ...cur, chatModel: 'x/chat' }); return r.settings.chatEnabled && r.settings.chatModel === 'x/chat' && r.modelError !== null && r.modelError.startsWith('Chat model'); })());
+  check('parseBuilderForm: empty -> defaults', (() => { const r = parseBuilderForm({ enabled: '1', model: '', chatModel: '' }, { ...cur, model: 'x/y', chatModel: 'x/z' }); return r.settings.model === 'opencode-go/glm-5.3' && r.settings.chatModel === 'opencode-go/glm-5.3-flash' && !r.settings.chatEnabled; })());
+
+  // Chat assistant: pure helpers
+  const cr1 = parseChatReply('Node 24 is the LTS.\nSource: https://nodejs.org\n```json\n{"reply": true, "feature_request": null}\n```');
+  check('parseChatReply: reply true', cr1.reply && cr1.visible.startsWith('Node 24') && !cr1.visible.includes('```') && cr1.featureRequest === null);
+  const cr2 = parseChatReply('ignored text\n```json\n{"reply": false, "feature_request": null}\n```');
+  check('parseChatReply: reply false hides the text', !cr2.reply && cr2.visible === '' && cr2.featureRequest === null);
+  const cr3 = parseChatReply('I can turn this into a build request.\n```json\n{"reply": true, "feature_request": "  Add a /ping command that replies pong  "}\n```');
+  check('parseChatReply: feature_request trimmed', cr3.reply && cr3.featureRequest === 'Add a /ping command that replies pong');
+  const cr4 = parseChatReply('Just some text without a block');
+  check('parseChatReply: missing block -> reply true with the text', cr4.reply && cr4.visible === 'Just some text without a block' && cr4.featureRequest === null);
+  const cr5 = parseChatReply('Text\n```json\n{not json}\n```');
+  check('parseChatReply: invalid json -> reply true with visible text', cr5.reply && cr5.visible === 'Text' && cr5.featureRequest === null);
+  check('parseChatReply: empty -> no reply; blank feature_request -> null', !parseChatReply('').reply && parseChatReply('hi\n```json\n{"feature_request": "  "}\n```').featureRequest === null && !parseChatReply('```json\n{"reply": true}\n```').reply);
+  check('parseChatReply: feature_request survives reply:false', (() => { const r = parseChatReply('x\n```json\n{"reply": false, "feature_request": "do it"}\n```'); return !r.reply && r.featureRequest === 'do it'; })());
+
+  const long = Array.from({ length: 60 }, (_, i) => `line ${i} ${'x'.repeat(60)}`).join('\n');
+  const chunks = chunkMessage(long, 2000);
+  check('chunkMessage: <=2000 each, split at line boundaries, nothing lost', chunks.length > 1 && chunks.every((c) => c.length <= 2000) && chunks.join('\n') === long && chunks.every((c) => c.split('\n').every((l) => l.startsWith('line '))));
+  check('chunkMessage: short text is one chunk; empty -> none', chunkMessage('hello').length === 1 && chunkMessage('  ').length === 0);
+  const wall = chunkMessage(`${'word '.repeat(900)}`.trim(), 2000);
+  check('chunkMessage: a single long line is split at spaces', wall.length === 3 && wall.every((c) => c.length <= 2000 && !c.startsWith(' ') && !c.endsWith(' ')));
+  check('chunkMessage: unbroken text is hard-split', chunkMessage('y'.repeat(4500), 2000).map((c) => c.length).join(',') === '2000,2000,500');
+
+  check('formatChatMessage', formatChatMessage({ name: 'Ann', id: '42', text: ' hi ' }) === 'Ann (42): hi' && formatChatMessage({ name: 'Ann', id: '42', text: 'see', extras: ['[attachment] a.png: https://cdn/x.png'] }) === 'Ann (42): see\n  [attachment] a.png: https://cdn/x.png');
+  const ip = formatInitialPrompt({ channelName: 'general', trigger: { name: 'Bob', id: '7', text: '@bojan what is this?' }, referenced: { name: 'Ann', id: '42', text: 'look at this', extras: ['[embed] Title — https://e.com'] } });
+  check('formatInitialPrompt: reference first, then the mention', ip.includes('#general') && ip.indexOf('Ann (42): look at this') < ip.indexOf('Bob (7): @bojan what is this?') && ip.includes('https://e.com'));
+  check('formatInitialPrompt: no reference, no channel', (() => { const p = formatInitialPrompt({ channelName: null, trigger: { name: 'Bob', id: '7', text: 'hey' }, referenced: null }); return !p.includes('replied to') && !p.includes('#') && p.includes('Bob (7): hey'); })());
+  const entries = Array.from({ length: 30 }, (_, i) => ({ name: 'U', id: String(i), text: `message ${i}` }));
+  const tr = formatTranscript(entries).split('\n');
+  check('formatTranscript: last 20 messages, oldest first', tr.length === 20 && tr[0] === 'U (10): message 10' && tr[19] === 'U (29): message 29');
+  const bigTr = formatTranscript([{ name: 'A', id: '1', text: 'a'.repeat(900) }, { name: 'B', id: '2', text: 'multi\nline   text' }], { perMessage: 100 });
+  check('formatTranscript: trims long messages, flattens whitespace', bigTr.split('\n').length === 2 && bigTr.split('\n')[0]!.length <= 'A (1): '.length + 100 && bigTr.endsWith('B (2): multi line text'));
+  const capped = formatTranscript(Array.from({ length: 20 }, (_, i) => ({ name: 'U', id: String(i), text: 'z'.repeat(400) })), { maxChars: 1000 });
+  check('formatTranscript: drops oldest to stay under maxChars', capped.length <= 1000 && capped.endsWith('U (19): ' + 'z'.repeat(400)) && capped.split('\n').length < 20);
+  check('chatThreadNameFor', chatThreadNameFor('  what is\nnode?  ') === 'what is node?' && chatThreadNameFor('') === 'chat' && chatThreadNameFor('a'.repeat(300)).length === 100);
+  const bn = formatBuildNote({ jobId: 7, title: 'Ping', event: 'pr_opened', prUrl: 'https://github.com/a/b/pull/9', summary: 'Adds\n/ping.' });
+  check('formatBuildNote: pr_opened', bn === '[build update] job #7 "Ping": PR opened https://github.com/a/b/pull/9 — Adds /ping.');
+  check('formatBuildNote: approved includes plan, others', formatBuildNote({ jobId: 1, title: null, event: 'approved', plan: '- do x' }).includes('plan approved, building now. Plan:\n- do x') && formatBuildNote({ jobId: 1, title: 'T', event: 'merged', prUrl: 'u' }) === '[build update] job #1 "T": PR merged u' && formatBuildNote({ jobId: 1, title: 'T', event: 'closed' }).includes('closed without merging') && formatBuildNote({ jobId: 1, title: 'T', event: 'failed', reason: 'boom\nbad' }) === '[build update] job #1 "T": failed — boom bad' && formatBuildNote({ jobId: 1, title: 'T', event: 'cancelled' }).endsWith('cancelled'));
+  check('formatBuildNote: long plan clipped', formatBuildNote({ jobId: 1, title: 'T', event: 'approved', plan: 'p'.repeat(5000) }).length < 2700);
+  check('withNotes', withNotes([], 'hi') === 'hi' && withNotes(['a', 'b'], 'hi') === 'a\nb\n\nhi');
+  check('replaceBotMention', replaceBotMention('<@123> and <@!123> hi <@456>', '123', 'bojan') === '@bojan and @bojan hi <@456>');
 
   // Migration: a database from before build_jobs gets the table on open.
   const odir = mkdtempSync(join(tmpdir(), 'bojan-builder-old-'));

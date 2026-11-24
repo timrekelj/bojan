@@ -180,12 +180,18 @@ npm ci && npm run build && npm start    # with .env in place
    The bot needs no inbound ports — only outbound HTTPS to Discord. Port 3000
    is just the dashboard.
 
-## Self-building (feature requests)
+## AI assistant (chat and feature requests)
 
-An admin can @mention the bot with a feature request. The bot opens a thread, asks a headless
-[OpenCode](https://opencode.ai) agent to plan it, relays questions and replies, and, once the plan is approved,
+Any member can @mention the bot. It opens a thread (or, if the mention is already inside a thread, answers once there)
+and a headless [OpenCode](https://opencode.ai) `chat` agent answers, with web search. The agent only sees the mention
+and the message it replies to at first; afterwards every message in the thread is forwarded to it and it decides
+whether to reply. It can read the bot's own code to answer questions about it.
+
+When an admin asks for a change to the bot itself, the chat hands over to the build flow in the same thread: the bot
+asks a planning agent to plan it, relays questions and replies, and, once the plan is approved,
 lets a build agent implement it, push a `bot/<job>` branch and open a PR with auto-merge. GitHub CI and branch
-protection gate the merge; Dokploy then redeploys from `main`.
+protection gate the merge; Dokploy then redeploys from `main`. When the job is finished the thread returns to chat.
+Non-admins are told that only admins can request changes.
 
 ```
 Discord thread <-> bot --HTTP (Basic auth)--> opencode container (feature-plan / feature-build agents)
@@ -194,13 +200,15 @@ Discord thread <-> bot --HTTP (Basic auth)--> opencode container (feature-plan /
                                        PR -> CI (.github/workflows/ci.yml) -> auto-merge -> Dokploy redeploy
 ```
 
-The agents are defined in `.opencode/agents/` (`feature-plan` is read-only, `feature-build` can edit and run
-shell, both hidden from the normal agent list). The agent container is the `opencode` service in
+The agents are defined in `.opencode/agents/` (`chat` can only search/fetch the web and read files, `feature-plan` is
+read-only, `feature-build` can edit and run shell, all hidden from the normal agent list). Web search uses the
+`tinyfish` provider (no key) by default; set `WEBSEARCH_PROVIDER` (`tavily` / `exa`) and the matching key to change it. The agent container is the `opencode` service in
 `docker-compose.yml`, built from `docker/opencode/`. It publishes no ports; the bot reaches it at
 `http://opencode:4096` on the compose network.
 
-Enable it, pick the model (default `opencode-go/glm-5.3`) and check agent-server status and OpenCode Go plan usage in
-the dashboard's **Self-building** section. The **Feature requests** page (`/dashboard/requests`) lists every request
+Enable chat and feature requests separately, pick the models (chat `opencode-go/glm-5.3-flash`, build `opencode-go/glm-5.3`)
+and check agent-server status and OpenCode Go plan usage in the dashboard's **AI assistant** section. The
+**Chats & requests** page (`/dashboard/requests`) lists chat threads and every feature request
 with tokens and an estimated cost; OpenCode reports no cost for Go models, so it is computed from Go's published list
 prices (`https://opencode.ai/inference/go/v1/models`), not what a Go subscription actually charges.
 
@@ -223,7 +231,7 @@ Setup:
 4. CI runs `npm run build` as a hard gate. `npm run smoke` is also run, but only failures outside the known
    weekday-dependent checks (listed in `CLAUDE.md`) fail the job.
 
-Security: only server administrators can trigger a request (enforced by the bot). The agent container never
+Security: only server administrators can start a feature request (enforced by the bot). The agent container never
 receives bot secrets (compose passes it only its own five variables, not the whole `.env`; the bot does see
 `GH_TOKEN` and `OPENCODE_API_KEY` through `.env`), has no published port, requires the shared password, and its token can
 only touch this repository. The build agent is denied reading `.env*`, pushing to `main`, force-pushing and editing

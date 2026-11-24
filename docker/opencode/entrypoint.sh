@@ -30,6 +30,10 @@ fi
 if [ -d "$REPO_DIR/.git" ]; then
   echo "[opencode-agent] fetching $REPO_DIR"
   git -C "$REPO_DIR" fetch --prune origin
+  # The main checkout is only read by the chat agent (builds use separate worktrees under
+  # /workspace/jobs, which this does not touch): hard-reset it to origin/main so it never goes
+  # stale or trips over a non-fast-forward.
+  git -C "$REPO_DIR" checkout --quiet --force -B main origin/main || echo "[opencode-agent] could not move $REPO_DIR to origin/main" >&2
 else
   echo "[opencode-agent] cloning $REPO_URL into $REPO_DIR"
   git clone "$REPO_URL" "$REPO_DIR"
@@ -37,6 +41,16 @@ fi
 
 echo "[opencode-agent] npm ci"
 (cd "$REPO_DIR" && npm ci --no-audit --no-fund)
+
+# Global OpenCode config (V2: ~/.config/opencode/opencode.jsonc). TinyFish needs no API key;
+# set WEBSEARCH_PROVIDER=tavily|exa (+ TAVILY_API_KEY / EXA_API_KEY) to use another provider.
+mkdir -p "$HOME/.config/opencode"
+cat > "$HOME/.config/opencode/opencode.jsonc" <<JSON
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "websearch": { "provider": "${WEBSEARCH_PROVIDER:-tinyfish}" }
+}
+JSON
 
 cd "$REPO_DIR"
 echo "[opencode-agent] starting opencode serve on 0.0.0.0:$PORT"

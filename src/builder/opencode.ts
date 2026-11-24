@@ -155,6 +155,18 @@ export class OpenCodeAgent {
     return { directory, branch };
   }
 
+  /**
+   * Bring the main checkout to the current origin/main (hard reset: nobody edits it, builds use
+   * worktrees). Existing worktrees are untouched. Failures are logged and ignored.
+   */
+  async refreshMain(): Promise<void> {
+    try {
+      await this.shell(REPO_DIR, 'git fetch --prune origin && git checkout --quiet --force -B main origin/main', 60_000);
+    } catch (err) {
+      console.warn('[chat] could not update the main checkout:', err instanceof Error ? err.message : err);
+    }
+  }
+
   async createSession(opts: { directory: string; agent: string; model: ModelRef; title: string; metadata?: Record<string, string | number> }): Promise<string> {
     const session = await this.client.session.create({
       location: { directory: opts.directory },
