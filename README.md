@@ -86,8 +86,9 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   login**; only server administrators (or a configured admin role) get in.
   Sessions are stored in the database (7-day lifetime), so restarting or
   redeploying the bot doesn't log you out.
-  Shows bot status (ping, uptime, DB size), this-week and all-time
-  leaderboards, recent embed conversions, and a settings form (stats channel,
+  Shows bot status (ping, uptime, DB size), leaderboards (all-time, plus a
+  this-week/last-week tab switch, with 🥇🥈🥉 medals for the top 3), recent
+  embed conversions, and a settings form (stats channel,
   weekly day/hour/timezone, embed-conversion channels, leveling on/off plus
   its level-up channel), and a separate
   "Free games" section (announcement channel, ping role, stores, DLC / beta /

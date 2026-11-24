@@ -1,5 +1,6 @@
 import type { BuildJob, BuildUsage, BuilderSettings, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
-import { activityTypeLabel, fmt, fmtDate, fmtDuration, lastWeekBounds, weekRangeLabel } from '../stats.js';
+import { activityTypeLabel, fmt, fmtDate, fmtDuration, weekRangeLabel } from '../stats.js';
+import type { WeekBounds } from '../stats.js';
 import { levelProgress, levelTag } from '../levels.js';
 import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
@@ -110,6 +111,7 @@ const CSS = `
   .lb li.gap .rank { grid-column: 1; line-height: 1; }
   .lb li.extra { border-top: 0; }
   .rank { color: var(--muted); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
+  .rank.medal { font-size: 15px; line-height: 1; }
   .top .name { font-weight: 600; }
   .av { width: 24px; height: 24px; border-radius: 50%; background: var(--soft); object-fit: cover; display: grid; place-items: center; font-size: 11px; font-weight: 500; color: var(--muted); }
   .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -159,6 +161,10 @@ const CSS = `
   .pager-btn { display: inline-block; background: var(--soft); color: var(--text); border-radius: 8px; padding: 4px 12px; font-size: 13px; font-weight: 500; text-decoration: none; }
   a.pager-btn:hover { background: var(--border); }
   .pager-btn[aria-disabled=true] { color: var(--muted); opacity: .55; }
+  .tabs { display: inline-flex; gap: 4px; background: var(--soft); border-radius: 8px; padding: 3px; margin: 0 0 12px; }
+  .tab { display: inline-block; border-radius: 6px; padding: 2px 12px; font-size: 13px; font-weight: 500; text-decoration: none; color: var(--muted); }
+  .tab[aria-current=page] { background: var(--raised); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.18); }
+  a.tab:hover { color: var(--text); }
   .scroll { overflow-x: auto; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 9px 14px; border-top: 1px solid var(--border); white-space: nowrap; }
@@ -228,7 +234,12 @@ export interface DashboardData {
   channels: { id: string; name: string }[];
   botStatus: { ping: number; uptimeSec: number; guilds: number; totalMessages: number; dbBytes: number; lastWeeklySent: string | null; embedsConverted: number; errors24h: number };
   today: number;
-  week: { bounds: ReturnType<typeof lastWeekBounds>; total: number; rows: UserRow[] };
+  week: {
+    /** Which week the dashboard leaderboard is showing (`?week=current|last`, default current). */
+    selected: 'current' | 'last';
+    current: { bounds: WeekBounds; total: number; rows: UserRow[] };
+    last: { bounds: WeekBounds; total: number; rows: UserRow[] };
+  };
   allTime: { total: number; rows: UserRow[] };
   reactions: { total: number; top: EmojiRow[] };
   recentEmbeds: EmbedLogRow[];
@@ -275,6 +286,21 @@ export interface LeaderboardYou {
   rank: { rank: number; messages: number } | null;
 }
 
+/** Medal for a leaderboard rank (1-3), or null for the rest. */
+const MEDALS = ['🥇', '🥈', '🥉'] as const;
+export function medalFor(rank: number): string | null {
+  return Number.isInteger(rank) && rank >= 1 && rank <= MEDALS.length ? (MEDALS[rank - 1] ?? null) : null;
+}
+
+/** Week leaderboard tabs; the selected one is plain text with aria-current, the others links. */
+export function weekTabs(selected: 'current' | 'last'): string {
+  const tab = (value: 'current' | 'last', label: string): string =>
+    value === selected
+      ? `<span class="tab" aria-current="page">${escapeHtml(label)}</span>`
+      : `<a class="tab" href="/dashboard?week=${value}#h-week">${escapeHtml(label)}</a>`;
+  return `<nav class="tabs" aria-label="Leaderboard week">${tab('current', 'This week')}${tab('last', 'Last week')}</nav>`;
+}
+
 function lbRow(rank: number, userId: string, messages: number, total: number, members: DashboardData['members'], opts: { top: boolean; you: boolean; extra: boolean; lvl: string | null }): string {
   const m = members[userId];
   const name = m?.name ?? userId;
@@ -287,13 +313,17 @@ function lbRow(rank: number, userId: string, messages: number, total: number, me
   const nameCell = opts.you
     ? `<span class="name" title="${escapeHtml(name)}"><span class="nm">${escapeHtml(name)}</span>${lvl}<span class="you-tag">You</span></span>`
     : `<span class="name" title="${escapeHtml(name)}"><span class="nm">${escapeHtml(name)}</span>${lvl}</span>`;
-  return `<li${classes ? ` class="${classes}"` : ''}${opts.you ? ' aria-current="true"' : ''}><span class="rank">${rank}</span>${avatar}${nameCell}<span class="num">${fmt(messages)}</span><div class="share"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><span class="pct">${total > 0 ? pct.toFixed(1) + '%' : '—'}</span></div></li>`;
+  const medal = medalFor(rank);
+  const rankCell = medal
+    ? `<span class="rank medal" aria-label="Rank ${rank}"><span aria-hidden="true">${medal}</span></span>`
+    : `<span class="rank">${rank}</span>`;
+  return `<li${classes ? ` class="${classes}"` : ''}${opts.you ? ' aria-current="true"' : ''}>${rankCell}${avatar}${nameCell}<span class="num">${fmt(messages)}</span><div class="share"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><span class="pct">${total > 0 ? pct.toFixed(1) + '%' : '—'}</span></div></li>`;
 }
 
 // Pure: plain data in, HTML out. The row of `you` is highlighted; when they rank
 // below the shown rows, their real position is appended as a separated extra row.
-export function leaderboard(rows: UserRow[], total: number, members: DashboardData['members'], you?: LeaderboardYou, xpByUser?: Record<string, number>): string {
-  if (rows.length === 0) return emptyState('No messages yet.');
+export function leaderboard(rows: UserRow[], total: number, members: DashboardData['members'], you?: LeaderboardYou, xpByUser?: Record<string, number>, empty = 'No messages yet.'): string {
+  if (rows.length === 0) return emptyState(empty);
   const lvl = (userId: string): string | null => levelTag(xpByUser?.[userId] ?? null);
   const items = rows.map((r, i) => lbRow(i + 1, r.userId, r.messages, total, members, { top: i < 3, you: you?.userId === r.userId, extra: false, lvl: lvl(r.userId) }));
   if (you && you.rank && !rows.some((r) => r.userId === you.userId)) {
@@ -305,7 +335,8 @@ export function leaderboard(rows: UserRow[], total: number, members: DashboardDa
 
 export interface YouData {
   allRank: { rank: number; messages: number } | null;
-  weekRank: { rank: number; messages: number } | null;
+  currentWeekRank: { rank: number; messages: number } | null;
+  lastWeekRank: { rank: number; messages: number } | null;
   /** Total XP of the logged-in user, for the level progress row. */
   xp: number | null;
   /** Highest colored role of the logged-in user (hex), for the level bar fill. */
@@ -349,7 +380,7 @@ export function youSection(y: YouData, ctx: { total: number; timezone: string; c
 
   const kpis = [
     kpi(fmt(y.stats.messages), 'Messages, all time', allNote || undefined),
-    kpi(fmt(y.weekRank?.messages ?? 0), 'Messages, last week', y.weekRank ? `#${fmt(y.weekRank.rank)}` : 'not ranked'),
+    kpi(fmt(y.lastWeekRank?.messages ?? 0), 'Messages, last week', y.lastWeekRank ? `#${fmt(y.lastWeekRank.rank)}` : 'not ranked'),
     kpi(y.activityMs > 0 ? fmtDuration(y.activityMs) : '—', 'Activity time', y.topActivities[0] ? `top: ${y.topActivities[0].name}` : 'none tracked'),
     kpi(fmt(y.reactions.given), 'Reactions given', `${fmt(y.reactions.received)} received`),
     kpi(y.voice.totalMs > 0 ? fmtDuration(y.voice.totalMs) : '—', 'Time in voice', y.voice.totalMs > 0 ? `${fmt(y.voice.sessions)} session${y.voice.sessions === 1 ? '' : 's'}` : 'no voice time'),
@@ -532,7 +563,10 @@ export function logsPage(d: LogsPageData): string {
 export function dashboardPage(d: DashboardData): string {
   const s = d.settings;
   const b = d.botStatus;
-  const weekLabel = weekRangeLabel(d.week.bounds, s.timezone);
+  const wk = d.week.selected === 'current' ? d.week.current : d.week.last;
+  const weekLabel = weekRangeLabel(wk.bounds, s.timezone);
+  const weekSub = `${weekLabel}${d.week.selected === 'current' ? ' · in progress' : ''} · ${fmt(wk.total)} messages`;
+  const weekYouRank = d.week.selected === 'current' ? d.you.currentWeekRank : d.you.lastWeekRank;
   const dayOptions = DAYS.map((name, i) => `<option value="${i}"${s.weeklyDay === i ? ' selected' : ''}>${name}</option>`).join('');
   const hourOptions = Array.from({ length: 24 }, (_, h) => `<option value="${h}"${s.weeklyHour === h ? ' selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
   const channelOptions = d.channels
@@ -563,14 +597,14 @@ export function dashboardPage(d: DashboardData): string {
   </div>
   <div class="kpis">
     ${kpi(fmt(d.today), 'Messages today')}
-    ${kpi(fmt(d.week.total), 'Last week')}
+    ${kpi(fmt(d.week.last.total), 'Last week')}
     ${kpi(fmt(d.allTime.total), 'All time')}
     ${kpi(fmt(d.reactions.total), 'Reactions')}
     ${kpi(fmt(b.embedsConverted), 'Embeds converted')}
   </div>
   ${youSection(d.you, { total: d.allTime.total, timezone: s.timezone, channelNames: d.channelNames, username: d.user.username })}
   <div class="cols">
-    <section aria-labelledby="h-week"><div class="sec-head"><h2 id="h-week">Last week</h2><span class="sub">${escapeHtml(weekLabel)} · ${fmt(d.week.total)} messages</span></div>${leaderboard(d.week.rows, d.week.total, d.members, { userId: d.user.id, rank: d.you.weekRank }, d.xpByUser)}</section>
+    <section aria-labelledby="h-week"><div class="sec-head"><h2 id="h-week">Week leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected)}${leaderboard(wk.rows, wk.total, d.members, { userId: d.user.id, rank: weekYouRank }, d.xpByUser, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>
     <section aria-labelledby="h-all"><div class="sec-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members, { userId: d.user.id, rank: d.you.allRank }, d.xpByUser)}</section>
   </div>
   <section aria-labelledby="h-react"><div class="sec-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>

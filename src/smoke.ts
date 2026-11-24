@@ -16,7 +16,7 @@ import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { leaderboard, youSection } from './web/views.js';
+import { leaderboard, medalFor, weekTabs, youSection } from './web/views.js';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { announceInGuild, markGamesPosted, titleDedupeKey, isGamePosted } from './freegames/actions.js';
 import { createReplayGuard, freeStuffTimestampValid, normalizeFreeStuffProduct, verifyFreeStuffSignature } from './freegames/freestuff.js';
@@ -710,14 +710,37 @@ rmSync(dir, { recursive: true, force: true });
       lvlTop.includes('<span class="nm">Nine</span><span class="lvl">lvl 69 · 500/7,000</span>') &&
       (lvlTop.match(/class="lvl"/g) ?? []).length === 2,
   );
+  check('medalFor: gold/silver/bronze for ranks 1-3, nothing else', medalFor(1) === '🥇' && medalFor(2) === '🥈' && medalFor(3) === '🥉' && medalFor(4) === null && medalFor(0) === null && medalFor(1.5) === null);
+  check(
+    'leaderboard: medals replace the numbers for the top 3',
+    (inTop.match(/class="rank medal"/g) ?? []).length === 3 &&
+      inTop.includes('aria-label="Rank 1"') &&
+      inTop.includes('aria-hidden="true">🥇</span>') &&
+      inTop.includes('aria-label="Rank 3"') &&
+      !inTop.includes('<span class="rank">1</span>'),
+  );
+  const fourth = leaderboard([...rows, { userId: 'u4', messages: 0 }], 16, mem);
+  check('leaderboard: rank 4 keeps a plain number', (fourth.match(/class="rank medal"/g) ?? []).length === 3 && fourth.includes('<span class="rank">4</span>'));
+  const tabCur = weekTabs('current');
+  check(
+    'weekTabs: current selected, last is a link',
+    tabCur.includes('<span class="tab" aria-current="page">This week</span>') &&
+      tabCur.includes('<a class="tab" href="/dashboard?week=last#h-week">Last week</a>') &&
+      (tabCur.match(/aria-current/g) ?? []).length === 1,
+  );
+  const tabLast = weekTabs('last');
+  check(
+    'weekTabs: last selected flips the highlight',
+    tabLast.includes('<span class="tab" aria-current="page">Last week</span>') && tabLast.includes('<a class="tab" href="/dashboard?week=current#h-week">This week</a>'),
+  );
   const emptyYou = youSection(
-    { allRank: null, weekRank: null, xp: null, stats: { userId: 'u9', messages: 0, firstTs: null, lastTs: null }, reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null },
+    { allRank: null, currentWeekRank: null, lastWeekRank: null, xp: null, stats: { userId: 'u9', messages: 0, firstTs: null, lastTs: null }, reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null },
     { total: 10, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check('youSection: empty state', emptyYou.includes('id="h-you"') && emptyYou.includes('No tracked activity'));
   const youLvl = youSection(
     {
-      allRank: { rank: 3, messages: 7 }, weekRank: null, xp: 242_000, roleColor: '#5865f2',
+      allRank: { rank: 3, messages: 7 }, currentWeekRank: null, lastWeekRank: null, xp: 242_000, roleColor: '#5865f2',
       stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
       reactions: { given: 2, received: 1 }, voice: { totalMs: 60_000, sessions: 1 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
     },
@@ -740,7 +763,7 @@ rmSync(dir, { recursive: true, force: true });
   );
   const youNoColor = youSection(
     {
-      allRank: null, weekRank: null, xp: 242_000, roleColor: null,
+      allRank: null, currentWeekRank: null, lastWeekRank: null, xp: 242_000, roleColor: null,
       stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
       reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
     },
@@ -749,7 +772,7 @@ rmSync(dir, { recursive: true, force: true });
   check('youSection: level bar falls back to the accent color', youNoColor.includes('<i style="width:7.1%"></i>'));
   const youNoXp = youSection(
     {
-      allRank: null, weekRank: null, xp: null, roleColor: '#5865f2',
+      allRank: null, currentWeekRank: null, lastWeekRank: null, xp: null, roleColor: '#5865f2',
       stats: { userId: 'u9', messages: 7, firstTs: 1_000, lastTs: 2_000 },
       reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null,
     },

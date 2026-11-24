@@ -253,12 +253,17 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const session = c.get('session');
     const guild = client.guilds.cache.get(config.guildId);
     const settings = db.getSettings(config.guildId);
+    const nowMs = Date.now();
     const week = lastWeekBounds(settings.timezone);
+    const curWeek = currentWeekBounds(settings.timezone);
+    const curEnd = Math.min(curWeek.end, nowMs);
+    const weekSel: DashboardData['week']['selected'] = c.req.query('week') === 'last' ? 'last' : 'current';
     const channels = listChannels();
     const freeSettings = db.getFreeSettings(config.guildId);
     const freeFlash: DashboardData['free']['flash'] = c.req.query('freeSaved') === '1' ? { kind: 'saved' } : null;
     const total = db.countMessages(config.guildId);
     const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
+    const curWeekRows = db.topUsers(config.guildId, 10, curWeek.start, curEnd);
     const allRows = db.topUsers(config.guildId, 10);
     const embedTotal = db.countEmbeds(config.guildId);
     const embedPages = Math.max(1, Math.ceil(embedTotal / EMBEDS_PAGE_SIZE));
@@ -267,7 +272,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
     // Cache-only lookups: guild member -> global user -> raw id (handled in the view).
     const members: Record<string, { name: string; avatar: string | null }> = {};
-    for (const userId of [session.userId, ...weekRows.map((r) => r.userId), ...allRows.map((r) => r.userId)]) {
+    for (const userId of [session.userId, ...weekRows.map((r) => r.userId), ...curWeekRows.map((r) => r.userId), ...allRows.map((r) => r.userId)]) {
       if (members[userId]) continue;
       const m = guild?.members.cache.get(userId);
       const u = m?.user ?? client.users.cache.get(userId);
@@ -286,7 +291,8 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
     const you: DashboardData['you'] = {
       allRank: db.userRank(config.guildId, session.userId),
-      weekRank: db.userRank(config.guildId, session.userId, week.start, week.end),
+      currentWeekRank: db.userRank(config.guildId, session.userId, curWeek.start, curEnd),
+      lastWeekRank: db.userRank(config.guildId, session.userId, week.start, week.end),
       xp: db.getUserXp(config.guildId, session.userId)?.xp ?? null,
       roleColor: guild?.members.cache.get(session.userId)?.roles.color?.hexColor ?? null,
       stats: db.userStats(config.guildId, session.userId),
@@ -321,7 +327,11 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
           errors24h: db.countLogErrorsSince(Date.now() - 24 * 3600 * 1000),
         },
         today: db.countMessages(config.guildId, startOfDay(settings.timezone)),
-        week: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
+        week: {
+          selected: weekSel,
+          current: { bounds: curWeek, total: db.countMessages(config.guildId, curWeek.start, curEnd), rows: curWeekRows },
+          last: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
+        },
         allTime: { total, rows: allRows },
         reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
         recentEmbeds,
