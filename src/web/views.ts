@@ -467,6 +467,8 @@ export function builderSection(d: DashboardData): string {
         <input type="text" id="builderModel" name="model" value="${escapeHtml(b.settings.model)}" autocomplete="off" spellcheck="false"></div>
       <div class="field"><label for="maxParallelBuilds">Parallel builds</label><span class="help">1–5. Requests can be planned in parallel; approved ones wait in a queue until fewer than this many are building. More than 1 risks merge conflicts between PRs (each conflicted PR gets one automatic fix attempt).</span>
         <input type="number" id="maxParallelBuilds" name="maxParallelBuilds" min="1" max="5" step="1" value="${escapeHtml(String(b.settings.maxParallelBuilds))}"></div>
+      <div class="field"><label for="limitThreshold">Refuse AI requests at (% of Go limit)</label><span class="help">50–100, default 95. While any OpenCode Go limit (5h, weekly, monthly) is at or above this percentage, chat messages, feature requests and new builds are refused with the reset time. 100 only refuses a fully exhausted limit.</span>
+        <input type="number" id="limitThreshold" name="limitThreshold" min="50" max="100" step="1" value="${escapeHtml(String(b.settings.limitThreshold))}"></div>
       ${limits}
       <div class="actions"><button type="submit">Save AI assistant settings</button> <a class="btn ghost" href="/dashboard/requests">View chats and feature requests</a></div>
     </form>

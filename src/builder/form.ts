@@ -1,4 +1,4 @@
-import { clampMaxParallel, DEFAULT_BUILDER_MODEL, DEFAULT_CHAT_DECISION_MODEL, DEFAULT_CHAT_MODEL, type BuilderSettings } from '../db.js';
+import { clampLimitThreshold, clampMaxParallel, DEFAULT_BUILDER_MODEL, DEFAULT_CHAT_DECISION_MODEL, DEFAULT_CHAT_MODEL, type BuilderSettings } from '../db.js';
 import { parseModelRef } from './parse.js';
 
 /** Empty -> default; invalid -> keep `current` and report; otherwise the trimmed value. */
@@ -14,6 +14,13 @@ export function parseMaxParallel(raw: unknown, current: number): number {
   const v = typeof raw === 'string' ? raw.trim() : '';
   if (!/^-?\d+$/.test(v)) return current;
   return clampMaxParallel(Number(v));
+}
+
+/** Whole percent clamped to 50–100; missing or not a number keeps `current`. */
+export function parseLimitThreshold(raw: unknown, current: number): number {
+  const v = typeof raw === 'string' ? raw.trim() : '';
+  if (!/^-?\d+$/.test(v)) return current;
+  return clampLimitThreshold(Number(v));
 }
 
 const MAX_LANGUAGES = 8;
@@ -49,6 +56,7 @@ export function parseBuilderForm(form: Record<string, unknown>, current: Builder
       chatDecisionModel: decision.model,
       chatLanguages: parseChatLanguages(form.chatLanguages),
       maxParallelBuilds: parseMaxParallel(form.maxParallelBuilds, current.maxParallelBuilds),
+      limitThreshold: parseLimitThreshold(form.limitThreshold, current.limitThreshold),
     },
     modelError: build.error ?? chat.error ?? decision.error,
   };

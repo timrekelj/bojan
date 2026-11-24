@@ -403,6 +403,8 @@ export interface BuilderSettings {
   chatDecisionModel: string;
   /** How many builds may run at once (1–5); further approved requests wait in a queue. */
   maxParallelBuilds: number;
+  /** Refuse AI requests while any OpenCode Go limit is at this percent or more (50–100). */
+  limitThreshold: number;
   /** Languages the chat assistant must reply in; empty = no constraint (any language). */
   chatLanguages: string[];
 }
@@ -412,11 +414,20 @@ export const DEFAULT_CHAT_MODEL = 'opencode-go/glm-5.3-flash';
 export const DEFAULT_CHAT_DECISION_MODEL = 'opencode-go/jev-1.14';
 export const DEFAULT_MAX_PARALLEL_BUILDS = 1;
 export const MAX_PARALLEL_BUILDS_LIMIT = 5;
+export const DEFAULT_LIMIT_THRESHOLD = 95;
+export const MIN_LIMIT_THRESHOLD = 50;
+export const MAX_LIMIT_THRESHOLD = 100;
 
 /** Whole number in 1..5; anything else becomes the default. */
 export function clampMaxParallel(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_MAX_PARALLEL_BUILDS;
   return Math.min(MAX_PARALLEL_BUILDS_LIMIT, Math.max(1, Math.trunc(n)));
+}
+
+/** Whole percent in 50..100; anything else becomes the default. */
+export function clampLimitThreshold(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_LIMIT_THRESHOLD;
+  return Math.min(MAX_LIMIT_THRESHOLD, Math.max(MIN_LIMIT_THRESHOLD, Math.round(n)));
 }
 
 export interface ChatThread {
@@ -1280,6 +1291,7 @@ export class BotDatabase {
       chatModel: chatModel && chatModel.length > 0 ? chatModel : DEFAULT_CHAT_MODEL,
       chatDecisionModel: decisionModel && decisionModel.length > 0 ? decisionModel : DEFAULT_CHAT_DECISION_MODEL,
       maxParallelBuilds: clampMaxParallel(Number(this.getState('builder:maxParallel') ?? DEFAULT_MAX_PARALLEL_BUILDS)),
+      limitThreshold: this.getState('builder:limitThreshold') ? clampLimitThreshold(Number(this.getState('builder:limitThreshold'))) : DEFAULT_LIMIT_THRESHOLD,
       chatLanguages: parseChatLanguages(this.getState('chat:languages')),
     };
   }
@@ -1291,6 +1303,7 @@ export class BotDatabase {
     this.setState('chat:model', s.chatModel.trim().length > 0 ? s.chatModel.trim() : DEFAULT_CHAT_MODEL);
     this.setState('chat:decisionModel', s.chatDecisionModel.trim().length > 0 ? s.chatDecisionModel.trim() : DEFAULT_CHAT_DECISION_MODEL);
     this.setState('builder:maxParallel', String(clampMaxParallel(s.maxParallelBuilds)));
+    this.setState('builder:limitThreshold', String(clampLimitThreshold(s.limitThreshold)));
     this.setState('chat:languages', JSON.stringify(s.chatLanguages));
   }
 
