@@ -3,7 +3,7 @@ import { Hono, type Context, type Next } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { serve } from '@hono/node-server';
 import { ChannelType, type Client } from 'discord.js';
-import type { BotDatabase, Settings } from '../db.js';
+import type { BotDatabase, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
 import { dashboardPage, errorPage, loginPage, logsPage, requestsPage, type DashboardData } from './views.js';
@@ -30,7 +30,8 @@ declare module 'hono' {
 
 const SID_COOKIE = 'sid';
 const STATE_COOKIE = 'oauth_state';
-const sessions = new Map<string, Session>(); // sid -> session
+const SESSION_TTL_MS = 7 * 86400_000; // session lifetime, matched by the cookie's maxAge
+const sessions = new Map<string, Session>(); // sid -> session (runtime cache; the DB is the source of truth)
 const startedAt = Date.now();
 const EMBEDS_PAGE_SIZE = 10;
 const REQUESTS_PAGE_SIZE = 50;
@@ -140,6 +141,13 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   const freestuffKey = opts.freestuffPublicKey === undefined ? config.freestuffPublicKey : opts.freestuffPublicKey;
   const freestuffReplay = createReplayGuard();
 
+  // Sessions live in the DB, so a redeploy/restart doesn't log anyone out.
+  // The signed cookie is still the gate; this map is just the runtime cache.
+  // Expired rows are pruned by loadWebSessions.
+  const restored = db.loadWebSessions();
+  for (const s of restored) sessions.set(s.sid, { userId: s.userId, username: s.username, avatar: s.avatar, accessToken: s.accessToken });
+  if (restored.length > 0) console.log(`[web] restored ${restored.length} dashboard session(s), no re-login needed`);
+
   app.get('/health', (c) => c.json({ ok: true, uptimeSec: Math.floor((Date.now() - startedAt) / 1000) }));
 
   // FreeStuff webhook: public (authenticated by Ed25519 signature, not the dashboard session).
@@ -188,13 +196,15 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       const avatar = check.user.avatar
         ? `https://cdn.discordapp.com/avatars/${check.user.id}/${check.user.avatar}.png?size=64`
         : `https://cdn.discordapp.com/embed/avatars/${Number(BigInt(check.user.id) % 6n)}.png`;
-      sessions.set(sid, {
+      const session: Session = {
         userId: check.user.id,
         username: check.user.global_name ?? check.user.username,
         avatar,
         accessToken: token.access_token,
-      });
-      setCookie(c, SID_COOKIE, sessionCookieValue(sid), { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: 7 * 86400 });
+      };
+      sessions.set(sid, session);
+      db.saveWebSession({ sid, ...session, createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS });
+      setCookie(c, SID_COOKIE, sessionCookieValue(sid), { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: SESSION_TTL_MS / 1000 });
       return c.redirect('/dashboard');
     } catch (err) {
       console.error('[web] oauth callback failed:', err);
@@ -205,6 +215,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   app.get('/logout', (c) => {
     const session = verifySessionCookie(getCookie(c)[SID_COOKIE]);
     if (session) {
+      db.deleteWebSessionsForUser(session.userId);
       for (const [sid, s] of sessions) if (s.userId === session.userId) sessions.delete(sid);
     }
     deleteCookie(c, SID_COOKIE, { path: '/' });

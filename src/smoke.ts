@@ -8,7 +8,7 @@ import { isWeeklyDue } from './scheduler.js';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { BotDatabase } from './db.js';
+import { BotDatabase, type WebSessionRow } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { awardMessageXp, awardReactionXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
@@ -649,6 +649,26 @@ rmSync(dir, { recursive: true, force: true });
   const off = createWebApp(wClient, wdb, { freestuffPublicKey: null });
   const rOff = await off.request('/webhooks/freestuff', { method: 'POST', body, headers: { 'webhook-id': 'p1', 'webhook-timestamp': tsNow, 'webhook-signature': mk('p1', tsNow, body), 'x-compatibility-date': '2026-11-15' } });
   check('route: no public key configured -> 404', rOff.status === 404, `status=${rOff.status}`);
+
+  // dashboard sessions persist in the DB so redeploys don't force a re-login
+  const mkSess = (sid: string, userId: string, username: string, expiresAt: number): WebSessionRow => ({ sid, userId, username, avatar: `a-${sid}.png`, accessToken: `tok-${sid}`, createdAt: now, expiresAt });
+  wdb.saveWebSession(mkSess('s1', 'u1', 'Ann', now + D));
+  wdb.saveWebSession(mkSess('s2', 'u1', 'Ann', now - 1)); // already expired
+  wdb.saveWebSession(mkSess('s3', 'u2', 'Bob', now + 2 * D));
+  const live = wdb.loadWebSessions(now);
+  check('web sessions: expired row pruned, live rows loaded in order', live.length === 2 && live[0]?.sid === 's1' && live[0]?.username === 'Ann' && live[0]?.avatar === 'a-s1.png' && live[0]?.accessToken === 'tok-s1' && live[1]?.sid === 's3', JSON.stringify(live.map((x) => x.sid)));
+  check('web sessions: second load keeps pruning to the same rows', wdb.loadWebSessions(now).length === 2);
+  wdb.saveWebSession({ ...mkSess('s1', 'u1', 'Ann', now + D), username: 'Ann R.' });
+  const replaced = wdb.loadWebSessions(now).find((x) => x.sid === 's1');
+  check('web sessions: same sid is replaced, not duplicated', wdb.loadWebSessions(now).length === 2 && replaced?.username === 'Ann R.', replaced?.username ?? 'missing');
+  wdb.deleteWebSessionsForUser('u1');
+  const afterLogout = wdb.loadWebSessions(now);
+  check("web sessions: logout deletes all of the user's rows, other users untouched", afterLogout.length === 1 && afterLogout[0]?.userId === 'u2', JSON.stringify(afterLogout.map((x) => x.sid)));
+
+  // a fresh app instance (simulated redeploy) restores the surviving session
+  const afterRestart = new BotDatabase(join(fsDir, 'web.db'));
+  check('web sessions: survive a restart (new DB handle, same file)', afterRestart.loadWebSessions(now).length === 1 && afterRestart.loadWebSessions(now)[0]?.sid === 's3');
+  afterRestart.close();
   wdb.close();
   rmSync(fsDir, { recursive: true, force: true });
 }

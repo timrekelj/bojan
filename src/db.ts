@@ -151,6 +151,17 @@ export interface ActivitySessionRow {
   open: number; // 1 if still running
 }
 
+/** A dashboard login session, persisted so redeploys don't force a re-login. */
+export interface WebSessionRow {
+  sid: string;
+  userId: string;
+  username: string;
+  avatar: string;
+  accessToken: string;
+  createdAt: number;
+  expiresAt: number; // epoch ms; the row (and its cookie) die after this
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,6 +240,16 @@ CREATE TABLE IF NOT EXISTS free_posted (
 CREATE TABLE IF NOT EXISTS bot_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS web_sessions (
+  sid TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  username TEXT NOT NULL,
+  avatar TEXT NOT NULL,
+  access_token TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS logs (
@@ -1224,6 +1245,26 @@ export class BotDatabase {
 
   setState(key: string, value: string): void {
     this.db.prepare('INSERT INTO bot_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  }
+
+  // ---- dashboard web sessions -------------------------------------------
+
+  saveWebSession(s: WebSessionRow): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO web_sessions (sid, user_id, username, avatar, access_token, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(s.sid, s.userId, s.username, s.avatar, s.accessToken, s.createdAt, s.expiresAt);
+  }
+
+  /** Non-expired sessions oldest first; expired rows are deleted along the way. */
+  loadWebSessions(now = Date.now()): WebSessionRow[] {
+    this.db.prepare('DELETE FROM web_sessions WHERE expires_at <= ?').run(now);
+    return this.db
+      .prepare('SELECT sid, user_id AS userId, username, avatar, access_token AS accessToken, created_at AS createdAt, expires_at AS expiresAt FROM web_sessions ORDER BY created_at')
+      .all() as unknown as WebSessionRow[];
+  }
+
+  deleteWebSessionsForUser(userId: string): void {
+    this.db.prepare('DELETE FROM web_sessions WHERE user_id = ?').run(userId);
   }
 
   // ---- self-building (build_jobs) -------------------------------------
