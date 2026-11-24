@@ -696,8 +696,12 @@ rmSync(dir, { recursive: true, force: true });
     { total: 100, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check(
-    'youSection: level + progress KPI below the message stats',
-    youLvl.includes('<b>lvl 69 · 500/7,000</b>') && youLvl.indexOf('Level') > youLvl.indexOf('Messages, all time') && youLvl.indexOf('Level') < youLvl.indexOf('Reactions given') && !emptyYou.includes('<b>lvl'),
+    'youSection: activity time below the message stats, level KPI last',
+    youLvl.includes('<b>lvl 69 · 500/7,000</b>') &&
+      youLvl.indexOf('Activity time') > youLvl.indexOf('Messages, last week') &&
+      youLvl.indexOf('Activity time') < youLvl.indexOf('Reactions given') &&
+      youLvl.indexOf('Level') > youLvl.indexOf('Time in voice') &&
+      !emptyYou.includes('<b>lvl'),
   );
 }
 

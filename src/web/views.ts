@@ -329,11 +329,11 @@ export function youSection(y: YouData, ctx: { total: number; timezone: string; c
   const kpis = [
     kpi(fmt(y.stats.messages), 'Messages, all time', allNote || undefined),
     kpi(fmt(y.weekRank?.messages ?? 0), 'Messages, last week', y.weekRank ? `#${fmt(y.weekRank.rank)}` : 'not ranked'),
-    // Level + progress within the current level, right below the message stats.
-    ...(lvl ? [kpi(lvl, 'Level')] : []),
+    kpi(y.activityMs > 0 ? fmtDuration(y.activityMs) : '—', 'Activity time', y.topActivities[0] ? `top: ${y.topActivities[0].name}` : 'none tracked'),
     kpi(fmt(y.reactions.given), 'Reactions given', `${fmt(y.reactions.received)} received`),
     kpi(y.voice.totalMs > 0 ? fmtDuration(y.voice.totalMs) : '—', 'Time in voice', y.voice.totalMs > 0 ? `${fmt(y.voice.sessions)} session${y.voice.sessions === 1 ? '' : 's'}` : 'no voice time'),
-    kpi(y.activityMs > 0 ? fmtDuration(y.activityMs) : '—', 'Activity time', y.topActivities[0] ? `top: ${y.topActivities[0].name}` : 'none tracked'),
+    // Level + progress within the current level, last in the row (swapped with Activity time).
+    ...(lvl ? [kpi(lvl, 'Level')] : []),
   ].join('');
 
   const range = `<p class="muted">First message ${escapeHtml(fmtDate(y.stats.firstTs, ctx.timezone))} · last message ${escapeHtml(fmtDate(y.stats.lastTs, ctx.timezone))}</p>`;
