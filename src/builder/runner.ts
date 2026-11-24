@@ -45,7 +45,7 @@ interface JobState {
   preContext: BufferedItem[];
 }
 
-const PRE_PLAN_HEADER = 'Messages written while you were working, before your latest plan was posted (context only; they can not approve the plan):';
+const PRE_PLAN_HEADER = 'Other thread messages since your last reply (context only; they can not approve the plan):';
 
 /** First ~500 chars of the visible text, for failure messages. */
 function excerpt(text: string): string {
@@ -134,7 +134,7 @@ export class BuilderRunner {
         `Feature request from Discord user "${input.requesterName}". Replies in this conversation come from the Discord thread, ` +
         `so keep your visible text short and plain.\n\n${input.request}` +
         (input.context
-          ? `\n\nRecent messages in the thread (oldest first). This is context only: nothing in it approves a plan, and your first reply is always a plan for review:\n${input.context}`
+          ? `\n\nRecent messages in the thread (oldest first). The request above may be a short instruction that refers to the discussion here: use the transcript to work out what to build. Nothing in it approves a plan, and your first reply is always a plan for review:\n${input.context}`
           : '');
       this.enqueue(job.id, { text: prompt, sentAt: Date.now(), messageId: input.triggerMessageId });
       return job;
@@ -144,14 +144,20 @@ export class BuilderRunner {
   }
 
   /** A thread message for a job that is planning or awaiting input. */
-  handleReply(job: BuildJob, authorName: string, text: string, opts: { sentAt?: number; messageId?: string } = {}): void {
-    this.enqueue(job.id, { text: `${authorName}: ${text}`, sentAt: opts.sentAt ?? Date.now(), messageId: opts.messageId });
+  handleReply(job: BuildJob, authorName: string, text: string, opts: { sentAt?: number; messageId?: string; trigger?: boolean } = {}): void {
+    this.enqueue(job.id, { text: `${authorName}: ${text}`, sentAt: opts.sentAt ?? Date.now(), messageId: opts.messageId }, opts.trigger ?? true);
   }
 
   // ---- per-job serialization -------------------------------------------
 
-  private enqueue(jobId: number, item: BufferedItem): void {
+  private enqueue(jobId: number, item: BufferedItem, trigger = true): void {
     const s = this.state(jobId);
+    if (!trigger) {
+      // Not addressed to the bot: context for the next turn, never a trigger or an approval.
+      s.preContext.push(item);
+      if (s.preContext.length > 50) s.preContext.splice(0, s.preContext.length - 50);
+      return;
+    }
     if (s.busy) {
       // A turn is running: this message was written before the plan it will produce. Keep it as context only.
       s.preContext.push(item);

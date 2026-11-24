@@ -12,22 +12,25 @@ export interface ChatReply {
 
 /**
  * Parse a chat agent reply (`{"reply": bool}` block). A missing or invalid json block is never
- * posted: `reply: false` with `missingBlock: true`. `reply: false` suppresses the visible text.
+ * posted: `reply: false` with `missingBlock: true`. With a valid block, any visible text is posted.
  */
 export function parseChatReply(text: string): ChatReply {
   const { visible, result } = parseAgentReply(text);
   if (!result) return { reply: false, visible: '', missingBlock: true };
-  const wantsReply = result.reply !== false && visible.length > 0;
-  return { reply: wantsReply, visible: wantsReply ? visible : '', missingBlock: false };
+  // The bot is only called when someone addresses it, so any visible text is posted (the block's `reply` flag is ignored).
+  const hasText = visible.length > 0;
+  return { reply: hasText, visible, missingBlock: false };
 }
 
 export const FEATURE_REQUEST_QUESTION = {
   name: 'feature_request',
   instructions:
-    'Does this message ask for a new feature, a change or a bug fix in this Discord bot itself (not a general question, not just discussing an idea, not about other software)?',
+    'You get recent thread messages (context) and a "Latest message" to classify. Does the latest message ask for a new feature, a change or a bug fix in this Discord bot itself? ' +
+    'A short instruction such as "ship this", "build it" or "do it" counts when the thread discussed a change to the bot and the latest message tells the bot to go ahead. ' +
+    'Not a general question, not just discussing an idea without asking for it to be built, not about other software.',
   criteria: {
-    true: 'The message clearly asks for the Discord bot to gain a feature, change its behavior or get a bug fixed.',
-    false: 'A general question, small talk, only discussing an idea, or about anything other than this bot.',
+    true: 'The latest message clearly asks for the Discord bot to gain a feature, change its behavior or get a bug fixed, or tells the bot to build/ship a bot change discussed earlier in the thread.',
+    false: 'A general question, small talk, only discussing an idea (no ask to build it), or about anything other than this bot.',
   },
 };
 
@@ -41,13 +44,42 @@ export function shouldRunDecision(opts: { directed: boolean; admin: boolean; bui
   return opts.directed && opts.admin && opts.buildingEnabled && opts.text.trim().length > 0;
 }
 
-/** Plain decision-model input: the replied-to message (if any) and the message itself. */
-export function formatDecisionInput(opts: { text: string; replyTo?: { name: string; text: string } | null }): string {
+/**
+ * Plain decision-model input: recent thread history (oldest first, plain `name: text`, oldest dropped
+ * over `maxChars`), the replied-to message (if any) and the latest message to classify.
+ */
+export function formatDecisionInput(opts: {
+  text: string;
+  replyTo?: { name: string; text: string } | null;
+  history?: readonly { name: string; text: string }[];
+  maxChars?: number;
+  perMessage?: number;
+}): string {
+  const { maxChars = 6000, perMessage = 500 } = opts;
   const parts: string[] = [];
+  const lines = (opts.history ?? [])
+    .map((h) => {
+      const flat = h.text.replace(/\s+/g, ' ').trim();
+      return flat.length === 0 ? '' : `${h.name}: ${flat.length > perMessage ? `${flat.slice(0, perMessage - 1)}…` : flat}`;
+    })
+    .filter((l) => l.length > 0);
+  let total = lines.reduce((n, l) => n + l.length + 1, 0);
+  while (lines.length > 0 && total > maxChars) total -= lines.shift()!.length + 1;
+  if (lines.length > 0) parts.push(`Recent thread messages (oldest first, context):\n${lines.join('\n')}`);
   const ref = opts.replyTo?.text.trim();
-  if (opts.replyTo && ref) parts.push(`Replying to ${opts.replyTo.name}: ${ref}`);
-  parts.push(`Message:\n${opts.text.trim()}`);
+  if (opts.replyTo && ref) parts.push(`The latest message replies to ${opts.replyTo.name}: ${ref}`);
+  parts.push(`Latest message (the one to classify):\n${opts.text.trim()}`);
   return parts.join('\n\n');
+}
+
+/** Non-directed thread messages buffered since the bot's last reply, as background for the next directed turn. Empty for none. */
+export function formatThreadContext(lines: readonly string[], opts: { maxLines?: number; maxChars?: number } = {}): string {
+  const { maxLines = 30, maxChars = 4000 } = opts;
+  const kept = lines.filter((l) => l.trim().length > 0).slice(-maxLines);
+  let total = kept.reduce((n, l) => n + l.length + 1, 0);
+  while (kept.length > 1 && total > maxChars) total -= kept.shift()!.length + 1;
+  if (kept.length === 0) return '';
+  return `Other messages in the thread since your last reply (context, not addressed to you):\n${kept.join('\n')}`;
 }
 
 /** The build request text: what the requester wrote, prefixed by the message it replies to. */
@@ -118,9 +150,9 @@ export function formatInitialPrompt(opts: { channelName: string | null; trigger:
   return parts.join('\n\n');
 }
 
-/** Short recent-thread transcript for the planner: last `maxMessages`, each trimmed, oldest dropped over `maxChars`. */
+/** Recent-thread transcript for the planner: last `maxMessages`, each trimmed, oldest dropped over `maxChars`. */
 export function formatTranscript(entries: readonly ChatMessageInfo[], opts: { maxMessages?: number; maxChars?: number; perMessage?: number } = {}): string {
-  const { maxMessages = 20, maxChars = 4000, perMessage = 500 } = opts;
+  const { maxMessages = 50, maxChars = 8000, perMessage = 500 } = opts;
   const lines = entries.slice(-maxMessages).map((e) => {
     const flat = e.text.replace(/\s+/g, ' ').trim();
     const text = flat.length > perMessage ? `${flat.slice(0, perMessage - 1)}…` : flat;

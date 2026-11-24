@@ -13,6 +13,7 @@ import {
   formatDecisionInput,
   formatInitialPrompt,
   formatJobStatus,
+  formatThreadContext,
   formatTranscript,
   isFeatureRequest,
   parseChatReply,
@@ -66,9 +67,14 @@ export function isDirectedAtBot(message: Message, botId: string): boolean {
 
 interface ThreadState {
   busy: boolean;
+  /** Directed messages waiting for the next turn. */
   buffer: Pending[];
+  /** Non-directed messages since the last turn: background for the next directed one (in memory only). */
+  context: string[];
   timer: NodeJS.Timeout | null;
 }
+
+const MAX_CONTEXT_LINES = 50;
 
 function displayName(message: Message): string {
   return message.member?.displayName ?? message.author.displayName ?? message.author.username;
@@ -267,6 +273,11 @@ export class ChatRunner {
     const info = messageInfo(message, bot.id, this.botName());
     if (info.text.trim().length === 0 && (info.extras?.length ?? 0) === 0) return;
     const directed = isDirectedAtBot(message, bot.id);
+    if (!directed) {
+      // Not for the bot: no model call, reaction or typing. Keep it as background for the next directed turn.
+      this.stateFor(chat.threadId).context.push(formatChatMessage(info));
+      return;
+    }
     // Thinking reaction right away so the member sees the bot noticed the message.
     const item: Pending = {
       text: formatChatMessage(info),
@@ -277,9 +288,9 @@ export class ChatRunner {
       messageId: message.id,
       channelId: message.channelId,
     };
-    if (directed) void this.markThinking(item);
+    void this.markThinking(item);
     void (async () => {
-      if (directed && message.mentions.users.has(bot.id) && message.reference?.messageId) {
+      if (message.mentions.users.has(bot.id) && message.reference?.messageId) {
         const ref = await message.fetchReference().catch(() => null);
         if (ref) item.replyTo = { name: displayName(ref), text: replaceBotMention(ref.content, bot.id, this.botName()) };
       }
@@ -289,12 +300,18 @@ export class ChatRunner {
 
   // ---- per-thread queue ---------------------------------------------------------
 
-  private enqueue(threadId: string, item: Pending, immediate: boolean): void {
+  private stateFor(threadId: string): ThreadState {
     let s = this.states.get(threadId);
     if (!s) {
-      s = { busy: false, buffer: [], timer: null };
+      s = { busy: false, buffer: [], context: [], timer: null };
       this.states.set(threadId, s);
     }
+    if (s.context.length > MAX_CONTEXT_LINES) s.context.splice(0, s.context.length - MAX_CONTEXT_LINES);
+    return s;
+  }
+
+  private enqueue(threadId: string, item: Pending, immediate: boolean): void {
+    const s = this.stateFor(threadId);
     if (this.stopped) {
       void this.clearThinking([item]);
       return;
@@ -313,8 +330,9 @@ export class ChatRunner {
     try {
       while (s.buffer.length > 0 && !this.stopped) {
         const batch = s.buffer.splice(0);
+        const context = s.context.splice(0);
         try {
-          await this.runTurn(threadId, batch);
+          await this.runTurn(threadId, batch, context);
         } finally {
           await this.clearThinking(batch);
         }
@@ -360,11 +378,11 @@ export class ChatRunner {
     }
   }
 
-  private async runTurn(threadId: string, batch: Pending[]): Promise<void> {
+  private async runTurn(threadId: string, batch: Pending[], context: readonly string[] = []): Promise<void> {
     const chat = this.db.getChatThread(threadId);
     if (!chat) return;
-    // Typing only when someone is actually talking to the bot; undirected turns usually stay silent.
-    const stopTyping = batch.some((b) => b.directed) ? this.typing(threadId) : () => undefined;
+    // Turns only exist for directed messages, so someone is always talking to the bot.
+    const stopTyping = this.typing(threadId);
     try {
       // Feature requests never reach the chat agent; pending build notes stay for the next chat turn.
       const requester = this.requesterOf(batch);
@@ -374,7 +392,9 @@ export class ChatRunner {
       }
       const notes = this.db.pendingChatNotes(threadId);
       const status = this.jobStatusBlock(threadId);
-      const prompt = withNotes(status ? [status, ...notes] : notes, withLanguageRule(batch.map((b) => b.text).join('\n'), this.chatLanguages()));
+      const ctxBlock = formatThreadContext(context);
+      const body = [ctxBlock, batch.map((b) => b.text).join('\n')].filter((p) => p.length > 0).join('\n\n');
+      const prompt = withNotes(status ? [status, ...notes] : notes, withLanguageRule(body, this.chatLanguages()));
       const parsed = await this.askChat(threadId, chat.sessionId, chat.model, prompt, () => this.db.consumeChatNotes(threadId, notes.length));
       if (parsed.reply) await this.say(threadId, parsed.visible, this.replyTarget(threadId, batch));
     } catch (err) {
@@ -449,7 +469,8 @@ export class ChatRunner {
       const modelRef = this.db.getBuilderSettings().chatDecisionModel;
       const model = parseModelRef(modelRef);
       if (!model) throw new Error(`Invalid decision model setting "${modelRef}"`);
-      const input = formatDecisionInput({ text: requester.plain, replyTo: requester.replyTo });
+      const history = await this.recentEntries(threadId, requester, 30);
+      const input = formatDecisionInput({ text: requester.plain, replyTo: requester.replyTo, history });
       const probability = await this.getAgent().decide(model, input, FEATURE_REQUEST_QUESTION, DECISION_TIMEOUT_MS);
       const yes = isFeatureRequest(probability);
       console.log(`[chat] guild=${config.guildId} thread=${threadId} decision feature_request=${probability ?? 'none'} -> ${yes}`);
@@ -457,6 +478,27 @@ export class ChatRunner {
     } catch (err) {
       console.warn(`[chat] guild=${config.guildId} thread=${threadId} decision failed:`, err instanceof Error ? err.message : err);
       return false;
+    }
+  }
+
+  /**
+   * Recent messages of the thread (oldest first, bot mention replaced). With `before` set to a message
+   * of the thread, only the messages sent before it. Empty when the thread can't be read.
+   */
+  private async recentEntries(threadId: string, requester: Pending, limit: number): Promise<ChatMessageInfo[]> {
+    const bot = this.client.user;
+    if (!bot || requester.channelId !== threadId) return [];
+    try {
+      const channel = await this.client.channels.fetch(threadId);
+      if (!channel || !channel.isThread()) return [];
+      const recent = await channel.messages.fetch({ limit, before: requester.messageId });
+      return [...recent.values()]
+        .reverse()
+        .map((m) => ({ name: displayName(m), id: m.author.id, text: replaceBotMention(m.content, bot.id, this.botName()) }))
+        .filter((e) => e.text.trim().length > 0);
+    } catch (err) {
+      console.warn(`[chat] guild=${config.guildId} thread=${threadId} could not read history:`, err instanceof Error ? err.message : err);
+      return [];
     }
   }
 
@@ -472,7 +514,7 @@ export class ChatRunner {
     try {
       const channel = await this.client.channels.fetch(threadId).catch(() => null);
       if (!channel || !channel.isThread()) throw new Error('not a thread');
-      const recent = await channel.messages.fetch({ limit: 20 });
+      const recent = await channel.messages.fetch({ limit: 50 });
       const entries: ChatMessageInfo[] = [...recent.values()]
         .reverse()
         .map((m) => ({ name: m.author.bot ? m.author.displayName : displayName(m), id: m.author.id, text: m.content }))
