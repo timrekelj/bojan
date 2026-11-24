@@ -250,7 +250,7 @@ export function formatJobStatus(info: JobStatusInfo): string {
   let phase: string;
   switch (info.status) {
     case 'planning':
-      phase = `planning (${minutes} min): the planner is writing or revising a plan. Messages sent now are shown to it as context together with the next reply to the plan.`;
+      phase = `planning (${minutes} min): the planner is writing or revising a plan. A mention or reply from the requester or an admin sent now is picked up right after the current planner turn and the plan is revised automatically; other messages are context only.`;
       break;
     case 'awaiting_input':
       phase = 'plan posted, waiting for the requester to approve it or give feedback (as a reply to the posted plan).';

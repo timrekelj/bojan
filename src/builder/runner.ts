@@ -24,7 +24,7 @@ import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
 import { formatBuildNote, type BuildNoteInfo, type PromptImage, MAX_IMAGES } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prInfoFromJson, type PrInfo, type PrRef } from './parse.js';
 import { BUILDING, DONE, FAILED, PLANNING, addReaction, removeOwnReaction } from './reactions.js';
-import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
+import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
 
 const PLAN_TIMEOUT_MS = 15 * 60_000;
 const BUILD_TIMEOUT_MS = 90 * 60_000;
@@ -38,6 +38,8 @@ interface BufferedItem {
   messageId?: string;
   /** Images attached to the message (data URIs). */
   images?: PromptImage[];
+  /** Revising turn after follow-up messages: its reply can never approve. */
+  followUp?: boolean;
 }
 
 interface JobState {
@@ -46,6 +48,8 @@ interface JobState {
   buffer: BufferedItem[];
   /** Messages written while a turn was running: context for the next real turn, never a trigger or an approval. */
   preContext: BufferedItem[];
+  /** Directed messages written while a turn was running: trigger a revising turn right after it, never an approval. */
+  followUps: BufferedItem[];
 }
 
 const PRE_PLAN_HEADER = 'Other thread messages since your last reply (context only; they can not approve the plan):';
@@ -121,7 +125,7 @@ export class BuilderRunner {
   private state(jobId: number): JobState {
     let s = this.states.get(jobId);
     if (!s) {
-      s = { busy: false, buffer: [], preContext: [] };
+      s = { busy: false, buffer: [], preContext: [], followUps: [] };
       this.states.set(jobId, s);
     }
     return s;
@@ -163,8 +167,9 @@ export class BuilderRunner {
       return;
     }
     if (s.busy) {
-      // A turn is running: this message was written before the plan it will produce. Keep it as context only.
-      s.preContext.push(item);
+      // A turn is running: this message was written before the plan it will produce. Run a revising turn
+      // afterwards (its sentAt keeps it from approving that plan).
+      s.followUps.push(item);
       return;
     }
     s.buffer.push(item);
@@ -183,12 +188,24 @@ export class BuilderRunner {
         ].join('\n\n');
         const triggerId = [...items].reverse().find((i) => i.messageId)?.messageId;
         const images = items.flatMap((i) => i.images ?? []).slice(0, MAX_IMAGES);
-        await this.runTurn(jobId, prompt, Math.max(...items.map((i) => i.sentAt)), triggerId, images);
+        await this.runTurn(jobId, prompt, Math.max(...items.map((i) => i.sentAt)), triggerId, images, items.some((i) => i.followUp));
         const status = this.db.getBuildJob(jobId)?.status;
         // Context only makes sense while we are still planning.
-        if (status !== 'awaiting_input' && status !== 'planning') s.preContext.length = 0;
+        if (status !== 'awaiting_input' && status !== 'planning') {
+          s.preContext.length = 0;
+          s.followUps.length = 0;
+        } else if (s.followUps.length > 0 && s.buffer.length === 0 && !this.stopped) {
+          const followUps = s.followUps.splice(0);
+          const context = s.preContext.splice(0);
+          const prompt = followUpPrompt(followUps.map((i) => i.text), context.map((i) => i.text), PRE_PLAN_HEADER);
+          const triggerId = [...followUps].reverse().find((i) => i.messageId)?.messageId;
+          const images = followUps.flatMap((i) => i.images ?? []).slice(0, MAX_IMAGES);
+          // Loop: a follow-up turn may itself collect follow-ups.
+          s.buffer.push({ text: prompt, sentAt: Math.max(...followUps.map((i) => i.sentAt)), messageId: triggerId, images, followUp: true });
+        }
       }
     } finally {
+      s.followUps.length = 0;
       s.busy = false;
     }
   }
@@ -287,7 +304,7 @@ export class BuilderRunner {
   }
 
   /** One planning turn: set up on the first call, then prompt the planner and handle its reply. */
-  private async runTurn(jobId: number, prompt: string, latestUserMessageAt: number, triggerId?: string, images: readonly PromptImage[] = []): Promise<void> {
+  private async runTurn(jobId: number, prompt: string, latestUserMessageAt: number, triggerId?: string, images: readonly PromptImage[] = [], noApprove = false): Promise<void> {
     let job = this.db.getBuildJob(jobId);
     if (!job) return;
     const trigger = triggerId ?? job.triggerMessageId;
@@ -297,7 +314,16 @@ export class BuilderRunner {
       if (!job.sessionId) job = await this.setup(job);
       const reply = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS, images);
       await this.saveUsage(job);
-      await this.handlePlanReply(this.db.getBuildJob(jobId) ?? job, reply, latestUserMessageAt, trigger);
+      // Directed messages arrived during this turn: its reply is stale, the follow-up turn posts the plan.
+      const pending = this.state(jobId).followUps.length;
+      if (pending > 0 && !this.stopped) {
+        const planStatus = reply.error ? null : (normalizePlanResult(parseAgentReply(reply.text).result)?.status ?? null);
+        if (shouldHoldPlanReply({ pendingFollowUps: pending, error: Boolean(reply.error), planStatus })) {
+          console.log(`[builder] guild=${job.guildId} job=${job.id} reply held: ${pending} follow-up message(s) arrived during the turn`);
+          return;
+        }
+      }
+      await this.handlePlanReply(this.db.getBuildJob(jobId) ?? job, reply, latestUserMessageAt, trigger, noApprove);
     } catch (err) {
       console.error(`[builder] guild=${job.guildId} job=${job.id} turn failed:`, err);
       await this.fail(jobId, err instanceof Error ? err.message : String(err));
@@ -333,7 +359,7 @@ export class BuilderRunner {
    * doesn't know the triggering messages and passes Date.now(), so a recovered turn may approve as long as
    * a plan card was already posted.
    */
-  private async handlePlanReply(job: BuildJob, reply: AgentReply, latestUserMessageAt: number, replyTo?: string | null): Promise<void> {
+  private async handlePlanReply(job: BuildJob, reply: AgentReply, latestUserMessageAt: number, replyTo?: string | null, noApprove = false): Promise<void> {
     if (reply.error) {
       await this.fail(job.id, `The agent reported an error: ${reply.error}`);
       return;
@@ -360,7 +386,8 @@ export class BuilderRunner {
       await this.post(job, buildCancelledCard(this.usageOf(this.db.getBuildJob(job.id) ?? job)));
       return;
     }
-    const status = guardPlanStatus({ status: plan.status, planPostedAt: job.planPostedAt, latestUserMessageAt });
+    // A follow-up turn answers messages written before its plan is shown, so it can never approve.
+    const status = noApprove && plan.status === 'approved' ? 'needs_input' : guardPlanStatus({ status: plan.status, planPostedAt: job.planPostedAt, latestUserMessageAt });
     const downgraded = plan.status === 'approved' && status === 'needs_input';
     if (downgraded) console.warn(`[builder] guild=${job.guildId} job=${job.id} approval ignored: no user message after the plan`);
     if (status === 'needs_input') {
@@ -609,7 +636,10 @@ export class BuilderRunner {
       }
       if (kind === 'build') await this.buildEnded(job.id);
       const status = this.db.getBuildJob(job.id)?.status;
-      if (status !== 'awaiting_input' && status !== 'planning') s.preContext.length = 0;
+      if (status !== 'awaiting_input' && status !== 'planning') {
+        s.preContext.length = 0;
+        s.followUps.length = 0;
+      }
     }
   }
 

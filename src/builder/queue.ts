@@ -101,6 +101,22 @@ export const BUILD_RESUME_PROMPT =
 
 export const PLAN_RESUME_PROMPT = 'The bot restarted before you finished your last reply. Re-read the latest message above, continue, and finish with the required json block.';
 
+export const FOLLOW_UP_HEADER =
+  'Messages sent while you were writing your last reply (your last reply was not shown to them; they can not approve the plan). Revise your plan to account for them and reply with the full plan:';
+
+/** True when a finished planner turn's reply is stale (follow-ups arrived meanwhile) and should not be posted. Errors and cancellations still go through. */
+export function shouldHoldPlanReply(input: { pendingFollowUps: number; error: boolean; planStatus: string | null }): boolean {
+  return input.pendingFollowUps > 0 && !input.error && input.planStatus !== 'cancelled';
+}
+
+/** Prompt for the planner turn that runs after directed messages arrived during the previous turn. */
+export function followUpPrompt(followUps: readonly string[], context: readonly string[] = [], contextHeader = ''): string {
+  return [
+    ...(context.length > 0 ? [`${contextHeader}\n${context.join('\n')}`] : []),
+    `${FOLLOW_UP_HEADER}\n${followUps.join('\n')}`,
+  ].join('\n\n');
+}
+
 export function conflictFixPrompt(prUrl: string): string {
   return (
     `Your PR ${prUrl} has merge conflicts with main. Run \`git fetch origin && git merge origin/main\`, resolve conflicts keeping both sides' intent, ` +
