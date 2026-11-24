@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { Hono, type Context, type Next } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { serve } from '@hono/node-server';
@@ -6,7 +7,8 @@ import { ChannelType, type Client } from 'discord.js';
 import type { BotDatabase, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { dashboardPage, errorPage, loginPage, logsPage, requestsPage, type DashboardData } from './views.js';
+import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, requestsPage, requestsParts, settingsPage, type LogsPageData, type OverviewData, type RequestsPageData, type SettingsPageData } from './views.js';
+import { cachedDeployments, dokployEnabled, fetchDeployments, type DeployResult, type DeployStatus, type DokployConfig } from '../dokploy.js';
 import { postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
 import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from '../freegames/freestuff.js';
@@ -35,6 +37,30 @@ const sessions = new Map<string, Session>(); // sid -> session (runtime cache; t
 const startedAt = Date.now();
 const EMBEDS_PAGE_SIZE = 10;
 const REQUESTS_PAGE_SIZE = 50;
+const DEPLOY_PAGE_WAIT_MS = 1200; // a page render waits this long for Dokploy, then shows "unavailable"
+const DEPLOY_LIVE_WAIT_MS = 4000;
+const FAVICON = faviconSvg();
+
+// Static assets live next to this module: src/web/assets under tsx, dist/web/assets after
+// `npm run build` (which copies them). The second path covers `node dist/...` in a checkout
+// whose dist predates the copy step.
+function loadAsset(name: string): Uint8Array | null {
+  for (const rel of [`./assets/${name}`, `../../src/web/assets/${name}`]) {
+    try {
+      return new Uint8Array(readFileSync(new URL(rel, import.meta.url)));
+    } catch {
+      // try the next location
+    }
+  }
+  console.error(`[web] asset ${name} not found; the dashboard background will be plain`);
+  return null;
+}
+
+// Cloud background: a 1-bit ordered-dithered (Bayer 4x4, 2x upscaled) white-on-transparent
+// rendering of "Cumulus congestus clouds (27075262952)" by HO JJ (Taipei, Taiwan), mirrored.
+// Source: https://commons.wikimedia.org/wiki/File:Cumulus_congestus_clouds_(27075262952).jpg
+// License: CC0 1.0 Universal (public domain dedication); no attribution required.
+const CLOUDS = loadAsset('clouds.png');
 
 // 1-based page from a query value; garbage or < 1 -> 1, past the end -> last page.
 export function parsePage(raw: string | undefined, pages: number): number {
@@ -140,6 +166,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   const app = new Hono();
   const freestuffKey = opts.freestuffPublicKey === undefined ? config.freestuffPublicKey : opts.freestuffPublicKey;
   const freestuffReplay = createReplayGuard();
+  const dokploy: DokployConfig = { url: config.dokployUrl, apiKey: config.dokployApiKey, composeId: config.dokployComposeId };
 
   // Sessions live in the DB, so a redeploy/restart doesn't log anyone out.
   // The signed cookie is still the gate; this map is just the runtime cache.
@@ -147,6 +174,11 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   const restored = db.loadWebSessions();
   for (const s of restored) sessions.set(s.sid, { userId: s.userId, username: s.username, avatar: s.avatar, accessToken: s.accessToken });
   if (restored.length > 0) console.log(`[web] restored ${restored.length} dashboard session(s), no re-login needed`);
+
+  app.get('/favicon.svg', (c) => c.body(FAVICON, 200, { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=2592000' }));
+  app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301));
+  // Public and immutable: the URL in the CSS carries a content hash (CLOUDS_URL in views.ts).
+  app.get('/assets/clouds.png', (c) => (CLOUDS ? c.body(CLOUDS.slice().buffer, 200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' }) : c.notFound()));
 
   app.get('/health', (c) => c.json({ ok: true, uptimeSec: Math.floor((Date.now() - startedAt) / 1000) }));
 
@@ -228,6 +260,13 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     c.set('session', session);
     await next();
   };
+  // Same gate for JSON endpoints polled by the dashboard: 401 instead of a redirect to /login.
+  const requireAdminJson = async (c: Context, next: Next) => {
+    const session = verifySessionCookie(getCookie(c)[SID_COOKIE]);
+    if (!session) return c.json({ error: 'unauthorized' }, 401);
+    c.set('session', session);
+    await next();
+  };
 
   const listChannels = (): { id: string; name: string }[] => {
     const guild = client.guilds.cache.get(config.guildId);
@@ -249,29 +288,41 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       : [];
   };
 
-  app.get('/dashboard', requireAdmin, async (c) => {
-    const session = c.get('session');
+  // Deployment status for the shell/health pills: null when Dokploy isn't configured. Waits at
+  // most `waitMs` so a slow Dokploy never holds a page; the live refresh fills it in afterwards.
+  const deployStatus = async (waitMs: number): Promise<DeployStatus> => {
+    if (!dokployEnabled(dokploy)) return null;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<DeployResult>((resolve) => {
+      timer = setTimeout(() => resolve(cachedDeployments() ?? { ok: false, error: 'pending' }), waitMs);
+      timer.unref();
+    });
+    const result = await Promise.race([fetchDeployments(dokploy), late]);
+    clearTimeout(timer);
+    return result;
+  };
+
+  // One loader for the Overview page and its live refresh. `embedsPage: null` skips the embed
+  // table (the live endpoint doesn't render it).
+  const loadOverview = (session: Session, opts: { week: string | undefined; embedsPage: string | undefined | null; deploy: DeployStatus }): OverviewData => {
     const guild = client.guilds.cache.get(config.guildId);
     const settings = db.getSettings(config.guildId);
     const nowMs = Date.now();
     const week = lastWeekBounds(settings.timezone);
     const curWeek = currentWeekBounds(settings.timezone);
     const curEnd = Math.min(curWeek.end, nowMs);
-    const weekSel: DashboardData['week']['selected'] = c.req.query('week') === 'last' ? 'last' : 'current';
-    const channels = listChannels();
-    const freeSettings = db.getFreeSettings(config.guildId);
-    const freeFlash: DashboardData['free']['flash'] = c.req.query('freeSaved') === '1' ? { kind: 'saved' } : null;
+    const weekSel: OverviewData['week']['selected'] = opts.week === 'last' ? 'last' : 'current';
     const total = db.countMessages(config.guildId);
     const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
     const curWeekRows = db.topUsers(config.guildId, 10, curWeek.start, curEnd);
     const allRows = db.topUsers(config.guildId, 10);
     const embedTotal = db.countEmbeds(config.guildId);
     const embedPages = Math.max(1, Math.ceil(embedTotal / EMBEDS_PAGE_SIZE));
-    const embedPage = parsePage(c.req.query('embedsPage'), embedPages);
-    const recentEmbeds = db.recentEmbeds(config.guildId, EMBEDS_PAGE_SIZE, (embedPage - 1) * EMBEDS_PAGE_SIZE);
+    const embedPage = parsePage(opts.embedsPage ?? undefined, embedPages);
+    const recentEmbeds = opts.embedsPage === null ? [] : db.recentEmbeds(config.guildId, EMBEDS_PAGE_SIZE, (embedPage - 1) * EMBEDS_PAGE_SIZE);
 
     // Cache-only lookups: guild member -> global user -> raw id (handled in the view).
-    const members: Record<string, { name: string; avatar: string | null }> = {};
+    const members: OverviewData['members'] = {};
     for (const userId of [session.userId, ...weekRows.map((r) => r.userId), ...curWeekRows.map((r) => r.userId), ...allRows.map((r) => r.userId)]) {
       if (members[userId]) continue;
       const m = guild?.members.cache.get(userId);
@@ -285,11 +336,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       if (name) channelNames[channelId] = name;
     }
 
-    const builderFlash: DashboardData['builder']['flash'] =
-      c.req.query('builderSaved') === '1' ? { kind: 'saved' } : c.req.query('builderError') ? { kind: 'error', reason: (c.req.query('builderError') ?? '').slice(0, 200) } : null;
-    const agent = config.opencodePassword ? await probeAgent(config.opencodeUrl, config.opencodePassword, 3000) : null;
-
-    const you: DashboardData['you'] = {
+    const you: OverviewData['you'] = {
       allRank: db.userRank(config.guildId, session.userId),
       currentWeekRank: db.userRank(config.guildId, session.userId, curWeek.start, curEnd),
       lastWeekRank: db.userRank(config.guildId, session.userId, week.start, week.end),
@@ -311,78 +358,56 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       if (name) channelNames[channelId] = name;
     }
 
-    return c.html(
-      dashboardPage({
-        you,
-        settings,
-        channels,
-        botStatus: {
-          ping: client.ws.ping,
-          uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
-          guilds: client.guilds.cache.size,
-          totalMessages: total,
-          dbBytes: db.sizeBytes,
-          lastWeeklySent: db.getState(`weekly:${config.guildId}`),
-          embedsConverted: embedTotal,
-          errors24h: db.countLogErrorsSince(Date.now() - 24 * 3600 * 1000),
-        },
-        today: db.countMessages(config.guildId, startOfDay(settings.timezone)),
-        week: {
-          selected: weekSel,
-          current: { bounds: curWeek, total: db.countMessages(config.guildId, curWeek.start, curEnd), rows: curWeekRows },
-          last: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
-        },
-        allTime: { total, rows: allRows },
-        reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
-        recentEmbeds,
-        embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: EMBEDS_PAGE_SIZE },
-        members,
-        channelNames,
-        xpByUser: db.getUserXpTotals(config.guildId),
-        user: { id: session.userId, username: session.username, avatar: session.avatar },
-        saved: c.req.query('saved') === '1',
-        weeklyFlash:
-          c.req.query('weekly') === 'sent'
-            ? { kind: 'sent' }
-            : c.req.query('weekly') === 'error'
-              ? { kind: 'error', reason: (c.req.query('reason') ?? '').slice(0, 200) }
-              : null,
-        free: {
-          settings: freeSettings,
-          roles: listRoles(),
-          webhookEnabled: !!config.freestuffPublicKey,
-          postedCount: db.countFreePosted(config.guildId),
-          flash: freeFlash,
-        },
-        builder: { settings: db.getBuilderSettings(), passwordSet: !!config.opencodePassword, agent, flash: builderFlash },
-      }),
-    );
-  });
+    return {
+      you,
+      timezone: settings.timezone,
+      deploy: opts.deploy,
+      botStatus: {
+        ping: client.ws.ping,
+        uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
+        guilds: client.guilds.cache.size,
+        totalMessages: total,
+        dbBytes: db.sizeBytes,
+        lastWeeklySent: db.getState(`weekly:${config.guildId}`),
+        embedsConverted: embedTotal,
+        errors24h: db.countLogErrorsSince(Date.now() - 24 * 3600 * 1000),
+      },
+      today: db.countMessages(config.guildId, startOfDay(settings.timezone)),
+      week: {
+        selected: weekSel,
+        current: { bounds: curWeek, total: db.countMessages(config.guildId, curWeek.start, curEnd), rows: curWeekRows },
+        last: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
+      },
+      allTime: { total, rows: allRows },
+      reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
+      recentEmbeds,
+      embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: EMBEDS_PAGE_SIZE },
+      members,
+      channelNames,
+      xpByUser: db.getUserXpTotals(config.guildId),
+      user: { id: session.userId, username: session.username, avatar: session.avatar },
+    };
+  };
 
-  app.get('/dashboard/logs', requireAdmin, (c) => {
-    const session = c.get('session');
-    const settings = db.getSettings(config.guildId);
-    const levelQ = c.req.query('level');
-    const level = levelQ === 'warn' || levelQ === 'error' ? levelQ : 'all';
-    const tag = c.req.query('tag')?.trim().slice(0, 64) || null;
-    return c.html(
-      logsPage({
-        rows: db.recentLogs({ limit: 300, level, tag }),
-        tags: db.logTags(),
-        level,
-        tag,
-        timezone: settings.timezone,
-        user: { username: session.username, avatar: session.avatar },
-      }),
-    );
-  });
+  const loadLogs = (session: Session, q: { level: string | undefined; tag: string | undefined }, deploy: DeployStatus): LogsPageData => {
+    const level = q.level === 'warn' || q.level === 'error' ? q.level : 'all';
+    const tag = q.tag?.trim().slice(0, 64) || null;
+    return {
+      rows: db.recentLogs({ limit: 300, level, tag }),
+      tags: db.logTags(),
+      level,
+      tag,
+      timezone: db.getSettings(config.guildId).timezone,
+      user: { username: session.username, avatar: session.avatar },
+      deploy,
+    };
+  };
 
-  app.get('/dashboard/requests', requireAdmin, (c) => {
-    const session = c.get('session');
+  const loadRequests = (session: Session, pageQ: string | undefined, deploy: DeployStatus): RequestsPageData => {
     const guild = client.guilds.cache.get(config.guildId);
     const totals = db.buildUsageTotals(config.guildId);
     const pages = Math.max(1, Math.ceil(totals.jobs / REQUESTS_PAGE_SIZE));
-    const page = parsePage(c.req.query('page'), pages);
+    const page = parsePage(pageQ, pages);
     const jobs = db.recentBuildJobs(config.guildId, REQUESTS_PAGE_SIZE, (page - 1) * REQUESTS_PAGE_SIZE);
     const members: Record<string, string> = {};
     const chats = db.recentChatThreads(config.guildId, REQUESTS_PAGE_SIZE);
@@ -391,9 +416,70 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       const name = guild?.members.cache.get(id)?.displayName ?? client.users.cache.get(id)?.displayName;
       if (name) members[id] = name;
     }
+    return { queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals: db.chatUsageTotals(config.guildId), chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar }, deploy };
+  };
+
+  app.get('/dashboard', requireAdmin, async (c) => {
+    const deploy = await deployStatus(DEPLOY_PAGE_WAIT_MS);
+    return c.html(dashboardPage(loadOverview(c.get('session'), { week: c.req.query('week'), embedsPage: c.req.query('embedsPage'), deploy })));
+  });
+
+  // Live refresh: the regions of a page as HTML, rendered by the same view functions as the
+  // full page. `view` picks the page; the other query params are that page's own.
+  app.get('/dashboard/live', requireAdminJson, async (c) => {
+    const session = c.get('session');
+    const deploy = await deployStatus(DEPLOY_LIVE_WAIT_MS);
+    c.header('cache-control', 'no-store');
+    switch (c.req.query('view')) {
+      case 'overview':
+        return c.json({ parts: overviewParts(loadOverview(session, { week: c.req.query('week'), embedsPage: null, deploy })) });
+      case 'logs':
+        return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag') }, deploy)) });
+      case 'requests':
+        return c.json({ parts: requestsParts(loadRequests(session, c.req.query('page'), deploy)) });
+      case 'settings':
+        return c.json({ parts: chromeParts(deploy) }); // forms are never refreshed
+      default:
+        return c.json({ error: 'unknown view' }, 400);
+    }
+  });
+
+  app.get('/dashboard/settings', requireAdmin, async (c) => {
+    const session = c.get('session');
+    const builderFlash: SettingsPageData['builder']['flash'] =
+      c.req.query('builderSaved') === '1' ? { kind: 'saved' } : c.req.query('builderError') ? { kind: 'error', reason: (c.req.query('builderError') ?? '').slice(0, 200) } : null;
+    const [agent, deploy] = await Promise.all([config.opencodePassword ? probeAgent(config.opencodeUrl, config.opencodePassword, 3000) : null, deployStatus(DEPLOY_PAGE_WAIT_MS)]);
     return c.html(
-      requestsPage({ queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals: db.chatUsageTotals(config.guildId), chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar } }),
+      settingsPage({
+        settings: db.getSettings(config.guildId),
+        channels: listChannels(),
+        user: { username: session.username, avatar: session.avatar },
+        deploy,
+        saved: c.req.query('saved') === '1',
+        weeklyFlash:
+          c.req.query('weekly') === 'sent'
+            ? { kind: 'sent' }
+            : c.req.query('weekly') === 'error'
+              ? { kind: 'error', reason: (c.req.query('reason') ?? '').slice(0, 200) }
+              : null,
+        free: {
+          settings: db.getFreeSettings(config.guildId),
+          roles: listRoles(),
+          webhookEnabled: !!config.freestuffPublicKey,
+          postedCount: db.countFreePosted(config.guildId),
+          flash: c.req.query('freeSaved') === '1' ? { kind: 'saved' } : null,
+        },
+        builder: { settings: db.getBuilderSettings(), passwordSet: !!config.opencodePassword, agent, flash: builderFlash },
+      }),
     );
+  });
+
+  app.get('/dashboard/logs', requireAdmin, async (c) => {
+    return c.html(logsPage(loadLogs(c.get('session'), { level: c.req.query('level'), tag: c.req.query('tag') }, await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+  });
+
+  app.get('/dashboard/requests', requireAdmin, async (c) => {
+    return c.html(requestsPage(loadRequests(c.get('session'), c.req.query('page'), await deployStatus(DEPLOY_PAGE_WAIT_MS))));
   });
 
   app.post('/builder-settings', requireAdmin, async (c) => {
@@ -401,7 +487,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const { settings, modelError } = parseBuilderForm(form, db.getBuilderSettings());
     db.setBuilderSettings(settings);
     console.log(`[web] AI assistant settings updated by ${c.get('session').username} (chat=${settings.chatEnabled} chatModel=${settings.chatModel} decisionModel=${settings.chatDecisionModel} chatLangs=${settings.chatLanguages.join(',') || 'any'} builds=${settings.enabled} model=${settings.model} limit=${settings.limitThreshold}%)`);
-    return c.redirect(modelError ? `/dashboard?builderError=${encodeURIComponent(`${modelError} — model not changed`)}#builder` : '/dashboard?builderSaved=1#builder');
+    return c.redirect(modelError ? `/dashboard/settings?builderError=${encodeURIComponent(`${modelError} — model not changed`)}#builder` : '/dashboard/settings?builderSaved=1#builder');
   });
 
   app.post('/free-settings', requireAdmin, async (c) => {
@@ -409,7 +495,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const next = parseFreeForm(form, config.guildId, new Set(listChannels().map((ch) => ch.id)), new Set(listRoles().map((r) => r.id)));
     db.saveFreeSettings(next);
     console.log(`[web] free games settings updated by ${c.get('session').username}`);
-    return c.redirect('/dashboard?freeSaved=1#free');
+    return c.redirect('/dashboard/settings?freeSaved=1#free');
   });
 
   app.post('/settings', requireAdmin, async (c) => {
@@ -444,7 +530,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     };
     db.saveSettings(next);
     console.log(`[web] settings updated by ${c.get('session').username}`);
-    return c.redirect('/dashboard?saved=1');
+    return c.redirect('/dashboard/settings?saved=1');
   });
 
   // Manual test send. Deliberately does not touch the `weekly:<guild>` state key,
@@ -454,15 +540,15 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const guild = client.guilds.cache.get(config.guildId);
     if (!guild) {
       console.error(`[web] weekly stats send-now failed: guild ${config.guildId} not in cache`);
-      return c.redirect(`/dashboard?weekly=error&reason=${encodeURIComponent('guild not available')}`);
+      return c.redirect(`/dashboard/settings?weekly=error&reason=${encodeURIComponent('guild not available')}`);
     }
     const result = await postWeeklyStats(guild, db, db.getSettings(config.guildId));
     if (!result.ok) {
       console.error(`[web] weekly stats send-now failed: ${result.reason} (guild ${config.guildId})`);
-      return c.redirect(`/dashboard?weekly=error&reason=${encodeURIComponent(result.reason.slice(0, 200))}`);
+      return c.redirect(`/dashboard/settings?weekly=error&reason=${encodeURIComponent(result.reason.slice(0, 200))}`);
     }
     console.log(`[web] weekly stats sent manually by ${c.get('session').username} to channel ${result.channelId} (guild ${config.guildId})`);
-    return c.redirect('/dashboard?weekly=sent');
+    return c.redirect('/dashboard/settings?weekly=sent');
   });
 
   app.get('/api/stats.json', requireAdmin, (c) => {

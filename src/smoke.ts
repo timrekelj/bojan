@@ -16,7 +16,9 @@ import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { leaderboard, medalFor, weekTabs, youSection } from './web/views.js';
+import { builderSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
+import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
+import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { announceInGuild, markGamesPosted, titleDedupeKey, isGamePosted } from './freegames/actions.js';
 import { createReplayGuard, freeStuffTimestampValid, normalizeFreeStuffProduct, verifyFreeStuffSignature } from './freegames/freestuff.js';
@@ -651,6 +653,69 @@ rmSync(dir, { recursive: true, force: true });
   const rOff = await off.request('/webhooks/freestuff', { method: 'POST', body, headers: { 'webhook-id': 'p1', 'webhook-timestamp': tsNow, 'webhook-signature': mk('p1', tsNow, body), 'x-compatibility-date': '2026-11-15' } });
   check('route: no public key configured -> 404', rOff.status === 404, `status=${rOff.status}`);
 
+  // dashboard routes: favicon, auth gates, the four pages, live refresh and settings redirects
+  {
+    const { config: cfg } = await import('./config.js');
+    const dClient = { guilds: { cache: new Map() }, users: { cache: new Map() }, ws: { ping: 7 } } as never;
+    wdb.saveWebSession({ sid: 'sv1', userId: 'uview', username: 'Viewer <i>', avatar: '', accessToken: 't', createdAt: now, expiresAt: now + D });
+    const dash = createWebApp(dClient, wdb, { freestuffPublicKey: null });
+    const cookie = `sid=sv1.${createHmac('sha256', cfg.sessionSecret).update('sv1').digest('hex')}`;
+    const get = (path: string, auth = true) => dash.request(path, auth ? { headers: { cookie } } : {});
+    const postForm = (path: string, body: string) => dash.request(path, { method: 'POST', body, headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' } });
+
+    const fav = await get('/favicon.svg', false);
+    check('route: /favicon.svg is public, svg, cached', fav.status === 200 && (fav.headers.get('content-type') ?? '').startsWith('image/svg+xml') && /max-age=\d{6,}/.test(fav.headers.get('cache-control') ?? '') && (await fav.text()) === faviconSvg());
+    const cloudsRes = await get('/assets/clouds.png', false);
+    const cloudsBytes = Buffer.from(await cloudsRes.arrayBuffer());
+    check(
+      'route: /assets/clouds.png is public, png, immutable, and matches the versioned url',
+      cloudsRes.status === 200 && cloudsRes.headers.get('content-type') === 'image/png' && (cloudsRes.headers.get('cache-control') ?? '').includes('max-age=31536000') && (cloudsRes.headers.get('cache-control') ?? '').includes('immutable') &&
+        cloudsBytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a' && cloudsBytes.readUInt32BE(16) === 2000 && cloudsBytes[24] === 1 && cloudsBytes[25] === 3 && cloudsBytes.length < 150_000 &&
+        createHash('sha256').update(cloudsBytes).digest('hex').startsWith(CLOUDS_VERSION) && CLOUDS_URL === `/assets/clouds.png?v=${CLOUDS_VERSION}` && (await get(CLOUDS_URL, false)).status === 200,
+      `status=${cloudsRes.status} bytes=${cloudsBytes.length}`,
+    );
+    const ico = await get('/favicon.ico', false);
+    check('route: /favicon.ico redirects to the svg', ico.status === 301 && ico.headers.get('location') === '/favicon.svg');
+    const liveAnon = await get('/dashboard/live?view=overview', false);
+    check('route: unauthenticated /dashboard/live -> 401 json, not a redirect', liveAnon.status === 401 && (liveAnon.headers.get('content-type') ?? '').includes('application/json') && liveAnon.headers.get('location') === null);
+    const setAnon = await get('/dashboard/settings', false);
+    check('route: unauthenticated /dashboard/settings -> login', setAnon.status === 302 && setAnon.headers.get('location') === '/login');
+
+    const ovRes = await get('/dashboard');
+    const ov = await ovRes.text();
+    check('route: overview renders shell + live regions, no settings forms', ovRes.status === 200 && ov.includes('data-live="overview"') && ['live-health', 'live-kpis', 'live-you', 'live-week', 'live-all', 'live-react'].every((id) => ov.includes(`id="${id}"`)) && !ov.includes('<form') && ov.includes('Viewer &lt;i&gt;') && !ov.includes('Viewer <i>'));
+    const liveRes = await get('/dashboard/live?view=overview&week=last');
+    const liveJson = (await liveRes.json()) as { parts: Record<string, string> };
+    check(
+      'route: /dashboard/live returns the overview regions as html',
+      liveRes.status === 200 && ['live-health', 'live-kpis', 'live-you', 'live-week', 'live-all', 'live-react'].every((id) => typeof liveJson.parts[id] === 'string') && liveJson.parts['live-week']!.includes('<span class="tab" aria-current="page">Last week</span>') && ov.includes(liveJson.parts['live-kpis']!) && !('live-deploy' in liveJson.parts),
+    );
+    const liveLogs = (await (await get('/dashboard/live?view=logs&level=error')).json()) as { parts: Record<string, string> };
+    const liveReqs = (await (await get('/dashboard/live?view=requests')).json()) as { parts: Record<string, string> };
+    const liveSet = (await (await get('/dashboard/live?view=settings')).json()) as { parts: Record<string, string> };
+    check('route: live logs / requests / settings parts', typeof liveLogs.parts['live-logs'] === 'string' && typeof liveReqs.parts['live-reqs'] === 'string' && typeof liveReqs.parts['live-chat-kpis'] === 'string' && Object.keys(liveSet.parts).length === 0 && (await get('/dashboard/live?view=nope')).status === 400);
+
+    const setRes = await get('/dashboard/settings?saved=1');
+    const setHtml = await setRes.text();
+    check('route: settings page renders the three forms + saved flash', setRes.status === 200 && setHtml.includes('action="/settings"') && setHtml.includes('action="/free-settings"') && setHtml.includes('action="/builder-settings"') && setHtml.includes('Settings saved.') && setHtml.includes('<a href="/dashboard/settings" aria-current="page">'));
+    const logsRes = await get('/dashboard/logs');
+    const reqRes = await get('/dashboard/requests');
+    check('route: logs + requests pages render', logsRes.status === 200 && (await logsRes.text()).includes('id="live-logs"') && reqRes.status === 200 && (await reqRes.text()).includes('id="live-reqs"'));
+
+    const p1 = await postForm('/settings', 'weeklyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana&embedChannels=c1&embedChannels=c2&levelingEnabled=1&levelupChannel=');
+    const saved = wdb.getSettings(cfg.guildId);
+    check('route: POST /settings saves and redirects to the settings page', p1.status === 302 && p1.headers.get('location') === '/dashboard/settings?saved=1' && saved.weeklyDay === 3 && saved.weeklyHour === 18 && saved.statsChannelId === 'c1' && saved.embedChannels.join() === 'c1,c2' && saved.levelingEnabled && saved.levelupChannelId === null);
+    const p2 = await postForm('/free-settings', 'channel=&pingRole=&stores=steam&includeBeta=1');
+    check('route: POST /free-settings redirects to #free', p2.status === 302 && p2.headers.get('location') === '/dashboard/settings?freeSaved=1#free' && wdb.getFreeSettings(cfg.guildId).includeBeta === true && wdb.getFreeSettings(cfg.guildId).stores.join() === 'steam');
+    const p3 = await postForm('/builder-settings', 'chatEnabled=1&chatModel=opencode-go%2Fa&chatDecisionModel=opencode-go%2Fb&chatLanguages=English&model=opencode-go%2Fc&maxParallelBuilds=2&limitThreshold=90');
+    check('route: POST /builder-settings redirects to #builder', p3.status === 302 && p3.headers.get('location') === '/dashboard/settings?builderSaved=1#builder' && wdb.getBuilderSettings().limitThreshold === 90 && wdb.getBuilderSettings().maxParallelBuilds === 2);
+    const p4 = await postForm('/builder-settings', 'model=not-a-model-ref');
+    check('route: POST /builder-settings error flag keeps the anchor', p4.status === 302 && /^\/dashboard\/settings\?builderError=.+#builder$/.test(p4.headers.get('location') ?? ''), p4.headers.get('location') ?? '');
+    const p5 = await postForm('/weekly/send-now', '');
+    check('route: POST /weekly/send-now redirects to the settings page', p5.status === 302 && (p5.headers.get('location') ?? '').startsWith('/dashboard/settings?weekly=error&reason='), p5.headers.get('location') ?? '');
+    wdb.deleteWebSessionsForUser('uview');
+  }
+
   // dashboard sessions persist in the DB so redeploys don't force a re-login
   const mkSess = (sid: string, userId: string, username: string, expiresAt: number): WebSessionRow => ({ sid, userId, username, avatar: `a-${sid}.png`, accessToken: `tok-${sid}`, createdAt: now, expiresAt });
   wdb.saveWebSession(mkSess('s1', 'u1', 'Ann', now + D));
@@ -779,6 +844,196 @@ rmSync(dir, { recursive: true, force: true });
     { total: 100, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check('youSection: no level row without xp', !youNoXp.includes('levelrow') && !youNoXp.includes('progressbar'));
+
+  // ---- dashboard shell, settings page, favicon, deployment pill ----
+  const T = 1_800_000_000_000;
+  const emptyYouData = { allRank: null, currentWeekRank: null, lastWeekRank: null, xp: null, stats: { userId: 'u2', messages: 0, firstTs: null, lastTs: null }, reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null };
+  const ovData: OverviewData = {
+    timezone: 'UTC',
+    botStatus: { ping: 42, uptimeSec: 3700, guilds: 1, totalMessages: 16, dbBytes: 1024 * 1024, lastWeeklySent: null, embedsConverted: 3, errors24h: 2 },
+    deploy: { ok: true, state: 'running', title: 'Ship <it>', startedAt: T - 60_000, finishedAt: null },
+    today: 4,
+    week: { selected: 'current', current: { bounds: currentWeekBounds('UTC'), total: 16, rows }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [] } },
+    allTime: { total: 16, rows },
+    reactions: { total: 0, top: [] },
+    recentEmbeds: [{ id: 1, guildId: G, channelId: 'c1', messageId: 'm', url: 'https://x.test/a?b="c"', provider: 'twitter', ts: T }],
+    embedPage: { page: 2, pages: 3, total: 21, pageSize: 10 },
+    members: mem,
+    channelNames: { c1: 'general' },
+    xpByUser: {},
+    user: { id: 'u2', username: 'Two', avatar: null },
+    you: emptyYouData,
+  };
+  const ovHtml = dashboardPage(ovData, T);
+  const ovParts = overviewParts(ovData, T);
+  check(
+    'dashboardPage: shell with skip link, one h1, nav with the active page, favicon + theme-color',
+    ovHtml.includes('<a class="skip" href="#main">') &&
+      (ovHtml.match(/<h1/g) ?? []).length === 1 &&
+      ovHtml.includes('<nav class="nav" aria-label="Main">') &&
+      ovHtml.includes('<a href="/dashboard" aria-current="page">') &&
+      ovHtml.includes('<a href="/dashboard/settings">') &&
+      ovHtml.includes('<a href="/dashboard/requests">') &&
+      ovHtml.includes('<a href="/dashboard/logs">') &&
+      ovHtml.includes('<link rel="icon" type="image/svg+xml" href="/favicon.svg">') &&
+      (ovHtml.match(/<meta name="theme-color"/g) ?? []).length === 2 &&
+      ovHtml.includes('viewport-fit=cover') &&
+      ovHtml.includes('<main class="main" id="main" data-live="overview">') &&
+      ovHtml.includes(LIVE_SCRIPT) &&
+      ovHtml.includes('<div class="sky" aria-hidden="true"></div>') &&
+      ovHtml.includes(`url("${CLOUDS_URL}")`) &&
+      ovHtml.includes('image-rendering: pixelated') &&
+      ovHtml.includes('<div class="pagehead"><div class="pagehead-top"><h1>Overview</h1><span class="livestat" id="livestat"'),
+  );
+  check(
+    'dashboardPage: every live region holds exactly what overviewParts renders',
+    Object.keys(ovParts).sort().join() === 'live-all,live-deploy,live-health,live-kpis,live-react,live-week,live-you' && Object.entries(ovParts).every(([id, html]) => new RegExp(`id="${id}"[^>]*>`).test(ovHtml) && ovHtml.includes(`>${html}</div>`)),
+  );
+  check(
+    'dashboardPage: no settings forms; embed table with data-labels, escaped url and pager links',
+    !ovHtml.includes('<form') &&
+      !ovHtml.includes('name="weeklyEnabled"') &&
+      ovHtml.includes('<td class="url" data-label="URL"><a href="https://x.test/a?b=&quot;c&quot;"') &&
+      ovHtml.includes('href="/dashboard?embedsPage=1#h-embeds"') &&
+      ovHtml.includes('href="/dashboard?embedsPage=3#h-embeds"') &&
+      ovHtml.includes('#general'),
+  );
+  const health = healthPills(ovData.botStatus, ovData.deploy, T);
+  check(
+    'healthPills: online, deployment, errors link, uptime, db size, weekly',
+    health.includes('Online · 42 ms') && health.includes('Deploying') && health.includes('<a class="pill err" href="/dashboard/logs?level=error">') && health.includes('2 errors in 24h') && health.includes('Up 1h 1m') && health.includes('Database 1.00 MB') && health.includes('last sent never') &&
+      healthPills({ ...ovData.botStatus, ping: -1, errors24h: 0 }, null, T).includes('Connecting…') && !healthPills({ ...ovData.botStatus, errors24h: 0 }, null, T).includes('pill err'),
+  );
+  check('fmtAgo: just now / minutes / hours / days', fmtAgo(T - 5_000, T) === 'just now' && fmtAgo(T - 5 * 60_000, T) === '5 min ago' && fmtAgo(T - 3 * 3_600_000, T) === '3 h ago' && fmtAgo(T - 49 * 3_600_000, T) === '2 d ago' && fmtAgo(T + 5_000, T) === 'just now');
+  const pillRun = deployPill({ ok: true, state: 'running', title: 'Ship <it>', startedAt: T - 60_000, finishedAt: null }, T);
+  const pillDone = deployPill({ ok: true, state: 'done', title: 'v2', startedAt: T - 600_000, finishedAt: T - 300_000 }, T);
+  const pillErr = deployPill({ ok: true, state: 'error', title: null, startedAt: null, finishedAt: null }, T);
+  const pillDown = deployPill({ ok: false, error: 'HTTP 500' }, T);
+  check('deployPill: running is amber + pulsing, title escaped, full text in the title attr', pillRun.includes('class="pill warn"') && pillRun.includes('dot pulse') && pillRun.includes('title="Deploying · Ship &lt;it&gt;"') && pillRun.includes('<span class="trunc">Ship &lt;it&gt;</span>') && !pillRun.includes('<it>'));
+  check('deployPill: done is green with a relative time', pillDone.includes('class="pill ok"') && pillDone.includes('Deployed 5 min ago') && pillDone.includes('>v2</span>') && !pillDone.includes('pulse'));
+  check('deployPill: error is red, unreachable is muted, unconfigured is hidden', pillErr.includes('class="pill err"') && pillErr.includes('Deploy failed') && pillDown.includes('class="pill off"') && pillDown.includes('Deploy status unavailable') && !pillDown.includes('HTTP 500') && deployPill(null, T) === '' && deployPill(undefined, T) === '');
+  check('deployPill: unknown state reads as unavailable; compact drops the title', deployPill({ ok: true, state: 'unknown', title: 'x', startedAt: null, finishedAt: null }, T).includes('Deploy status unavailable') && !deployPill({ ok: true, state: 'running', title: 'Ship', startedAt: null, finishedAt: null }, T, true).includes('class="trunc"'));
+  check('chromeParts: deploy chip only when configured', Object.keys(chromeParts(null, T)).length === 0 && chromeParts({ ok: false, error: 'x' }, T)['live-deploy']!.includes('Deploy status unavailable') && !dashboardPage({ ...ovData, deploy: null }, T).includes('id="live-deploy"'));
+
+  const setData: SettingsPageData = {
+    settings: { guildId: G, statsChannelId: 'c2', weeklyEnabled: true, weeklyDay: 3, weeklyHour: 18, timezone: 'Europe/Ljubljana', embedChannels: ['c1'], levelingEnabled: false, levelupChannelId: null },
+    channels: [{ id: 'c1', name: 'general' }, { id: 'c2', name: 'bots <b>' }],
+    user: { username: 'Two', avatar: null },
+    deploy: null,
+    saved: true,
+    weeklyFlash: null,
+    free: { settings: { guildId: G, channelId: 'c1', pingRoleId: 'r1', stores: ['steam'], includeDlc: false, includeBeta: true, includeMobile: false }, roles: [{ id: 'r1', name: 'Gamers' }], webhookEnabled: false, postedCount: 3, flash: null },
+    builder: {
+      settings: { enabled: true, model: 'opencode-go/m"1', chatEnabled: false, chatModel: 'opencode-go/c', chatDecisionModel: 'opencode-go/d', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 2, limitThreshold: 90 },
+      passwordSet: true,
+      agent: { reachable: true, version: '2.4.1', error: null, limits: { rolling: { percent: 12.4, limited: false, resetsAt: T }, weekly: { percent: 80, limited: false, resetsAt: T }, monthly: { percent: 97, limited: true, resetsAt: T } } },
+      flash: null,
+    },
+  };
+  const setHtmlV = settingsPage(setData, T);
+  const formOf = (action: string): string => setHtmlV.slice(setHtmlV.indexOf(`action="${action}"`), setHtmlV.indexOf('</form>', setHtmlV.indexOf(`action="${action}"`)));
+  const general = formOf('/settings');
+  const freeForm = formOf('/free-settings');
+  const aiForm = formOf('/builder-settings');
+  check(
+    'settingsPage: general form keeps every field name and value',
+    general.includes('name="weeklyEnabled" value="1" checked') &&
+      general.includes('<select id="statsChannel" name="statsChannel"') &&
+      general.includes('<option value="c2" selected>#bots &lt;b&gt;</option>') &&
+      general.includes('name="weeklyDay"') && general.includes('<option value="3" selected>Wednesday</option>') &&
+      general.includes('name="weeklyHour"') && general.includes('<option value="18" selected>18:00</option>') &&
+      general.includes('name="timezone" value="Europe/Ljubljana"') &&
+      general.includes('<input type="checkbox" name="embedChannels" value="c1" checked><span>#general</span>') &&
+      general.includes('<input type="checkbox" name="embedChannels" value="c2"><span>#bots &lt;b&gt;</span>') &&
+      general.includes('name="levelingEnabled" value="1">') &&
+      general.includes('<select id="levelupChannel" name="levelupChannel"') && general.includes('<option value="">— silent —</option>') &&
+      (general.match(/type="submit"/g) ?? []).length === 2 &&
+      general.includes('form="send-now-form"') && general.includes('confirm(') &&
+      setHtmlV.includes('<form id="send-now-form" method="post" action="/weekly/send-now"></form>') &&
+      !general.includes('name="stores"') && !general.includes('name="chatModel"'),
+  );
+  check(
+    'settingsPage: weekly, embeds and leveling are separate cards inside the one general form',
+    ['id="weekly"', 'id="embeds"', 'id="leveling"'].every((id) => general.includes(`<section class="card" ${id}`)) && (general.match(/<section class="card"/g) ?? []).length === 3,
+  );
+  check(
+    'settingsPage: free games form keeps its field names',
+    freeForm.includes('<select id="freeChannel" name="channel"') && freeForm.includes('<option value="c1" selected>#general</option>') &&
+      freeForm.includes('<select id="freeRole" name="pingRole"') && freeForm.includes('<option value="r1" selected>@Gamers</option>') &&
+      ALL_STORES.every((st) => freeForm.includes(`name="stores" value="${st}"`)) && freeForm.includes('name="stores" value="steam" checked') && !freeForm.includes('name="stores" value="epic" checked') &&
+      freeForm.includes('name="includeDlc" value="1">') && freeForm.includes('name="includeBeta" value="1" checked>') && freeForm.includes('name="includeMobile" value="1">') &&
+      (freeForm.match(/type="submit"/g) ?? []).length === 1 && setHtmlV.includes('FreeStuff webhook disabled (set FREESTUFF_PUBLIC_KEY)') && setHtmlV.includes('3 recorded as announced'),
+  );
+  check(
+    'settingsPage: AI assistant form keeps its field names, escapes values, shows limit meters',
+    aiForm.includes('name="chatEnabled" value="1">') && aiForm.includes('name="enabled" value="1" checked>') &&
+      aiForm.includes('name="chatModel" value="opencode-go/c"') && aiForm.includes('name="chatDecisionModel" value="opencode-go/d"') &&
+      aiForm.includes('name="chatLanguages" value="Slovenian, English"') && aiForm.includes('name="model" value="opencode-go/m&quot;1"') &&
+      aiForm.includes('<input type="number" id="maxParallelBuilds" name="maxParallelBuilds" min="1" max="5" step="1"') && aiForm.includes('value="2"') &&
+      aiForm.includes('<input type="number" id="limitThreshold" name="limitThreshold" min="50" max="100" step="1"') && aiForm.includes('value="90"') &&
+      (aiForm.match(/class="meter"/g) ?? []).length === 3 && aiForm.includes('97% (limited)') && aiForm.includes('style="width:12%"') && aiForm.includes('left:90%') &&
+      setHtmlV.includes('Agent server reachable (v2.4.1)') && setHtmlV.includes('OPENCODE_PASSWORD set'),
+  );
+  check(
+    'settingsPage: section nav, labels tied to inputs, flash, no live polling without Dokploy',
+    setHtmlV.includes('<nav class="secnav" aria-label="Settings sections">') &&
+      ['weekly', 'embeds', 'leveling', 'free', 'builder'].every((id) => setHtmlV.includes(`<a href="#${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
+      ['statsChannel', 'timezone', 'levelupChannel', 'freeChannel', 'freeRole', 'chatModel', 'chatDecisionModel', 'chatLanguages', 'builderModel', 'maxParallelBuilds', 'limitThreshold'].every((id) => setHtmlV.includes(`<label for="${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
+      setHtmlV.includes('<div class="flash" role="status">Settings saved.</div>') && setHtmlV.includes("searchParams.delete('saved')") &&
+      setHtmlV.includes('<a href="/dashboard/settings" aria-current="page">') && (setHtmlV.match(/<h1/g) ?? []).length === 1 &&
+      !setHtmlV.includes('data-live=') && !setHtmlV.includes(LIVE_SCRIPT) && !setHtmlV.includes('id="livestat"'),
+  );
+  const setDeploy = settingsPage({ ...setData, saved: false, deploy: { ok: true, state: 'done', title: 'v2', startedAt: T - 120_000, finishedAt: T - 60_000 }, builder: { ...setData.builder, flash: { kind: 'error', reason: 'bad <model>' } } }, T);
+  check('settingsPage: with Dokploy only the deployment chip is live; builder error flash is escaped', setDeploy.includes('data-live="settings"') && setDeploy.includes('id="live-deploy"') && !setDeploy.includes('id="livestat"') && setDeploy.includes('Deployed 1 min ago') && setDeploy.includes('<div class="flash" role="alert">bad &lt;model&gt;</div>') && !setDeploy.includes('Settings saved.'));
+  const bsec = builderSection({ builder: { ...setData.builder, passwordSet: false, agent: null }, settings: setData.settings });
+  check('builderSection: standalone card with its own form; no meters without limits', bsec.startsWith('<section class="card" id="builder"') && bsec.includes('action="/builder-settings"') && bsec.includes('OPENCODE_PASSWORD not set') && bsec.includes('Agent server not checked') && !bsec.includes('class="meter"'));
+
+  const logsHtml = logsPage({ rows: [{ id: 1, ts: T, level: 'error', tag: 'web', message: 'boom <x>\n  at y' }, { id: 2, ts: T, level: 'info', tag: null, message: 'ok' }], tags: ['web', 'bot'], level: 'error', tag: 'web', timezone: 'UTC', user: { username: 'Two', avatar: null } }, T);
+  check(
+    'logsPage: segmented level control, tag select, stacked-table labels, escaped message',
+    logsHtml.includes('<nav class="seg" aria-label="Level">') && logsHtml.includes('<a aria-current="page" href="/dashboard/logs?level=error&amp;tag=web">Errors</a>') && logsHtml.includes('<a href="/dashboard/logs?tag=web">All</a>') &&
+      logsHtml.includes('<input type="hidden" name="level" value="error">') && logsHtml.includes('<option value="web" selected>[web]</option>') &&
+      logsHtml.includes('<td class="logmsg" data-label="Message"><pre>boom &lt;x&gt;\n  at y</pre></td>') && logsHtml.includes('<span class="badge error">error</span>') && logsHtml.includes('<span class="badge ">info</span>') &&
+      logsHtml.includes('data-live="logs"') && logsHtml.includes('newest 2 entries') && logsHtml.includes('<a href="/dashboard/logs" aria-current="page">'),
+  );
+  check('logsParts: empty state', logsParts({ rows: [], tags: [], level: 'all', tag: null, timezone: 'UTC', user: { username: 'x', avatar: null } }, T)['live-logs']!.includes('No log entries match.'));
+
+  const fav = faviconSvg();
+  check(
+    'faviconSvg: standalone svg, cloud glyph on a royal-blue tile, no script or external refs; same mark in the shell',
+    fav.startsWith('<svg xmlns="http://www.w3.org/2000/svg"') && fav.endsWith('</svg>') && fav.includes('viewBox="0 0 32 32"') && fav.includes('<rect width="32" height="32" rx="8" fill="#2b5ce6"/>') && (fav.match(/<circle /g) ?? []).length >= 3 && !fav.includes('crispEdges') && !/<script|href=|https?:\/\/(?!www\.w3\.org)/.test(fav) && fav === faviconSvg() && ovHtml.includes('<svg class="mark" width="28" height="28" viewBox="0 0 32 32"'),
+  );
+  const loginHtml = loginPage('https://discord.com/oauth2/authorize?a=1&b="2"');
+  check('loginPage / errorPage: auth card on the cloud background, escaped, no chrome or polling', loginHtml.includes('class="sky"') && loginHtml.includes(CLOUDS_URL) && loginHtml.includes('viewBox="0 0 32 32"') && loginHtml.includes('href="https://discord.com/oauth2/authorize?a=1&amp;b=&quot;2&quot;"') && !loginHtml.includes('class="chrome"') && !loginHtml.includes(LIVE_SCRIPT) && errorPage('no <b>').includes('no &lt;b&gt;') && errorPage('x').includes('href="/login"'));
+  check('LIVE_SCRIPT: polls the live endpoint, handles 401 and failures, safe to inline', LIVE_SCRIPT.includes("'/dashboard/live?'") && LIVE_SCRIPT.includes('15000') && LIVE_SCRIPT.includes('r.status===401') && LIVE_SCRIPT.includes('Reconnecting') && LIVE_SCRIPT.includes('Session expired') && LIVE_SCRIPT.includes('visibilitychange') && !LIVE_SCRIPT.includes('</script'));
+
+  // ---- Dokploy deployment summary ----
+  const dep = (o: Record<string, unknown>): Record<string, unknown> => ({ deploymentId: 'd', title: 'Deploy', status: 'done', createdAt: '2026-11-20T10:00:00.000Z', startedAt: '2026-11-20T10:00:01.000Z', finishedAt: '2026-11-20T10:02:00.000Z', ...o });
+  const sRun = summarizeDeployments([dep({ title: 'new one', status: 'running', createdAt: '2026-11-24T08:00:00.000Z', startedAt: '2026-11-24T08:00:02.000Z', finishedAt: null }), dep({})]);
+  check('summarizeDeployments: running', sRun.state === 'running' && sRun.title === 'new one' && sRun.startedAt === Date.parse('2026-11-24T08:00:02.000Z') && sRun.finishedAt === null);
+  const sDone = summarizeDeployments([dep({ title: '  Manual deployment ' })]);
+  check('summarizeDeployments: done, title trimmed, ISO dates -> ms', sDone.state === 'done' && sDone.title === 'Manual deployment' && sDone.startedAt === Date.parse('2026-11-20T10:00:01.000Z') && sDone.finishedAt === Date.parse('2026-11-20T10:02:00.000Z'));
+  const sErr = summarizeDeployments([dep({ status: 'error', title: '', description: 'Commit: abc', startedAt: null, finishedAt: null })]);
+  check('summarizeDeployments: error; falls back to description and createdAt', sErr.state === 'error' && sErr.title === 'Commit: abc' && sErr.startedAt === Date.parse('2026-11-20T10:00:00.000Z') && sErr.finishedAt === null);
+  const unknownSummary = JSON.stringify({ state: 'unknown', title: null, startedAt: null, finishedAt: null });
+  check('summarizeDeployments: empty list', JSON.stringify(summarizeDeployments([])) === unknownSummary);
+  check(
+    'summarizeDeployments: garbage input never throws',
+    [null, undefined, 42, 'nope', {}, { data: 'x' }, [null, 3, 'a', []], { message: 'Unauthorized' }].every((x) => JSON.stringify(summarizeDeployments(x)) === unknownSummary) &&
+      summarizeDeployments([{ status: 7, title: 9, createdAt: 'not a date', startedAt: {}, finishedAt: [] }]).state === 'unknown' &&
+      summarizeDeployments([{ status: 'DONE', title: null }]).state === 'done' && summarizeDeployments([{ status: 'DONE', title: null }]).title === null,
+  );
+  const older = dep({ title: 'older', status: 'error', createdAt: '2026-11-01T00:00:00.000Z' });
+  const newer = dep({ title: 'newer', status: 'done', createdAt: '2026-11-22T00:00:00.000Z' });
+  check('summarizeDeployments: newest createdAt wins regardless of order', summarizeDeployments([older, newer]).title === 'newer' && summarizeDeployments([newer, older]).title === 'newer' && summarizeDeployments([older, newer]).state === 'done');
+  check('summarizeDeployments: undated rows keep the API order (newest first)', summarizeDeployments([{ status: 'running', title: 'first' }, { status: 'done', title: 'second' }]).title === 'first');
+  const cancelled = dep({ title: 'cancelled one', status: 'cancelled', createdAt: '2026-11-23T00:00:00.000Z' });
+  check('summarizeDeployments: a cancelled newest deployment is skipped; all cancelled -> unknown', summarizeDeployments([cancelled, newer, older]).title === 'newer' && JSON.stringify(summarizeDeployments([cancelled])) === unknownSummary);
+  check('summarizeDeployments: queued counts as in progress, idle is unknown', summarizeDeployments([dep({ status: 'queued' })]).state === 'running' && summarizeDeployments([dep({ status: 'idle' })]).state === 'unknown');
+  check('summarizeDeployments: wrapper objects', summarizeDeployments({ deployments: [newer] }).title === 'newer' && summarizeDeployments({ result: { data: { json: [older] } } }).state === 'error' && summarizeDeployments({ data: [newer, older] }).state === 'done');
+  const dkOff = { url: 'https://d.test', apiKey: null, composeId: 'c' };
+  const dkRes = await fetchDeployments(dkOff);
+  check('dokploy: all three settings are required; unconfigured fetch fails without a request', !dokployEnabled(dkOff) && !dokployEnabled({ url: null, apiKey: 'k', composeId: 'c' }) && dokployEnabled({ url: 'https://d.test', apiKey: 'k', composeId: 'c' }) && !dkRes.ok && dkRes.error === 'not configured');
 }
 
 // ---- self-building (builder) ---------------------------------------------
