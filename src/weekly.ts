@@ -13,6 +13,7 @@ import {
 import { renderDailyChart } from './chart.js';
 import type { ChannelRow, ReactionCountRow, UserRow } from './db.js';
 import { daySeries, fmt, leaderboardLines, weekRangeLabel, type WeekBounds } from './stats.js';
+import { NO_MENTIONS } from './discord.js';
 
 export const WEEKLY_CHART_NAME = 'weekly-chart.png';
 export const BLURPLE = 0x5865f2;
@@ -92,6 +93,6 @@ export function buildWeeklyStatsMessage(data: WeeklyStatsData) {
     flags: MessageFlags.IsComponentsV2 as const,
     components: [container],
     files: [new AttachmentBuilder(chart, { name: WEEKLY_CHART_NAME })],
-    allowedMentions: { parse: [] as never[] },
+    allowedMentions: NO_MENTIONS,
   };
 }

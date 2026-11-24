@@ -2,6 +2,7 @@ import { ContainerBuilder, MessageFlags, TextDisplayBuilder } from 'discord.js';
 import type { BotDatabase } from './db.js';
 import { fmt } from './stats.js';
 import { BLURPLE } from './weekly.js';
+import { NO_MENTIONS } from './discord.js';
 
 /** XP awarded per eligible message: a random 5–10. */
 export const XP_MIN = 5;
@@ -12,7 +13,6 @@ export const XP_COOLDOWN_MS = 30_000;
 /** XP granted per already-recorded message by the one-time `/backfill xp`. */
 export const XP_BACKFILL_PER_MESSAGE = 10;
 
-const NO_MENTIONS = { parse: [] as never[] };
 
 /** Random XP per message, 5–10 inclusive. `rand` is injectable for tests. */
 export function rollXp(rand: () => number = Math.random): number {

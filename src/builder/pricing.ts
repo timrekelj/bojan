@@ -13,13 +13,17 @@ export interface ModelPrice {
   cacheWrite: number | null;
 }
 
-export interface TokenCounts {
+/** Token counts and cost of one session (the one usage shape shared by db, cards and the agent wrapper). */
+export interface TokenUsage {
   input: number;
   output: number;
   reasoning: number;
   cacheRead: number;
   cacheWrite: number;
+  costUsd: number;
 }
+
+export type TokenCounts = Omit<TokenUsage, 'costUsd'>;
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null);
 const obj = (v: unknown): Record<string, unknown> | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
@@ -74,4 +78,14 @@ export async function getGoPrices(now = Date.now()): Promise<Map<string, ModelPr
     cache = { at: now - REFRESH_MS + 60_000, prices: cache?.prices ?? new Map() };
   }
   return cache.prices;
+}
+
+/** Session usage from the agent; OpenCode reports no cost for Go models, so a list-price estimate fills it in. */
+export async function sessionUsageWithEstimate(agent: { usage(sessionId: string): Promise<TokenUsage> }, sessionId: string, modelRef: string | null | undefined): Promise<TokenUsage> {
+  const usage = await agent.usage(sessionId);
+  if (usage.costUsd === 0) {
+    const price = goPriceFor(modelRef, await getGoPrices());
+    if (price) usage.costUsd = estimateCostUsd(usage, price);
+  }
+  return usage;
 }

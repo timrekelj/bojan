@@ -25,18 +25,18 @@ import {
   withNotes,
   type ChatMessageInfo,
 } from './chat-parse.js';
-import { OpenCodeAgent, REPO_DIR } from './opencode.js';
+import { REPO_DIR } from './opencode.js';
 import { isAdminLike, parseModelRef } from './parse.js';
-import { estimateCostUsd, getGoPrices, goPriceFor } from './pricing.js';
+import { sessionUsageWithEstimate } from './pricing.js';
 import { queuePosition } from './queue.js';
 import { addReaction, removeOwnReaction, thinkingEmoji } from './reactions.js';
-import type { BuilderRunner } from './runner.js';
+import type { AgentApi, BuilderRunner } from './runner.js';
+import { NO_MENTIONS, withReply } from '../discord.js';
 
 const DEBOUNCE_MS = 3_000;
 const CHAT_TIMEOUT_MS = 5 * 60_000;
 const TYPING_MS = 8_000;
 const DECISION_TIMEOUT_MS = 15_000;
-const NO_MENTIONS = { parse: [] as never[], repliedUser: false };
 
 export function isAdminMessage(message: Message): boolean {
   const member = message.member;
@@ -91,7 +91,6 @@ export function messageInfo(message: Message, botId: string, botName: string): C
 }
 
 export class ChatRunner {
-  private agent: OpenCodeAgent | null = null;
   private readonly states = new Map<string, ThreadState>();
   private stopped = false;
 
@@ -115,10 +114,8 @@ export class ChatRunner {
     }
   }
 
-  private getAgent(): OpenCodeAgent {
-    if (!config.opencodePassword) throw new Error('OPENCODE_PASSWORD is not set');
-    this.agent ??= new OpenCodeAgent(config.opencodeUrl, config.opencodePassword);
-    return this.agent;
+  private getAgent(): AgentApi {
+    return this.builder.getAgent();
   }
 
   private botName(): string {
@@ -144,7 +141,7 @@ export class ChatRunner {
   private refreshing: Promise<void> | null = null;
 
   /** Fast-forward the checkout the chat agent reads; concurrent new chats share one refresh. */
-  private refresh(agent: OpenCodeAgent): Promise<void> {
+  private refresh(agent: AgentApi): Promise<void> {
     this.refreshing ??= agent.refreshMain().finally(() => {
       this.refreshing = null;
     });
@@ -199,11 +196,7 @@ export class ChatRunner {
       }
       let first = true;
       for (const chunk of chunkMessage(text)) {
-        if (first && replyTo) {
-          await channel.send({ content: chunk, reply: { messageReference: replyTo, failIfNotExists: false }, allowedMentions: NO_MENTIONS });
-        } else {
-          await channel.send({ content: chunk, allowedMentions: { parse: [] } });
-        }
+        await channel.send(withReply({ content: chunk }, first ? replyTo : null));
         first = false;
       }
     } catch (err) {
@@ -342,12 +335,7 @@ export class ChatRunner {
 
   private async saveUsage(chatKey: string, sessionId: string, modelRef: string | null): Promise<void> {
     try {
-      const usage = await this.getAgent().usage(sessionId);
-      if (usage.costUsd === 0) {
-        const price = goPriceFor(modelRef, await getGoPrices());
-        if (price) usage.costUsd = estimateCostUsd(usage, price);
-      }
-      this.db.setChatThreadUsage(chatKey, usage);
+      this.db.setChatThreadUsage(chatKey, await sessionUsageWithEstimate(this.getAgent(), sessionId, modelRef));
     } catch (err) {
       console.warn(`[chat] guild=${config.guildId} thread=${chatKey} could not read usage:`, err instanceof Error ? err.message : err);
     }

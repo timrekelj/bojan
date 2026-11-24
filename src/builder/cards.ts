@@ -1,10 +1,10 @@
 import { ContainerBuilder, MessageFlags, TextDisplayBuilder } from 'discord.js';
 import { BLURPLE } from '../weekly.js';
 import { formatUsage, type UsageLike } from './parse.js';
+import { NO_MENTIONS } from '../discord.js';
 
 // Components V2 allows 4000 chars of text across all TextDisplays; keep headroom.
 const TEXT_BUDGET = 3800;
-const NO_MENTIONS = { parse: [] as never[] };
 
 const GREEN = 0x57f287;
 const YELLOW = 0xfee75c;
@@ -68,10 +68,6 @@ export function buildPlanCard(d: PlanCardData): BuilderMessage {
 /** Plain agent text card (e.g. a reply that had no valid result block). */
 export function buildNoteCard(text: string): BuilderMessage {
   return build(BLURPLE, [clip(text, TEXT_BUDGET)], 0);
-}
-
-export function buildWorkingCard(text: string): BuilderMessage {
-  return build(GREY, [text]);
 }
 
 export function buildBuildingCard(title: string): BuilderMessage {

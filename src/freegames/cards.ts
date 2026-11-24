@@ -10,8 +10,8 @@ import {
 } from 'discord.js';
 import { BLURPLE } from '../weekly.js';
 import { STORE_LABELS, type FreeGame } from './types.js';
+import { NO_MENTIONS } from '../discord.js';
 
-const NO_MENTIONS = { parse: [] as never[] };
 
 export function truncate(text: string, max: number): string {
   const t = text.replace(/\s+/g, ' ').trim();

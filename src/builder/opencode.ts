@@ -1,6 +1,7 @@
 // Thin wrapper around @opencode/client for the self-building feature.
 // Deliberately free of config/db imports so it can be exercised standalone.
 import { OpenCode } from '@opencode/client';
+import type { TokenUsage } from './pricing.js';
 import { branchName, worktreeDirFor, type ModelRef } from './parse.js';
 
 export const REPO_DIR = '/workspace/bojan';
@@ -15,14 +16,7 @@ export interface AgentReply {
   error: string | null;
 }
 
-export interface SessionUsage {
-  input: number;
-  output: number;
-  reasoning: number;
-  cacheRead: number;
-  cacheWrite: number;
-  costUsd: number;
-}
+export type SessionUsage = TokenUsage;
 
 /** Structural subset of an OpenCode session message, enough to extract a reply. */
 export interface MessageLike {
@@ -108,10 +102,6 @@ export class OpenCodeAgent {
     });
   }
 
-  async ping(): Promise<void> {
-    await this.client.server.info();
-  }
-
   /** Right after server boot a location can briefly list no agents: retry until it does. */
   async warm(directory: string, attempts = 15): Promise<void> {
     let last: unknown;
@@ -186,10 +176,6 @@ export class OpenCodeAgent {
 
   async switchAgent(sessionID: string, agent: string): Promise<void> {
     await this.client.session.switchAgent({ sessionID, agent });
-  }
-
-  async switchModel(sessionID: string, model: ModelRef): Promise<void> {
-    await this.client.session.switchModel({ sessionID, model: { providerID: model.providerID, id: model.id } });
   }
 
   async sessionExists(sessionID: string): Promise<boolean> {

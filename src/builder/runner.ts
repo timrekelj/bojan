@@ -18,7 +18,8 @@ import {
   type BuilderMessage,
 } from './cards.js';
 import { ChatRunner } from './chat.js';
-import { estimateCostUsd, getGoPrices, goPriceFor } from './pricing.js';
+import { sessionUsageWithEstimate, type TokenUsage } from './pricing.js';
+import { NO_MENTIONS, withReply } from '../discord.js';
 import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
 import { formatBuildNote, type BuildNoteInfo } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prInfoFromJson, type PrInfo, type PrRef } from './parse.js';
@@ -54,7 +55,7 @@ function excerpt(text: string): string {
 }
 
 /** The part of OpenCodeAgent the runner uses (lets tests plug in a fake). */
-export type AgentApi = Pick<OpenCodeAgent, 'warm' | 'createWorktree' | 'createSession' | 'switchAgent' | 'sessionExists' | 'waitIdle' | 'latestReply' | 'lastIsAssistant' | 'usage' | 'promptAndWait'>;
+export type AgentApi = Pick<OpenCodeAgent, 'warm' | 'createWorktree' | 'createSession' | 'switchAgent' | 'sessionExists' | 'waitIdle' | 'latestReply' | 'lastIsAssistant' | 'usage' | 'promptAndWait' | 'decide' | 'refreshMain'>;
 
 export interface RunnerDeps {
   agent?: AgentApi;
@@ -107,7 +108,8 @@ export class BuilderRunner {
     this.starting.delete(threadId);
   }
 
-  private getAgent(): AgentApi {
+  /** The one OpenCode client, shared with the chat assistant. */
+  getAgent(): AgentApi {
     if (this.agent) return this.agent;
     if (!config.opencodePassword) throw new Error('OPENCODE_PASSWORD is not set');
     this.agent = new OpenCodeAgent(config.opencodeUrl, config.opencodePassword);
@@ -199,10 +201,7 @@ export class BuilderRunner {
         return null;
       }
       // The thread's starter message (id === thread id) can't be replied to from inside the thread.
-      const options = replyTo && replyTo !== job.threadId
-        ? { ...message, reply: { messageReference: replyTo, failIfNotExists: false }, allowedMentions: { parse: [] as never[], repliedUser: false } }
-        : message;
-      return await (channel as SendableChannels).send(options);
+      return await (channel as SendableChannels).send(replyTo && replyTo !== job.threadId ? withReply(message, replyTo) : message);
     } catch (err) {
       console.error(`[builder] guild=${job.guildId} job=${job.id} could not post to thread:`, err);
       return null;
@@ -262,7 +261,7 @@ export class BuilderRunner {
     await this.post(job, buildFailedCard({ reason, usage: this.usageOf(job) }), job.planMessageId);
   }
 
-  private usageOf(job: BuildJob): { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number; costUsd: number } | null {
+  private usageOf(job: BuildJob): TokenUsage | null {
     const total = job.tokensInput + job.tokensOutput + job.tokensReasoning + job.tokensCacheRead + job.tokensCacheWrite;
     if (total === 0 && job.costUsd === 0) return null;
     return {
@@ -278,13 +277,7 @@ export class BuilderRunner {
   private async saveUsage(job: BuildJob): Promise<void> {
     if (!job.sessionId) return;
     try {
-      const usage = await this.getAgent().usage(job.sessionId);
-      if (usage.costUsd === 0) {
-        // OpenCode reports no cost for Go models: store a list-price estimate instead.
-        const price = goPriceFor(this.db.getBuildJob(job.id)?.model, await getGoPrices());
-        if (price) usage.costUsd = estimateCostUsd(usage, price);
-      }
-      this.db.setBuildJobUsage(job.id, usage);
+      this.db.setBuildJobUsage(job.id, await sessionUsageWithEstimate(this.getAgent(), job.sessionId, this.db.getBuildJob(job.id)?.model));
     } catch (err) {
       console.warn(`[builder] guild=${job.guildId} job=${job.id} could not read usage:`, err instanceof Error ? err.message : err);
     }

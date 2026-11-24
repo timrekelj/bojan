@@ -1,3 +1,4 @@
+import type { TokenUsage } from './pricing.js';
 // Pure helpers for the self-building feature: agent reply parsing, naming and formatting.
 
 export interface ParsedReply {
@@ -86,14 +87,6 @@ export function parsePrUrl(url: string): PrRef | null {
   return { owner: m[1]!, repo: m[2]!, number: Number(m[3]) };
 }
 
-/** Discord thread names are limited to 100 characters. */
-export function threadNameFor(request: string): string {
-  const flat = request.replace(/\s+/g, ' ').trim();
-  const base = flat.length > 0 ? flat : 'feature request';
-  const name = `Feature: ${base}`;
-  return name.length <= 100 ? name : `${name.slice(0, 99).trimEnd()}…`;
-}
-
 export interface ModelRef {
   providerID: string;
   id: string;
@@ -123,14 +116,7 @@ export function formatCost(usd: number): string {
   return `$${usd.toFixed(4)}`;
 }
 
-export interface UsageLike {
-  input: number;
-  output: number;
-  reasoning: number;
-  cacheRead: number;
-  cacheWrite: number;
-  costUsd: number;
-}
+export type UsageLike = TokenUsage;
 
 export function formatUsage(u: UsageLike): string {
   const cache = u.cacheRead + u.cacheWrite;

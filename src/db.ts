@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import type { TokenUsage } from './builder/pricing.js';
 import { statSync } from 'node:fs';
 import { XP_BACKFILL_PER_MESSAGE } from './levels.js';
 import { localParts, zonedToUtcMs } from './stats.js';
@@ -366,14 +367,7 @@ export interface BuildJob {
   conflictNotified: boolean;
 }
 
-export interface BuildUsage {
-  input: number;
-  output: number;
-  reasoning: number;
-  cacheRead: number;
-  cacheWrite: number;
-  costUsd: number;
-}
+export type BuildUsage = TokenUsage;
 
 export interface BuilderSettings {
   /** Admins may request features (build jobs). */
@@ -545,16 +539,6 @@ export class BotDatabase {
         { cause: err },
       );
     }
-    // Migration for databases created before message_id existed.
-    const cols = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
-    if (!cols.some((c) => c.name === 'message_id')) {
-      this.db.exec('ALTER TABLE messages ADD COLUMN message_id TEXT');
-    }
-    // Migration for free_settings created before include_beta existed.
-    const freeCols = this.db.prepare('PRAGMA table_info(free_settings)').all() as { name: string }[];
-    if (!freeCols.some((c) => c.name === 'include_beta')) {
-      this.db.exec('ALTER TABLE free_settings ADD COLUMN include_beta INTEGER NOT NULL DEFAULT 0');
-    }
     // Migration for settings created before leveling existed. The `user_xp`
     // table is new, so the CREATE TABLE IF NOT EXISTS above already covers it.
     const settingsCols = this.db.prepare('PRAGMA table_info(settings)').all() as { name: string }[];
@@ -613,16 +597,9 @@ export class BotDatabase {
       }
       console.log('[db] build_jobs: thread_id is no longer unique');
     }
-    // Console support was removed: drop the now-unused column (after the include_beta migration above).
-    if (freeCols.some((c) => c.name === 'include_console')) {
-      this.db.exec('ALTER TABLE free_settings DROP COLUMN include_console');
-    }
     // Dedup key: the same Discord message must never be counted twice
     // (live tracking + backfill can overlap).
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_guild_msg ON messages (guild_id, message_id)');
-    // Custom statuses were first recorded under the literal name "Custom
-    // Status" — use the status text itself as the name (matches new rows).
-    this.db.exec(`UPDATE activity_sessions SET name = state WHERE type = 4 AND name = 'Custom Status' AND state IS NOT NULL AND state <> ''`);
     // Split sessions used to restart at the original game start and overlap.
     const repaired = this.repairActivityOverlaps();
     if (repaired > 0) console.log(`[db] repaired ${repaired} overlapping activity session(s)`);
@@ -1366,10 +1343,6 @@ export class BotDatabase {
     return rows.map(buildJobFromRow);
   }
 
-  countBuildJobs(guildId: string): number {
-    return (this.db.prepare('SELECT COUNT(*) AS n FROM build_jobs WHERE guild_id = ?').get(guildId) as { n: number }).n;
-  }
-
   buildUsageTotals(guildId: string): BuildUsage & { jobs: number } {
     const r = this.db
       .prepare(`SELECT COUNT(*) AS jobs, COALESCE(SUM(tokens_input), 0) AS i, COALESCE(SUM(tokens_output), 0) AS o,
@@ -1422,10 +1395,6 @@ export class BotDatabase {
   consumeChatNotes(threadId: string, count: number): void {
     const notes = this.pendingChatNotes(threadId).slice(count);
     this.db.prepare('UPDATE chat_threads SET pending_notes = ? WHERE thread_id = ?').run(JSON.stringify(notes), threadId);
-  }
-
-  touchChatThread(threadId: string, now = Date.now()): void {
-    this.db.prepare('UPDATE chat_threads SET last_active_at = ? WHERE thread_id = ?').run(now, threadId);
   }
 
   /** Most recently active first. */

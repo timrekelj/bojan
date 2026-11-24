@@ -13,6 +13,7 @@ import type { ActivityBreakdownRow, ActivitySessionRow, ActivitySummaryRow, DayC
 import { fmt, fmtDate, fmtDuration, leaderboardLines, daySeries } from './stats.js';
 import { levelTag } from './levels.js';
 import { BLURPLE, divider } from './weekly.js';
+import { NO_MENTIONS } from './discord.js';
 
 export const ACTIVITY_CHART_NAME = 'activity-chart.png';
 
@@ -55,7 +56,6 @@ function addSection(container: ContainerBuilder, s: Section): void {
   container.addSeparatorComponents(divider()).addTextDisplayComponents(new TextDisplayBuilder().setContent(sectionText(s)));
 }
 
-const NO_MENTIONS = { parse: [] as never[] };
 
 export interface LeaderboardData {
   limit?: number;

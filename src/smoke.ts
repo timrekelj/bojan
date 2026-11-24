@@ -22,7 +22,7 @@ import { announceInGuild, markGamesPosted, titleDedupeKey, isGamePosted } from '
 import { createReplayGuard, freeStuffTimestampValid, normalizeFreeStuffProduct, verifyFreeStuffSignature } from './freegames/freestuff.js';
 import {
   branchName, formatCost, formatTokens, formatUsage, isAdminLike, normalizeBuildResult, normalizePlanResult, parseAgentReply,
-  parseModelRef, parsePrUrl, prInfoFromJson, prStateFromJson, stripBotMention, threadNameFor, worktreeDirFor,
+  parseModelRef, parsePrUrl, prInfoFromJson, prStateFromJson, stripBotMention, worktreeDirFor,
 } from './builder/parse.js';
 import {
   buildBuildingCard, buildCancelledCard, buildClosedCard, buildConflictFixCard, buildConflictFixedCard, buildConflictManualCard, buildQueuedCard, buildResumingCard, buildFailedCard, buildMergedCard, buildNoteCard, buildPlanCard, buildPrOpenedCard,
@@ -473,7 +473,7 @@ rmSync(dir, { recursive: true, force: true });
   check('announcement card: V2 flag, role ping, attribution, link button',
     card.flags === MessageFlags.IsComponentsV2 && cardJson.includes('<@&123>') && cardJson.includes('via FreeStuff') && cardJson.includes('Open on Steam') && JSON.stringify(card.allowedMentions) === '{"roles":["123"]}');
   const plain = buildFreeGameMessage(fixtures[0]!);
-  check('announcement card: no ping → no mentions', JSON.stringify(plain.allowedMentions) === '{"parse":[]}');
+  check('announcement card: no ping → no mentions', 'parse' in plain.allowedMentions && plain.allowedMentions.parse.length === 0);
 
   const fdir = mkdtempSync(join(tmpdir(), 'bojan-free-'));
   const fdb = new BotDatabase(join(fdir, 'free.db'));
@@ -504,24 +504,6 @@ rmSync(dir, { recursive: true, force: true });
   check('beta: includeBeta admits them (platform rules still apply)', betaKeys({ ...defaults, includeBeta: true }).split(',').length === 6 && betaKeys({ ...defaults, includeBeta: true, stores: ['epic'] }) === '');
   check('beta: label on card', JSON.stringify(buildFreeGameMessage(bk.get('b:101')!).components.map((c) => c.toJSON())).includes('Beta / playtest'));
 
-  // migration: free_settings created before include_beta existed
-  const mdir = mkdtempSync(join(tmpdir(), 'bojan-freemig-'));
-  const mpath = join(mdir, 'old.db');
-  const raw = new DatabaseSync(mpath);
-  raw.exec(`CREATE TABLE free_settings (guild_id TEXT PRIMARY KEY, channel_id TEXT, ping_role_id TEXT, stores TEXT NOT NULL, include_dlc INTEGER NOT NULL DEFAULT 0, include_mobile INTEGER NOT NULL DEFAULT 0, include_console INTEGER NOT NULL DEFAULT 0)`);
-  raw.exec(`INSERT INTO free_settings (guild_id, channel_id, stores, include_dlc) VALUES ('${G}', 'chOld', '["steam"]', 1)`);
-  raw.close();
-  const mdb = new BotDatabase(mpath);
-  const ms = mdb.getFreeSettings(G);
-  check('migration: old free_settings gains include_beta (default off, data kept)', ms.channelId === 'chOld' && ms.includeDlc && !ms.includeBeta && ms.stores.join() === 'steam');
-  mdb.saveFreeSettings({ ...ms, includeBeta: true });
-  check('migration: includeBeta saves after migration', mdb.getFreeSettings(G).includeBeta);
-  mdb.close();
-  const raw2 = new DatabaseSync(mpath);
-  const migCols = (raw2.prepare('PRAGMA table_info(free_settings)').all() as { name: string }[]).map((c) => c.name);
-  raw2.close();
-  check('migration: include_console dropped, include_beta present', !migCols.includes('include_console') && migCols.includes('include_beta'), migCols.join());
-  rmSync(mdir, { recursive: true, force: true });
   rmSync(fdir, { recursive: true, force: true });
 
   // dashboard form parsing
@@ -729,8 +711,6 @@ rmSync(dir, { recursive: true, force: true });
   const pr = parsePrUrl('https://github.com/timrekelj/bojan/pull/34');
   check('parsePrUrl: valid', pr?.owner === 'timrekelj' && pr.repo === 'bojan' && pr.number === 34 && parsePrUrl('https://github.com/a/b/pull/5/files')?.number === 5);
   check('parsePrUrl: invalid', parsePrUrl('https://github.com/a/b/issues/5') === null && parsePrUrl('http://github.com/a/b/pull/5') === null && parsePrUrl('') === null);
-  const longName = threadNameFor('x'.repeat(500));
-  check('threadNameFor: <= 100 chars', longName.length <= 100 && threadNameFor('add   a\nping').includes('add a ping') && threadNameFor('   ').length > 0);
   const mr = parseModelRef('opencode-go/glm-5.3');
   check('parseModelRef', mr?.providerID === 'opencode-go' && mr.id === 'glm-5.3' && parseModelRef('a/b/c')?.id === 'b/c' && parseModelRef('nope') === null && parseModelRef('/x') === null && parseModelRef('x/') === null);
   check('stripBotMention', stripBotMention('<@123> do it', '123') === 'do it' && stripBotMention('do it <@!123>', '123') === 'do it' && stripBotMention('<@456> x', '123') === '<@456> x');
@@ -788,7 +768,7 @@ rmSync(dir, { recursive: true, force: true });
   bdb.setState('chat:languages', '["ok", 7, " "]');
   check('chat languages: only valid strings survive the state roundtrip', JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['ok']));
   bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatDecisionModel: '', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 99 });
-  check('no active job initially', bdb.activeBuildJobInThread('t1') === null && bdb.countBuildJobs(G) === 0);
+  check('no active job initially', bdb.activeBuildJobInThread('t1') === null && bdb.recentBuildJobs(G, 100).length === 0);
   check('builder settings: maxParallelBuilds default 1, roundtrip, clamped', new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-mp-')), 'm.db')).getBuilderSettings().maxParallelBuilds === 1 && bdb.getBuilderSettings().maxParallelBuilds === 5);
   const j1 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c1', requesterId: 'u1', request: 'add ping' }, 1000);
   check('createBuildJob defaults', j1.id > 0 && j1.status === 'planning' && j1.tokensInput === 0 && j1.costUsd === 0 && j1.sessionId === null && j1.createdAt === 1000);
@@ -808,7 +788,7 @@ rmSync(dir, { recursive: true, force: true });
   check('recentBuildJobs newest first + paging', bdb.recentBuildJobs(G, 10)[0]!.id === j2.id && bdb.recentBuildJobs(G, 1, 1)[0]!.id === j1.id && bdb.recentBuildJobs('other', 10).length === 0);
   // A thread may hold several jobs over time; the newest one wins.
   const j3 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c', requesterId: 'u', request: 'again' });
-  check('several build jobs per thread; getBuildJobByThread returns the newest', j3.id > j2.id && bdb.getBuildJobByThread('t1')?.id === j3.id && bdb.countBuildJobs(G) === 3);
+  check('several build jobs per thread; getBuildJobByThread returns the newest', j3.id > j2.id && bdb.getBuildJobByThread('t1')?.id === j3.id && bdb.recentBuildJobs(G, 100).length === 3);
   bdb.setBuildJobStatus(j3.id, 'cancelled');
   bdb.updateBuildJob(j1.id, { model: 'opencode-go/glm-5.3' });
   check('build job model column', bdb.getBuildJob(j1.id)!.model === 'opencode-go/glm-5.3' && bdb.getBuildJob(j2.id)!.model === null);
@@ -825,8 +805,6 @@ rmSync(dir, { recursive: true, force: true });
   // chat notes in the DB
   check('addChatNote: unknown thread -> false', !bdb.addChatNote('nope', 'x'));
   check('chat notes: queue, survive reopen order, consume only the sent ones', (() => { bdb.addChatNote('ct1', 'n1'); bdb.addChatNote('ct1', 'n2'); const sent = bdb.pendingChatNotes('ct1'); bdb.addChatNote('ct1', 'n3'); bdb.consumeChatNotes('ct1', sent.length); return sent.join(',') === 'n1,n2' && bdb.pendingChatNotes('ct1').join(',') === 'n3'; })());
-  bdb.touchChatThread('ct1', 900);
-  check('touchChatThread', bdb.getChatThread('ct1')!.lastActiveAt === 900);
   let cdup = false;
   try { bdb.createChatThread({ threadId: 'ct1', guildId: G, channelId: 'c', sessionId: 's', startedBy: 'u', model: null }); } catch { cdup = true; }
   check('chat thread id is unique', cdup);
@@ -849,7 +827,7 @@ rmSync(dir, { recursive: true, force: true });
   check('old build_jobs: UNIQUE thread_id dropped by migration, rows kept', mj2.id > mj.id && mdb.getBuildJobByThread('m1')?.id === mj2.id && mdb.getBuildJob(mj.id)!.request === 'x' && mdb.getBuildJob(mj.id)!.model === 'a/b');
   mdb.close();
   const mdb2 = new BotDatabase(join(mdir, 'm.db'));
-  check('thread_id migration is idempotent', mdb2.countBuildJobs(G) === 2);
+  check('thread_id migration is idempotent', mdb2.recentBuildJobs(G, 100).length === 2);
   mdb2.close();
 
   // Pricing
@@ -1032,7 +1010,7 @@ rmSync(dir, { recursive: true, force: true });
   raw.exec('CREATE TABLE bot_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   raw.close();
   const odb = new BotDatabase(join(odir, 'old.db'));
-  check('old database gets build_jobs on open', odb.countBuildJobs(G) === 0 && !odb.getBuilderSettings().enabled);
+  check('old database gets build_jobs on open', odb.recentBuildJobs(G, 100).length === 0 && !odb.getBuilderSettings().enabled);
   odb.close();
 }
 
