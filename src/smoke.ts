@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
-import { awardMessageXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, rollXp, totalXpForLevel, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
+import { awardMessageXp, awardReactionXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
@@ -152,6 +152,31 @@ check(
   (lvlMsg.flags & MessageFlags.IsComponentsV2) !== 0 && lvlMsg.components.length === 1 && lvlMsg.allowedMentions.parse.length === 0 && lvlJson.includes('<@u1>') && lvlJson.includes('level 3') && !('embeds' in lvlMsg),
 );
 check('level-up text fits the text budget', levelUpText(lvlData).length < 4000);
+
+// ---- reaction XP (1% chance, level + 1 XP per win) ------------------------
+check('react xp amount is level + 1', reactXpAmount(0) === 1 && reactXpAmount(3) === 4 && reactXpAmount(49) === 50);
+check('react xp chance is 1%', REACT_XP_CHANCE === 0.01);
+check(
+  'missed react roll awards nothing and writes no row',
+  awardReactionXp(db, G, 'reactor', now, () => 0.5) === null && awardReactionXp(db, G, 'reactor', now, () => 0.01) === null && db.getUserXp(G, 'reactor') === null,
+);
+const rWin = awardReactionXp(db, G, 'reactor', now + 1_000, () => 0);
+check('first winning react awards level + 1 xp', rWin !== null && rWin.xpGained === 1 && rWin.xp === 1 && rWin.newLevel === 0 && !rWin.leveledUp, JSON.stringify(rWin));
+const rWin2 = awardReactionXp(db, G, 'reactor', now + 2_000, () => 0.001);
+check('react xp has no cooldown', rWin2 !== null && rWin !== null && rWin2.xp === 2 && rWin2.xpGained === 1 && !rWin2.leveledUp, JSON.stringify(rWin2));
+db.addUserXp(G, 'reactorLucky', 99, now); // 1 xp short of level 1 (100 xp)
+const rUp = awardReactionXp(db, G, 'reactorLucky', now + 3_000, () => 0.009);
+check('react level-up detected at the crossing', rUp !== null && rUp.leveledUp && rUp.newLevel === 1 && rUp.xp === 100 && rUp.xpGained === 1, JSON.stringify(rUp));
+db.addUserXp(G, 'reactorGrind', totalXpForLevel(49), now);
+const rHigh = awardReactionXp(db, G, 'reactorGrind', now + 4_000, () => 0);
+check('level 49 member wins 50 xp per react', rHigh !== null && rHigh.xpGained === 50 && rHigh.xp === totalXpForLevel(49) + 50 && rHigh.newLevel === 49 && !rHigh.leveledUp, JSON.stringify(rHigh));
+const rWin3 = awardReactionXp(db, G, 'gamer', now + 5 * XP_COOLDOWN_MS, () => 0);
+check(
+  'react win refreshes the message xp window',
+  rWin3 !== null && rWin3.xpGained === 1 && awardMessageXp(db, G, 'gamer', now + 5 * XP_COOLDOWN_MS + 5_000) === null,
+  JSON.stringify(rWin3),
+);
+
 
 // ---- one-time XP backfill (/backfill xp) ---------------------------------
 // G has 21 recorded messages (alice 10, bob 5, carol 3, dave 1, erin 2).
