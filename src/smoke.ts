@@ -21,15 +21,16 @@ import { announceInGuild, markGamesPosted, titleDedupeKey, isGamePosted } from '
 import { createReplayGuard, freeStuffTimestampValid, normalizeFreeStuffProduct, verifyFreeStuffSignature } from './freegames/freestuff.js';
 import {
   branchName, formatCost, formatTokens, formatUsage, isAdminLike, normalizeBuildResult, normalizePlanResult, parseAgentReply,
-  parseModelRef, parsePrUrl, prStateFromJson, stripBotMention, threadNameFor, worktreeDirFor,
+  parseModelRef, parsePrUrl, prInfoFromJson, prStateFromJson, stripBotMention, threadNameFor, worktreeDirFor,
 } from './builder/parse.js';
 import {
-  buildBuildingCard, buildCancelledCard, buildClosedCard, buildFailedCard, buildMergedCard, buildNoteCard, buildPlanCard, buildPrOpenedCard,
+  buildBuildingCard, buildCancelledCard, buildClosedCard, buildConflictFixCard, buildConflictFixedCard, buildConflictManualCard, buildQueuedCard, buildResumingCard, buildFailedCard, buildMergedCard, buildNoteCard, buildPlanCard, buildPrOpenedCard,
   type BuilderMessage,
 } from './builder/cards.js';
-import { extractReply } from './builder/opencode.js';
+import { extractReply, lastConversationIsAssistant } from './builder/opencode.js';
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
+import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, pickJobsToStart, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, formatChatMessage, formatInitialPrompt, formatTranscript, languageDirective, parseChatReply, replaceBotMention, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
@@ -628,6 +629,11 @@ rmSync(dir, { recursive: true, force: true });
     ['closed', buildClosedCard({ title: 'T', prUrl: 'https://github.com/a/b/pull/1', usage })],
     ['failed', buildFailedCard({ reason: huge, usage })],
     ['cancelled', buildCancelledCard(usage)],
+    ['queued', buildQueuedCard({ title: 'T', position: 2 })],
+    ['resuming', buildResumingCard('T')],
+    ['conflict fix', buildConflictFixCard('T')],
+    ['conflict fixed', buildConflictFixedCard({ title: 'T', prUrl: 'https://github.com/a/b/pull/1' })],
+    ['conflict manual', buildConflictManualCard({ title: 'T', prUrl: 'https://github.com/a/b/pull/1', reason: huge })],
   ];
   for (const [name, card] of cards) {
     check(`builder card "${name}" stays under 4000 chars, no mentions, V2`, textLen(card) > 0 && textLen(card) < 4000 && (card.allowedMentions.parse as string[]).length === 0 && card.flags === MessageFlags.IsComponentsV2, String(textLen(card)));
@@ -641,27 +647,28 @@ rmSync(dir, { recursive: true, force: true });
   // DB: build_jobs + settings
   const bdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-builder-')), 'b.db'));
   check('builder settings defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && !bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash' && bdb.getBuilderSettings().chatLanguages.length === 0);
-  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ', chatLanguages: ['Slovenian', 'English'] });
+  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 3 });
   check('builder settings roundtrip', bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'prov/model' && bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'p/chat' && JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['Slovenian', 'English']));
-  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatLanguages: [] });
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatLanguages: [], maxParallelBuilds: 99 });
   check('builder settings: empty models fall back to defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash' && bdb.getBuilderSettings().chatLanguages.length === 0);
   bdb.setState('chat:languages', 'not json');
   check('chat languages: invalid state means no constraint', bdb.getBuilderSettings().chatLanguages.length === 0);
   bdb.setState('chat:languages', '["ok", 7, " "]');
   check('chat languages: only valid strings survive the state roundtrip', JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['ok']));
-  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatLanguages: ['Slovenian', 'English'] });
-  check('no active job initially', bdb.activeBuildJob(G) === null && bdb.countBuildJobs(G) === 0);
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 99 });
+  check('no active job initially', bdb.activeBuildJobInThread('t1') === null && bdb.countBuildJobs(G) === 0);
+  check('builder settings: maxParallelBuilds default 1, roundtrip, clamped', new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-mp-')), 'm.db')).getBuilderSettings().maxParallelBuilds === 1 && bdb.getBuilderSettings().maxParallelBuilds === 5);
   const j1 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c1', requesterId: 'u1', request: 'add ping' }, 1000);
   check('createBuildJob defaults', j1.id > 0 && j1.status === 'planning' && j1.tokensInput === 0 && j1.costUsd === 0 && j1.sessionId === null && j1.createdAt === 1000);
-  check('getBuildJobByThread / active', bdb.getBuildJobByThread('t1')?.id === j1.id && bdb.getBuildJobByThread('nope') === null && bdb.activeBuildJob(G)?.id === j1.id);
+  check('getBuildJobByThread / active', bdb.getBuildJobByThread('t1')?.id === j1.id && bdb.getBuildJobByThread('nope') === null && bdb.activeBuildJobInThread('t1')?.id === j1.id);
   bdb.updateBuildJob(j1.id, { sessionId: 'ses_1', worktreeDir: '/w/1', branch: 'bot/1', title: 'Ping' }, 2000);
   bdb.setBuildJobStatus(j1.id, 'awaiting_input', 2500);
   const j1b = bdb.getBuildJob(j1.id)!;
-  check('updateBuildJob / setBuildJobStatus', j1b.sessionId === 'ses_1' && j1b.branch === 'bot/1' && j1b.title === 'Ping' && j1b.status === 'awaiting_input' && j1b.updatedAt === 2500 && bdb.activeBuildJob(G)?.id === j1.id);
+  check('updateBuildJob / setBuildJobStatus', j1b.sessionId === 'ses_1' && j1b.branch === 'bot/1' && j1b.title === 'Ping' && j1b.status === 'awaiting_input' && j1b.updatedAt === 2500 && bdb.activeBuildJobInThread('t1')?.id === j1.id);
   bdb.setBuildJobUsage(j1.id, { input: 100, output: 20, reasoning: 5, cacheRead: 7, cacheWrite: 3, costUsd: 0.25 });
   bdb.updateBuildJob(j1.id, { prUrl: 'https://github.com/a/b/pull/9' });
   bdb.setBuildJobStatus(j1.id, 'pr_open');
-  check('pr_open frees the slot; listBuildJobsByStatus', bdb.activeBuildJob(G) === null && bdb.listBuildJobsByStatus(['pr_open']).length === 1 && bdb.getBuildJob(j1.id)!.prUrl === 'https://github.com/a/b/pull/9' && bdb.listBuildJobsByStatus([]).length === 0);
+  check('pr_open frees the slot; listBuildJobsByStatus', bdb.activeBuildJobInThread('t1') === null && bdb.listBuildJobsByStatus(['pr_open']).length === 1 && bdb.getBuildJob(j1.id)!.prUrl === 'https://github.com/a/b/pull/9' && bdb.listBuildJobsByStatus([]).length === 0);
   const j2 = bdb.createBuildJob({ guildId: G, threadId: 't2', channelId: 'c1', requesterId: 'u2', request: 'second' });
   bdb.setBuildJobUsage(j2.id, { input: 10, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.05 });
   const tot = bdb.buildUsageTotals(G);
@@ -733,8 +740,8 @@ rmSync(dir, { recursive: true, force: true });
   check('goPriceFor: only opencode-go/*', goPriceFor('opencode-go/glm-5.3', prices) === glm && goPriceFor('anthropic/glm-5.3', prices) === null && goPriceFor('opencode-go/none', prices) === null && goPriceFor(null, prices) === null);
 
   // Settings form
-  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash', chatLanguages: [] as string[] };
-  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c', chatLanguages: [] }, modelError: null }));
+  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash', chatLanguages: [] as string[], maxParallelBuilds: 1 };
+  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c', chatLanguages: [], maxParallelBuilds: 1 }, modelError: null }));
   check('parseBuilderForm: invalid model keeps current + error', (() => { const r = parseBuilderForm({ model: 'nomodel' }, { ...cur, enabled: true, model: 'x/y' }); return !r.settings.enabled && r.settings.model === 'x/y' && r.modelError !== null; })());
   check('parseBuilderForm: invalid chat model keeps current + error', (() => { const r = parseBuilderForm({ chatEnabled: '1', chatModel: 'bad model/x' }, { ...cur, chatModel: 'x/chat' }); return r.settings.chatEnabled && r.settings.chatModel === 'x/chat' && r.modelError !== null && r.modelError.startsWith('Chat model'); })());
   check('parseBuilderForm: empty -> defaults', (() => { const r = parseBuilderForm({ enabled: '1', model: '', chatModel: '' }, { ...cur, model: 'x/y', chatModel: 'x/z' }); return r.settings.model === 'opencode-go/glm-5.3' && r.settings.chatModel === 'opencode-go/glm-5.3-flash' && !r.settings.chatEnabled; })());
@@ -742,6 +749,8 @@ rmSync(dir, { recursive: true, force: true });
   check('parseChatLanguages: missing/garbage -> none; whitespace flattened; clipped at 30', parseChatLanguages(undefined).length === 0 && parseChatLanguages(7).length === 0 && parseChatLanguages('  neo   latin  ').join('|') === 'neo latin' && parseChatLanguages('x'.repeat(50))[0]!.length === 30);
   check('parseChatLanguages: capped at 8 entries', parseChatLanguages(Array.from({ length: 12 }, (_, i) => `l${i}`).join(',')).length === 8 && parseChatLanguages(Array.from({ length: 12 }, (_, i) => `l${i}`)).length === 8);
   check('parseBuilderForm: chat languages parsed from the form', parseBuilderForm({ chatLanguages: ' Slovenian, English ' }, cur).settings.chatLanguages.join(',') === 'Slovenian,English');
+
+  check('parseBuilderForm: maxParallelBuilds parsed, clamped to 1..5, invalid keeps current', parseBuilderForm({ maxParallelBuilds: '3' }, cur).settings.maxParallelBuilds === 3 && parseBuilderForm({ maxParallelBuilds: '0' }, cur).settings.maxParallelBuilds === 1 && parseBuilderForm({ maxParallelBuilds: '-4' }, cur).settings.maxParallelBuilds === 1 && parseBuilderForm({ maxParallelBuilds: '99' }, cur).settings.maxParallelBuilds === 5 && parseBuilderForm({ maxParallelBuilds: 'abc' }, { ...cur, maxParallelBuilds: 4 }).settings.maxParallelBuilds === 4 && parseBuilderForm({ maxParallelBuilds: '2.5' }, { ...cur, maxParallelBuilds: 4 }).settings.maxParallelBuilds === 4 && parseBuilderForm({}, { ...cur, maxParallelBuilds: 2 }).settings.maxParallelBuilds === 2);
 
   // Chat assistant: pure helpers
   const cr1 = parseChatReply('Node 24 is the LTS.\nSource: https://nodejs.org\n```json\n{"reply": true, "feature_request": null}\n```');
@@ -785,6 +794,75 @@ rmSync(dir, { recursive: true, force: true });
   check('languageDirective: empty list -> no rule', languageDirective([]) === '' && languageDirective(['Slovenian']).length > 0);
   check('withLanguageRule: untouched without languages, rule first otherwise', withLanguageRule('hi', []) === 'hi' && withLanguageRule('hi', ['Slovenian', 'English']).startsWith('[language rule]') && withLanguageRule('hi', ['Slovenian', 'English']).includes('Slovenian, English') && withLanguageRule('hi', ['Slovenian', 'English']).endsWith('\n\nhi'));
   check('replaceBotMention', replaceBotMention('<@123> and <@!123> hi <@456>', '123', 'bojan') === '@bojan and @bojan hi <@456>');
+
+
+  // ---- build queue, resume, conflict fix (pure) ----
+  const qj = (id: number, approvedAt: number | null, createdAt = 0) => ({ id, approvedAt, createdAt });
+  const queue = [qj(5, 300), qj(3, 100), qj(4, 100), qj(9, null, 50)];
+  check('sortQueue: approval time then id (null approvedAt falls back to createdAt)', sortQueue(queue).map((j) => j.id).join(',') === '9,3,4,5');
+  check('queuePosition: 1-based, 0 when absent', queuePosition(queue, 9) === 1 && queuePosition(queue, 5) === 4 && queuePosition(queue, 77) === 0);
+  check('freeSlots', freeSlots(0, 1) === 1 && freeSlots(1, 1) === 0 && freeSlots(3, 2) === 0 && freeSlots(1, 3) === 2);
+  check('pickJobsToStart: FIFO up to free slots', pickJobsToStart(queue, 0, 2).map((j) => j.id).join(',') === '9,3' && pickJobsToStart(queue, 1, 1).length === 0 && pickJobsToStart(queue, 1, 3).map((j) => j.id).join(',') === '9,3' && pickJobsToStart([], 0, 3).length === 0);
+
+  check('prInfoFromJson: dirty open PR is a conflict', JSON.stringify(prInfoFromJson({ state: 'open', mergeable: false, mergeable_state: 'dirty' })) === '{"state":"open","mergeability":"conflict"}');
+  check('prInfoFromJson: mergeable null / unknown is unknown', prInfoFromJson({ state: 'open', mergeable: null, mergeable_state: 'unknown' }).mergeability === 'unknown' && prInfoFromJson({ state: 'open' }).mergeability === 'unknown' && prInfoFromJson({ state: 'open', mergeable: true, mergeable_state: 'unknown' }).mergeability === 'unknown');
+  check('prInfoFromJson: clean / blocked / behind are ok', ['clean', 'blocked', 'behind', 'unstable'].every((m) => prInfoFromJson({ state: 'open', mergeable: true, mergeable_state: m }).mergeability === 'ok'));
+  check('prInfoFromJson: merged and closed ignore mergeability; prStateFromJson unchanged', prInfoFromJson({ state: 'closed', merged: true, mergeable_state: 'dirty' }).state === 'merged' && prInfoFromJson({ state: 'closed', merged: true, mergeable_state: 'dirty' }).mergeability === 'ok' && prInfoFromJson({ state: 'closed', mergeable: null }).state === 'closed' && prInfoFromJson({ state: 'closed', mergeable: null }).mergeability === 'ok' && prStateFromJson({ state: 'open', mergeable_state: 'dirty' }) === 'open');
+
+  check('lastConversationIsAssistant: skips idle/other message types', lastConversationIsAssistant([{ type: 'idle' }, { type: 'agent-switched' }, { type: 'assistant' }, { type: 'user' }]) && !lastConversationIsAssistant([{ type: 'system' }, { type: 'user' }, { type: 'assistant' }]) && !lastConversationIsAssistant([{ type: 'user' }]) && lastConversationIsAssistant([]) && lastConversationIsAssistant([{ type: 'idle' }]));
+  const okBuild = `done\n${json({ status: 'pr_opened', pr_url: 'https://github.com/a/b/pull/1', summary: 's' })}`;
+  const okPlan = `plan\n${json({ status: 'needs_input', title: 'T', plan: 'p', questions: [] })}`;
+  const rep = (text: string, finish: string | null = 'stop', error: string | null = null) => ({ text, finish, error });
+  check('decideRecovery: valid build result is handled', decideRecovery({ kind: 'build', reply: rep(okBuild), lastIsAssistant: true, resumeCount: 0 }).action === 'handle' && decideRecovery({ kind: 'build', reply: rep(okBuild), lastIsAssistant: true, resumeCount: 2 }).action === 'handle');
+  check('decideRecovery: build without json block resumes', decideRecovery({ kind: 'build', reply: rep('working on it'), lastIsAssistant: true, resumeCount: 0 }).action === 'resume' && decideRecovery({ kind: 'build', reply: rep('x\n```json\n{bad}\n```'), lastIsAssistant: true, resumeCount: 1 }).action === 'resume');
+  check('decideRecovery: error finish or unanswered prompt resumes even with a (stale) valid result', decideRecovery({ kind: 'build', reply: rep(okBuild, 'error', 'boom'), lastIsAssistant: true, resumeCount: 0 }).action === 'resume' && decideRecovery({ kind: 'build', reply: rep(okBuild), lastIsAssistant: false, resumeCount: 0 }).action === 'resume' && decideRecovery({ kind: 'build', reply: rep(okBuild, 'tool-calls'), lastIsAssistant: true, resumeCount: 0 }).action === 'resume');
+  const failDec = decideRecovery({ kind: 'build', reply: rep('nope'), lastIsAssistant: true, resumeCount: 2 });
+  check('decideRecovery: fails after 2 resume attempts with a reason', failDec.action === 'fail' && failDec.reason.includes('2 resume attempts'), JSON.stringify(failDec));
+  check('decideRecovery: plan with valid result handled; clean plain text handled; empty/interrupted resumes', decideRecovery({ kind: 'plan', reply: rep(okPlan), lastIsAssistant: true, resumeCount: 0 }).action === 'handle' && decideRecovery({ kind: 'plan', reply: rep('Which store?'), lastIsAssistant: true, resumeCount: 0 }).action === 'handle' && decideRecovery({ kind: 'plan', reply: rep(''), lastIsAssistant: true, resumeCount: 0 }).action === 'resume' && decideRecovery({ kind: 'plan', reply: rep('half', null, 'x'), lastIsAssistant: true, resumeCount: 1 }).action === 'resume' && decideRecovery({ kind: 'plan', reply: rep(''), lastIsAssistant: true, resumeCount: 2 }).action === 'fail');
+  check('resume / conflict prompts', BUILD_RESUME_PROMPT.includes('gh pr view') && BUILD_RESUME_PROMPT.includes('json block') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('git merge origin/main') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('no force push') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('https://github.com/a/b/pull/1'));
+  const ca = (o: Partial<Parameters<typeof conflictAction>[0]>) => conflictAction({ conflict: 'conflict', fixAttempts: 0, notified: false, slotFree: true, sinceUpdateMs: 10 * CONFLICT_SETTLE_MS, ...o });
+  check('conflictAction: fix when slot free, wait otherwise, unknown/ok do nothing', ca({}) === 'fix' && ca({ slotFree: false }) === 'wait' && ca({ conflict: 'unknown' }) === 'none' && ca({ conflict: 'ok' }) === 'none');
+  check('conflictAction: after the attempt notify once (after settling), never a second fix', ca({ fixAttempts: 1 }) === 'notify' && ca({ fixAttempts: 1, notified: true }) === 'none' && ca({ fixAttempts: 1, sinceUpdateMs: 1000 }) === 'none' && ca({ fixAttempts: 1, slotFree: false }) === 'notify');
+
+  const nt = (event: Parameters<typeof formatBuildNote>[0]['event'], extra: object = {}) => formatBuildNote({ jobId: 4, title: 'T', event, ...extra });
+  check('formatBuildNote: queued / resumed', nt('queued', { position: 2, plan: '- x' }) === '[build update] job #4 "T": plan approved, queued for a build slot (#2 in line). Plan:\n- x' && nt('resumed').includes('restarted') && nt('resumed').includes('resuming'));
+  check('formatBuildNote: conflict started / fixed / failed', nt('conflict_fix_started', { prUrl: 'u' }).includes('merge conflicts with main; trying to fix') && nt('conflict_fixed', { prUrl: 'u' }) === '[build update] job #4 "T": merge conflicts fixed. u' && nt('conflict_failed', { prUrl: 'u', reason: 'bad\nmerge' }).includes('needs a manual merge. u bad merge'));
+
+  // Several planning jobs run in parallel (different threads); one non-terminal job per thread.
+  const pdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-par-')), 'p.db'));
+  const pj1 = pdb.createBuildJob({ guildId: G, threadId: 'pt1', channelId: 'c', requesterId: 'u', request: 'a' });
+  const pj2 = pdb.createBuildJob({ guildId: G, threadId: 'pt2', channelId: 'c', requesterId: 'u', request: 'b' });
+  const pj3 = pdb.createBuildJob({ guildId: G, threadId: 'pt3', channelId: 'c', requesterId: 'u', request: 'c' });
+  pdb.setBuildJobStatus(pj2.id, 'awaiting_input');
+  check('concurrent planning jobs in different threads', pdb.listBuildJobsByStatus(['planning', 'awaiting_input']).length === 3 && pdb.activeBuildJobInThread('pt1')?.id === pj1.id && pdb.activeBuildJobInThread('pt2')?.id === pj2.id && pdb.activeBuildJobInThread('other') === null && pdb.countBuildingJobs() === 0);
+  pdb.updateBuildJob(pj3.id, { approvedAt: 500 });
+  pdb.setBuildJobStatus(pj3.id, 'queued');
+  pdb.updateBuildJob(pj1.id, { approvedAt: 400 });
+  pdb.setBuildJobStatus(pj1.id, 'queued');
+  check('queued jobs: approvedAt stored, still own their thread, do not use a slot', pdb.activeBuildJobInThread('pt3')?.status === 'queued' && pdb.countBuildingJobs() === 0 && sortQueue(pdb.listBuildJobsByStatus(['queued'])).map((j) => j.id).join(',') === `${pj1.id},${pj3.id}` && pdb.getBuildJob(pj3.id)!.approvedAt === 500);
+  pdb.setBuildJobStatus(pj1.id, 'building');
+  check('countBuildingJobs counts building (incl. fix runs)', pdb.countBuildingJobs() === 1);
+  check('new columns default', pj2.approvedAt === null && pj2.resumeCount === 0 && pj2.fixAttempts === 0 && !pj2.conflictNotified);
+  pdb.updateBuildJob(pj2.id, { resumeCount: 2, fixAttempts: 1, conflictNotified: true });
+  const pj2b = pdb.getBuildJob(pj2.id)!;
+  check('resume_count / fix_attempts / conflict_notified persist', pj2b.resumeCount === 2 && pj2b.fixAttempts === 1 && pj2b.conflictNotified === true);
+  pdb.updateBuildJob(pj2.id, { resumeCount: 0 });
+  check('resume_count can be reset to 0 (per-phase budget)', pdb.getBuildJob(pj2.id)!.resumeCount === 0);
+  const qhtml = requestsPage({ jobs: pdb.recentBuildJobs(G, 50), totals: pdb.buildUsageTotals(G), chatTotals: pdb.chatUsageTotals(G), chats: [], page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: 'a' }, queuePositions: { [pj3.id]: 1 } });
+  check('requests page shows queued position', qhtml.includes('queued #1'));
+
+  // Migration: an older build_jobs table (no queue/resume/fix columns) gains them.
+  const qdir = mkdtempSync(join(tmpdir(), 'bojan-queue-old-'));
+  const qraw = new DatabaseSync(join(qdir, 'q.db'));
+  qraw.exec(`CREATE TABLE build_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, thread_id TEXT NOT NULL, channel_id TEXT NOT NULL, requester_id TEXT NOT NULL, request TEXT NOT NULL, title TEXT, status TEXT NOT NULL, session_id TEXT, worktree_dir TEXT, branch TEXT, pr_url TEXT, error TEXT, model TEXT, tokens_input INTEGER NOT NULL DEFAULT 0, tokens_output INTEGER NOT NULL DEFAULT 0, tokens_reasoning INTEGER NOT NULL DEFAULT 0, tokens_cache_read INTEGER NOT NULL DEFAULT 0, tokens_cache_write INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+  qraw.exec(`INSERT INTO build_jobs (guild_id, thread_id, channel_id, requester_id, request, status, created_at, updated_at) VALUES ('g', 't', 'c', 'u', 'old', 'building', 1, 1)`);
+  qraw.close();
+  const qdb = new BotDatabase(join(qdir, 'q.db'));
+  const qold = qdb.getBuildJob(1)!;
+  check('old build_jobs gets approved_at / resume_count / fix_attempts / conflict_notified', qold.approvedAt === null && qold.resumeCount === 0 && qold.fixAttempts === 0 && qold.conflictNotified === false && qdb.countBuildingJobs() === 1);
+  qdb.updateBuildJob(1, { approvedAt: 7, resumeCount: 1 });
+  check('migrated columns are writable', qdb.getBuildJob(1)!.approvedAt === 7 && qdb.getBuildJob(1)!.resumeCount === 1);
+  qdb.close();
 
   // Migration: a database from before build_jobs gets the table on open.
   const odir = mkdtempSync(join(tmpdir(), 'bojan-builder-old-'));

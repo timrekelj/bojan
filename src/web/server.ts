@@ -12,6 +12,7 @@ import { announceEverywhere } from '../freegames/actions.js';
 import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from '../freegames/freestuff.js';
 import { parseFreeForm } from '../freegames/form.js';
 import { parseBuilderForm } from '../builder/form.js';
+import { sortQueue } from '../builder/queue.js';
 import { probeAgent } from '../builder/opencode.js';
 
 interface Session {
@@ -367,7 +368,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       if (name) members[id] = name;
     }
     return c.html(
-      requestsPage({ jobs, totals, chatTotals: db.chatUsageTotals(config.guildId), chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar } }),
+      requestsPage({ queuePositions: Object.fromEntries(sortQueue(db.listBuildJobsByStatus(['queued'])).map((j, i) => [j.id, i + 1])), jobs, totals, chatTotals: db.chatUsageTotals(config.guildId), chats, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar } }),
     );
   });
 

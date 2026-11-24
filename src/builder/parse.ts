@@ -142,10 +142,35 @@ export function formatUsage(u: UsageLike): string {
 
 export type PrState = 'open' | 'merged' | 'closed' | 'rate-limited';
 
+export interface PrJson {
+  state?: unknown;
+  merged?: unknown;
+  merged_at?: unknown;
+  mergeable?: unknown;
+  mergeable_state?: unknown;
+}
+
 /** Interpret GitHub's pull request JSON. */
-export function prStateFromJson(json: { state?: unknown; merged?: unknown; merged_at?: unknown }): PrState {
+export function prStateFromJson(json: PrJson): PrState {
   if (json.merged === true || (typeof json.merged_at === 'string' && json.merged_at.length > 0)) return 'merged';
   return json.state === 'closed' ? 'closed' : 'open';
+}
+
+/** `conflict`: merge conflict with main; `unknown`: GitHub has not computed it yet (check again); `ok`: anything else. */
+export type PrMergeability = 'conflict' | 'unknown' | 'ok';
+
+export interface PrInfo {
+  state: PrState;
+  mergeability: PrMergeability;
+}
+
+/** State plus mergeability. Only open PRs can be conflicted; GitHub computes `mergeable` lazily (null = unknown). */
+export function prInfoFromJson(json: PrJson): PrInfo {
+  const state = prStateFromJson(json);
+  if (state !== 'open') return { state, mergeability: 'ok' };
+  if (json.mergeable_state === 'dirty') return { state, mergeability: 'conflict' };
+  if (json.mergeable === null || json.mergeable === undefined || json.mergeable_state === 'unknown') return { state, mergeability: 'unknown' };
+  return { state, mergeability: 'ok' };
 }
 
 /** Admin = Administrator permission, or holding ADMIN_ROLE_ID (same rule as the dashboard). */

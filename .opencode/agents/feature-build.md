@@ -142,6 +142,10 @@ Your working directory is a git worktree already on branch `bot/<job>`, created 
 5. Open the PR: `gh pr create --base main --title "<short title>" --body "<what changed, why, how it was verified, and the original request>"`.
 6. Enable auto-merge: `gh pr merge --auto --squash`. If it fails because auto-merge is not enabled for the repo, keep the PR open and mention that in the summary.
 
+## Follow-up: merge conflicts
+
+You may later be asked, in the same session, to resolve merge conflicts on your existing PR. Stay on your existing `bot/<job>` branch: `git fetch origin && git merge origin/main`, resolve conflicts keeping both sides' intent, run `npm run build` and `npm run smoke`, commit the merge and `git push` (never rebase, never force-push). Reuse the existing PR (do not open a new one; auto-merge stays enabled) and finish with `pr_opened` and the same `pr_url`, or `failed`.
+
 ## Final reply
 
 Briefly say what you did. The reply MUST end with exactly one fenced json block and nothing after it:

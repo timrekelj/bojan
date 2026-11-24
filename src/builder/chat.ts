@@ -3,7 +3,7 @@
 // and whether the conversation is a feature request that should be handed to the build runner.
 import { PermissionFlagsBits, type Client, type Message, type SendableChannels } from 'discord.js';
 import { config } from '../config.js';
-import type { BotDatabase, ChatThread } from '../db.js';
+import { ACTIVE_BUILD_STATUSES, type BotDatabase, type ChatThread } from '../db.js';
 import {
   chatThreadNameFor,
   chunkMessage,
@@ -233,7 +233,7 @@ export class ChatRunner {
         const batch = s.buffer.splice(0);
         // While a build job owns the thread, its messages belong to the build runner.
         const job = this.db.getBuildJobByThread(threadId);
-        if (job && (job.status === 'planning' || job.status === 'awaiting_input' || job.status === 'building')) continue;
+        if (job && ACTIVE_BUILD_STATUSES.includes(job.status)) continue;
         await this.runTurn(threadId, batch);
       }
     } finally {
@@ -316,9 +316,9 @@ export class ChatRunner {
       await this.say(threadId, 'Building features is turned off right now, so I can\'t start that request.');
       return;
     }
-    const slot = this.builder.reserve();
+    const slot = this.builder.reserve(threadId);
     if (!slot.ok) {
-      await this.say(threadId, slot.active ? `I'm already working on another request. Follow it here: <#${slot.active.threadId}>` : "I'm already setting up another request. Please ask again in a minute.");
+      await this.say(threadId, slot.active ? "There's already a feature request in progress in this thread." : "I'm already setting up a request in this thread. Please ask again in a minute.");
       return;
     }
     try {
@@ -339,7 +339,7 @@ export class ChatRunner {
         context: formatTranscript(entries),
       });
     } catch (err) {
-      this.builder.release();
+      this.builder.release(threadId);
       console.error(`[chat] guild=${config.guildId} thread=${threadId} could not hand off to the builder:`, err);
       await this.say(threadId, 'Sorry, I could not start that request.');
     }

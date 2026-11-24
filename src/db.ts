@@ -270,7 +270,11 @@ CREATE TABLE IF NOT EXISTS build_jobs (
   tokens_cache_write INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  approved_at INTEGER,
+  resume_count INTEGER NOT NULL DEFAULT 0,
+  fix_attempts INTEGER NOT NULL DEFAULT 0,
+  conflict_notified INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_build_jobs_status ON build_jobs (status);
 CREATE INDEX IF NOT EXISTS idx_build_jobs_thread ON build_jobs (thread_id);
@@ -296,7 +300,7 @@ CREATE TABLE IF NOT EXISTS chat_threads (
 CREATE INDEX IF NOT EXISTS idx_chat_threads_guild ON chat_threads (guild_id, last_active_at);
 `;
 
-export type BuildJobStatus = 'planning' | 'awaiting_input' | 'building' | 'pr_open' | 'merged' | 'closed' | 'failed' | 'cancelled';
+export type BuildJobStatus = 'planning' | 'awaiting_input' | 'queued' | 'building' | 'pr_open' | 'merged' | 'closed' | 'failed' | 'cancelled';
 
 export interface BuildJob {
   id: number;
@@ -321,6 +325,14 @@ export interface BuildJob {
   costUsd: number;
   createdAt: number;
   updatedAt: number;
+  /** When the plan was approved (queue order); null before approval. */
+  approvedAt: number | null;
+  /** Resume attempts after restarts. */
+  resumeCount: number;
+  /** Automatic merge-conflict fix attempts (at most one). */
+  fixAttempts: number;
+  /** The "needs a manual merge" message was already posted. */
+  conflictNotified: boolean;
 }
 
 export interface BuildUsage {
@@ -341,12 +353,22 @@ export interface BuilderSettings {
   chatEnabled: boolean;
   /** Chat model, "providerID/modelID". */
   chatModel: string;
+  /** How many builds may run at once (1–5); further approved requests wait in a queue. */
+  maxParallelBuilds: number;
   /** Languages the chat assistant must reply in; empty = no constraint (any language). */
   chatLanguages: string[];
 }
 
 export const DEFAULT_BUILDER_MODEL = 'opencode-go/glm-5.3';
 export const DEFAULT_CHAT_MODEL = 'opencode-go/glm-5.3-flash';
+export const DEFAULT_MAX_PARALLEL_BUILDS = 1;
+export const MAX_PARALLEL_BUILDS_LIMIT = 5;
+
+/** Whole number in 1..5; anything else becomes the default. */
+export function clampMaxParallel(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_MAX_PARALLEL_BUILDS;
+  return Math.min(MAX_PARALLEL_BUILDS_LIMIT, Math.max(1, Math.trunc(n)));
+}
 
 export interface ChatThread {
   threadId: string;
@@ -408,8 +430,8 @@ function chatThreadFromRow(r: Record<string, unknown>): ChatThread {
   };
 }
 
-/** Statuses in which a job occupies the single builder slot. */
-export const ACTIVE_BUILD_STATUSES: readonly BuildJobStatus[] = ['planning', 'awaiting_input', 'building'];
+/** Statuses in which a job owns its thread (at most one such job per thread). */
+export const ACTIVE_BUILD_STATUSES: readonly BuildJobStatus[] = ['planning', 'awaiting_input', 'queued', 'building'];
 
 function buildJobFromRow(r: Record<string, unknown>): BuildJob {
   return {
@@ -435,11 +457,15 @@ function buildJobFromRow(r: Record<string, unknown>): BuildJob {
     costUsd: r.cost_usd as number,
     createdAt: r.created_at as number,
     updatedAt: r.updated_at as number,
+    approvedAt: (r.approved_at as number | null) ?? null,
+    resumeCount: (r.resume_count as number | null) ?? 0,
+    fixAttempts: (r.fix_attempts as number | null) ?? 0,
+    conflictNotified: ((r.conflict_notified as number | null) ?? 0) === 1,
   };
 }
 
 /** Fields of a build job that callers may update (besides status/usage, which have their own methods). */
-export type BuildJobPatch = Partial<Pick<BuildJob, 'title' | 'sessionId' | 'worktreeDir' | 'branch' | 'prUrl' | 'error' | 'model'>>;
+export type BuildJobPatch = Partial<Pick<BuildJob, 'title' | 'sessionId' | 'worktreeDir' | 'branch' | 'prUrl' | 'error' | 'model' | 'approvedAt' | 'resumeCount' | 'fixAttempts' | 'conflictNotified'>>;
 
 export type LogLevel = 'info' | 'warn' | 'error';
 export interface LogRow {
@@ -493,6 +519,16 @@ export class BotDatabase {
     const jobCols = this.db.prepare('PRAGMA table_info(build_jobs)').all() as { name: string }[];
     if (!jobCols.some((c) => c.name === 'model')) {
       this.db.exec('ALTER TABLE build_jobs ADD COLUMN model TEXT');
+    }
+    // Migrations for the build queue, restart resume and conflict fix columns.
+    const queueCols = (this.db.prepare('PRAGMA table_info(build_jobs)').all() as { name: string }[]).map((c) => c.name);
+    for (const [name, ddl] of [
+      ['approved_at', 'INTEGER'],
+      ['resume_count', 'INTEGER NOT NULL DEFAULT 0'],
+      ['fix_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+      ['conflict_notified', 'INTEGER NOT NULL DEFAULT 0'],
+    ] as const) {
+      if (!queueCols.includes(name)) this.db.exec(`ALTER TABLE build_jobs ADD COLUMN ${name} ${ddl}`);
     }
     // Migration for chat_threads created before pending_notes existed.
     const chatCols = this.db.prepare('PRAGMA table_info(chat_threads)').all() as { name: string }[];
@@ -1116,6 +1152,7 @@ export class BotDatabase {
       model: model && model.length > 0 ? model : DEFAULT_BUILDER_MODEL,
       chatEnabled: this.getState('chat:enabled') === '1',
       chatModel: chatModel && chatModel.length > 0 ? chatModel : DEFAULT_CHAT_MODEL,
+      maxParallelBuilds: clampMaxParallel(Number(this.getState('builder:maxParallel') ?? DEFAULT_MAX_PARALLEL_BUILDS)),
       chatLanguages: parseChatLanguages(this.getState('chat:languages')),
     };
   }
@@ -1125,6 +1162,7 @@ export class BotDatabase {
     this.setState('builder:model', s.model.trim().length > 0 ? s.model.trim() : DEFAULT_BUILDER_MODEL);
     this.setState('chat:enabled', s.chatEnabled ? '1' : '0');
     this.setState('chat:model', s.chatModel.trim().length > 0 ? s.chatModel.trim() : DEFAULT_CHAT_MODEL);
+    this.setState('builder:maxParallel', String(clampMaxParallel(s.maxParallelBuilds)));
     this.setState('chat:languages', JSON.stringify(s.chatLanguages));
   }
 
@@ -1160,13 +1198,18 @@ export class BotDatabase {
       prUrl: 'pr_url',
       error: 'error',
       model: 'model',
+      approvedAt: 'approved_at',
+      resumeCount: 'resume_count',
+      fixAttempts: 'fix_attempts',
+      conflictNotified: 'conflict_notified',
     };
     const sets: string[] = [];
-    const values: (string | null)[] = [];
+    const values: (string | number | null)[] = [];
     for (const key of Object.keys(cols) as (keyof BuildJobPatch)[]) {
-      if (patch[key] === undefined) continue;
+      const v = patch[key];
+      if (v === undefined) continue;
       sets.push(`${cols[key]} = ?`);
-      values.push(patch[key] ?? null);
+      values.push(typeof v === 'boolean' ? (v ? 1 : 0) : v);
     }
     if (sets.length === 0) return;
     this.db.prepare(`UPDATE build_jobs SET ${sets.join(', ')}, updated_at = ? WHERE id = ?`).run(...values, now, id);
@@ -1180,13 +1223,18 @@ export class BotDatabase {
       .run(u.input, u.output, u.reasoning, u.cacheRead, u.cacheWrite, u.costUsd, now, id);
   }
 
-  /** The job holding the single builder slot (planning / awaiting_input / building), if any. */
-  activeBuildJob(guildId: string): BuildJob | null {
+  /** The non-terminal job (planning / awaiting_input / queued / building) of a thread, if any. */
+  activeBuildJobInThread(threadId: string): BuildJob | null {
     const marks = ACTIVE_BUILD_STATUSES.map(() => '?').join(', ');
     const row = this.db
-      .prepare(`SELECT * FROM build_jobs WHERE guild_id = ? AND status IN (${marks}) ORDER BY id DESC LIMIT 1`)
-      .get(guildId, ...ACTIVE_BUILD_STATUSES) as Record<string, unknown> | undefined;
+      .prepare(`SELECT * FROM build_jobs WHERE thread_id = ? AND status IN (${marks}) ORDER BY id DESC LIMIT 1`)
+      .get(threadId, ...ACTIVE_BUILD_STATUSES) as Record<string, unknown> | undefined;
     return row ? buildJobFromRow(row) : null;
+  }
+
+  /** Jobs currently using a build slot (builds and conflict fixes). */
+  countBuildingJobs(): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM build_jobs WHERE status = 'building'`).get() as { n: number }).n;
   }
 
   listBuildJobsByStatus(statuses: BuildJobStatus[]): BuildJob[] {
