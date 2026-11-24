@@ -62,30 +62,42 @@ export function levelTag(xp: number | null): string | null {
 }
 
 /**
- * Steam's level-badge tiers: the badge background moves in 10-level steps
- * from slate to gold. Colours sampled (and rounded) from Steam's badge tiers.
+ * Steam's level-badge colours: the same 10-colour cycle repeats in every
+ * 100-level band (x0…x90). Colours sampled from Steam's badge sheet.
  */
 export const STEAM_LEVEL_BANDS: readonly { from: string; to: string }[] = [
-  { from: '#6b7c93', to: '#4a5b70' }, // 0–9   slate
-  { from: '#7f9c47', to: '#5c7730' }, // 10–19 olive green
-  { from: '#4f9ea8', to: '#2f7480' }, // 20–29 teal
-  { from: '#4f7fc0', to: '#2f5a93' }, // 30–39 blue
-  { from: '#7b5fb0', to: '#553e85' }, // 40–49 purple
-  { from: '#b05597', to: '#833a6e' }, // 50–59 pink
-  { from: '#c0564a', to: '#8f352c' }, // 60–69 red
-  { from: '#c07b3a', to: '#8f5522' }, // 70–79 orange
-  { from: '#c0a23a', to: '#8f7422' }, // 80–89 gold
-  { from: '#6d6d78', to: '#3c3c45' }, // 90–99 graphite
+  { from: '#9aa0a8', to: '#565c66' }, // 0  grey
+  { from: '#a3474a', to: '#6d2a2d' }, // 10 dark red
+  { from: '#c45555', to: '#8c3030' }, // 20 red
+  { from: '#c9a227', to: '#8a6a12' }, // 30 amber
+  { from: '#6f9b45', to: '#456427' }, // 40 green
+  { from: '#4f86c6', to: '#2f5a93' }, // 50 blue
+  { from: '#7d5fb8', to: '#4f3a86' }, // 60 purple
+  { from: '#b3529a', to: '#7a2f66' }, // 70 magenta
+  { from: '#8a4650', to: '#57303a' }, // 80 maroon
+  { from: '#a89536', to: '#6f6120' }, // 90 olive-gold
 ];
 
-/** Top band (100+) is gold and caps there. */
-const STEAM_LEVEL_TOP = { from: '#d4af37', to: '#a3821f' };
-
-/** Badge gradient for a level: Steam-style tiered colours, 10 levels per band. */
+/** Badge gradient for a level: the 10-colour cycle repeats every 100 levels. */
 export function steamLevelColors(level: number): { from: string; to: string } {
-  const band = Number.isFinite(level) ? Math.floor(level / 10) : 0;
-  if (band >= STEAM_LEVEL_BANDS.length) return STEAM_LEVEL_TOP;
-  return STEAM_LEVEL_BANDS[Math.max(0, band)] ?? STEAM_LEVEL_TOP;
+  const safe = Number.isFinite(level) ? Math.floor(level) : 0;
+  const band = Math.floor((Math.max(0, safe) % 100) / 10);
+  return STEAM_LEVEL_BANDS[band] ?? STEAM_LEVEL_BANDS[0]!;
+}
+
+/**
+ * Badge shapes in 100-level steps, mirroring Steam's badge sheet
+ * (CSS approximations, not pixel copies). 900+ keeps the last shape.
+ */
+export const STEAM_LEVEL_SHAPES: readonly string[] = [
+  'circle', 'hex', 'squircle', 'shield', 'diamond', 'octagon', 'hexflat', 'pentagon', 'bevel',
+];
+
+/** Badge shape for a level: changes every 100 levels and caps at the last one. */
+export function steamLevelShape(level: number): string {
+  const safe = Number.isFinite(level) ? Math.floor(level) : 0;
+  const index = Math.min(STEAM_LEVEL_SHAPES.length - 1, Math.floor(Math.max(0, safe) / 100));
+  return STEAM_LEVEL_SHAPES[index] ?? 'circle';
 }
 
 export interface XpAwardResult {

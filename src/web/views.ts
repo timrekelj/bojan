@@ -1,7 +1,7 @@
 import type { BuildJob, BuildUsage, BuilderSettings, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, weekRangeLabel } from '../stats.js';
 import type { WeekBounds } from '../stats.js';
-import { levelProgress, levelTag, steamLevelColors } from '../levels.js';
+import { levelProgress, levelTag, steamLevelColors, steamLevelShape } from '../levels.js';
 import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 import type { DeployStatus } from '../dokploy.js';
@@ -158,8 +158,19 @@ const CSS = `
   #you .kpis { margin-bottom: 18px; }
   .levelrow { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px 20px; margin: 0 0 14px; }
   .levelno { display: flex; flex-direction: column; align-items: center; gap: 4px; line-height: 1.1; }
-  .levelbadge { display: flex; align-items: center; justify-content: center; width: 46px; height: 46px; border-radius: 50%; color: #fff; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; text-shadow: 0 1px 2px rgba(0,0,0,.55); background: radial-gradient(circle at 30% 25%, rgba(255,255,255,.35), transparent 55%), linear-gradient(180deg, var(--lv-from), var(--lv-to)); box-shadow: inset 0 0 0 2px rgba(255,255,255,.18); }
-  .levelbadge[data-len="3"] { font-size: 15px; }
+  .levelbadge { display: flex; align-items: center; justify-content: center; width: 52px; height: 52px; border-radius: 50%; color: #fff; font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; text-shadow: 0 1px 2px rgba(0,0,0,.55); background: radial-gradient(circle at 30% 25%, rgba(255,255,255,.35), transparent 55%), linear-gradient(180deg, var(--lv-from), var(--lv-to)); box-shadow: inset 0 0 0 2px rgba(255,255,255,.18); }
+  .levelbadge[data-len="3"] { font-size: 14px; }
+  .levelbadge[data-shape="circle"] { border-radius: 50%; }
+  .levelbadge[data-shape="squircle"] { border-radius: 14px; }
+  .levelbadge[data-shape="hex"] { clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+  .levelbadge[data-shape="shield"] { clip-path: polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%); }
+  .levelbadge[data-shape="diamond"] { clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); }
+  .levelbadge[data-shape="octagon"] { clip-path: polygon(29% 0, 71% 0, 100% 29%, 100% 71%, 71% 100%, 29% 100%, 0 71%, 0 29%); }
+  .levelbadge[data-shape="hexflat"] { clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); }
+  .levelbadge[data-shape="pentagon"] { clip-path: polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%); }
+  .levelbadge[data-shape="bevel"] { clip-path: polygon(12% 0, 88% 0, 100% 12%, 100% 88%, 88% 100%, 12% 100%, 0 88%, 0 12%); }
+  .levelbadge[data-shape="shield"], .levelbadge[data-shape="diamond"], .levelbadge[data-shape="pentagon"], .levelbadge[data-shape="hexflat"], .levelbadge[data-shape="bevel"] { font-size: 17px; }
+  .levelbadge[data-shape="shield"][data-len="3"], .levelbadge[data-shape="diamond"][data-len="3"], .levelbadge[data-shape="pentagon"][data-len="3"], .levelbadge[data-shape="hexflat"][data-len="3"], .levelbadge[data-shape="bevel"][data-len="3"] { font-size: 13px; }
   .levelcap { color: var(--muted); font-size: 12px; font-weight: 500; }
   .levelmeter { display: grid; gap: 6px; min-width: 0; }
   .levelnums { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -776,7 +787,7 @@ export function levelBar(xp: number, roleColor: string | null): string {
   const color = roleColor && /^#[0-9a-f]{6}$/i.test(roleColor) ? roleColor : null;
   const fill = `<i style="width:${pct.toFixed(1)}%${color ? `;background:${escapeHtml(color)}` : ''}"></i>`;
   const steam = steamLevelColors(level);
-  const badge = `<span class="levelbadge" data-len="${String(level).length}" role="img" aria-label="Level ${level}" style="--lv-from:${escapeHtml(steam.from)};--lv-to:${escapeHtml(steam.to)}">${level}</span>`;
+  const badge = `<span class="levelbadge" data-shape="${escapeHtml(steamLevelShape(level))}" data-len="${String(level).length}" role="img" aria-label="Level ${level}" style="--lv-from:${escapeHtml(steam.from)};--lv-to:${escapeHtml(steam.to)}">${level}</span>`;
   return `<div class="levelrow"><div class="levelno">${badge}<span class="levelcap">Level</span></div><div class="levelmeter"><span class="levelnums">${fmt(intoLevel)} / ${fmt(span)} XP</span><div class="levelbar" role="progressbar" aria-label="Level ${level} progress" aria-valuemin="0" aria-valuemax="${span}" aria-valuenow="${intoLevel}" aria-valuetext="${fmt(intoLevel)} of ${fmt(span)} XP">${fill}</div></div></div>`;
 }
 
