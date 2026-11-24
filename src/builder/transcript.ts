@@ -190,7 +190,7 @@ export function normalizeTranscript(messages: readonly unknown[]): TranscriptEnt
 /** The part of the OpenCode client this module needs. */
 export interface MessageListClient {
   message: {
-    list(input: { sessionID: string; order: 'asc' | 'desc'; limit: number; cursor?: string }): Promise<{ data: readonly unknown[]; cursor?: { previous?: string | null; next?: string | null } }>;
+    list(input: { sessionID: string; order?: 'asc' | 'desc'; limit: number; cursor?: string }): Promise<{ data: readonly unknown[]; cursor?: { previous?: string | null; next?: string | null } }>;
   };
 }
 
@@ -199,6 +199,20 @@ export interface TranscriptPage {
   entries: TranscriptEntry[];
   /** Pass as `cursor` to load the next older page; null when this is the oldest page. */
   olderCursor: string | null;
+}
+
+/** Stable newest-first sort by time; entries without a time keep their slot. */
+function sortNewestFirst(entries: TranscriptEntry[]): TranscriptEntry[] {
+  const slots: number[] = [];
+  entries.forEach((e, i) => {
+    if (e.time !== null) slots.push(i);
+  });
+  const sorted = slots.map((i) => entries[i]!).sort((a, b) => (b.time as number) - (a.time as number));
+  const out = [...entries];
+  slots.forEach((slot, k) => {
+    out[slot] = sorted[k]!;
+  });
+  return out;
 }
 
 /** Newest-first page of messages, returned newest-first for display. Throws on failure or timeout. */
@@ -214,12 +228,14 @@ export async function fetchTranscript(
     timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
   });
   try {
-    const res = await Promise.race([client.message.list({ sessionID, order: 'desc', limit, ...(opts.cursor ? { cursor: opts.cursor } : {}) }), timeout]);
+    // The server rejects `order` together with a cursor (the cursor carries the order of the first request).
+    const request = opts.cursor ? { sessionID, cursor: opts.cursor, limit } : { sessionID, order: 'desc' as const, limit };
+    const res = await Promise.race([client.message.list(request), timeout]);
     const data = Array.isArray(res.data) ? res.data : [];
     // Descending order: `next` continues towards older messages.
     const older = data.length >= limit ? (res.cursor?.next ?? null) : null;
-    // The API already returns newest first; normalize in chronological order, then flip back.
-    return { entries: normalizeTranscript([...data].reverse()).reverse(), olderCursor: older };
+    // Normalize in chronological order, then flip back, then make sure the page is newest first.
+    return { entries: sortNewestFirst(normalizeTranscript([...data].reverse()).reverse()), olderCursor: older };
   } finally {
     clearTimeout(timer);
   }

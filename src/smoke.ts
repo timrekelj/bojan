@@ -1487,8 +1487,12 @@ rmSync(dir, { recursive: true, force: true });
   const calls: unknown[] = [];
   const fakeClient = { message: { list: async (input: unknown) => { calls.push(input); return { data: [{ id: 'n2', type: 'user', text: 'new' }, { id: 'n1', type: 'user', text: 'old' }], cursor: { next: 'CUR', previous: null } }; } } };
   const page = await fetchTranscript(fakeClient, 'ses_abc', { limit: 2, cursor: 'C0' });
-  check('fetchTranscript: newest-first request, newest-first result, older cursor', (calls[0] as { order: string; limit: number; cursor: string }).order === 'desc' && (calls[0] as { cursor: string }).cursor === 'C0' && page.entries.map((e) => e.id).join() === 'n2,n1' && page.olderCursor === 'CUR');
+  check('fetchTranscript: cursor request has no order, newest-first result, older cursor', !('order' in (calls[0] as object)) && (calls[0] as { cursor: string }).cursor === 'C0' && page.entries.map((e) => e.id).join() === 'n2,n1' && page.olderCursor === 'CUR');
   const short = await fetchTranscript(fakeClient, 'ses_abc', { limit: 60 });
+  check('fetchTranscript: first page requests order desc without cursor', (calls[1] as { order: string }).order === 'desc' && !('cursor' in (calls[1] as object)));
+  const ascClient = { message: { list: async () => ({ data: [{ id: 'a1', type: 'user', text: 'old', time: { created: 1 } }, { id: 'a2', type: 'user', text: 'new', time: { created: 2 } }], cursor: { next: null, previous: null } }) } };
+  const ascPage = await fetchTranscript(ascClient, 'ses_abc', { limit: 2, cursor: 'C1' });
+  check('fetchTranscript: ascending page is sorted newest first', ascPage.entries.map((e) => e.id).join() === 'a2,a1');
   check('fetchTranscript: no older cursor on a short page', short.olderCursor === null);
   let timedOut = false;
   try {
