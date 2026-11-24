@@ -32,7 +32,7 @@ import { extractReply, lastConversationIsAssistant } from './builder/opencode.js
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages, parseLimitThreshold } from './builder/form.js';
 import { blockingLimit, formatLimitDenial, LimitGate } from './builder/limits.js';
-import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
+import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
@@ -1045,6 +1045,14 @@ rmSync(dir, { recursive: true, force: true });
   const failDec = decideRecovery({ kind: 'build', reply: rep('nope'), lastIsAssistant: true, resumeCount: 2 });
   check('decideRecovery: fails after 2 resume attempts with a reason', failDec.action === 'fail' && failDec.reason.includes('2 resume attempts'), JSON.stringify(failDec));
   check('decideRecovery: plan with valid result handled; clean plain text handled; empty/interrupted resumes', decideRecovery({ kind: 'plan', reply: rep(okPlan), lastIsAssistant: true, resumeCount: 0 }).action === 'handle' && decideRecovery({ kind: 'plan', reply: rep('Which store?'), lastIsAssistant: true, resumeCount: 0 }).action === 'handle' && decideRecovery({ kind: 'plan', reply: rep(''), lastIsAssistant: true, resumeCount: 0 }).action === 'resume' && decideRecovery({ kind: 'plan', reply: rep('half', null, 'x'), lastIsAssistant: true, resumeCount: 1 }).action === 'resume' && decideRecovery({ kind: 'plan', reply: rep(''), lastIsAssistant: true, resumeCount: 2 }).action === 'fail');
+  {
+    check('planner message attribution', formatPlannerMessage('Game Explorer', 'add medals') === 'Message from Discord user "Game Explorer": add medals');
+    check('planner message quote in name', formatPlannerMessage('Ga"me', 'x') === `Message from Discord user "Ga'me": x`);
+    const p = followUpPrompt(['Tim: a', 'Tim: b'], ['Bob: hi'], 'CTX:');
+    check('follow-up prompt', p.startsWith('CTX:\nBob: hi\n\n') && p.includes(`${FOLLOW_UP_HEADER}\nTim: a\nTim: b`) && p.includes('can not approve') && followUpPrompt(['x']) === `${FOLLOW_UP_HEADER}\nx`);
+    check('shouldHoldPlanReply', !shouldHoldPlanReply({ pendingFollowUps: 0, error: false, planStatus: 'needs_input' }) && !shouldHoldPlanReply({ pendingFollowUps: 1, error: true, planStatus: null }) && !shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: 'cancelled' }) && shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: 'needs_input' }) && shouldHoldPlanReply({ pendingFollowUps: 2, error: false, planStatus: 'approved' }) && shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: null }));
+    check('follow-up approval downgraded', guardPlanStatus({ status: 'approved', planPostedAt: 2000, latestUserMessageAt: 1000 }) === 'needs_input');
+  }
   check('resume / conflict prompts', BUILD_RESUME_PROMPT.includes('gh pr view') && BUILD_RESUME_PROMPT.includes('json block') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('git merge origin/main') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('no force push') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('https://github.com/a/b/pull/1'));
   const ca = (o: Partial<Parameters<typeof conflictAction>[0]>) => conflictAction({ conflict: 'conflict', fixAttempts: 0, notified: false, slotFree: true, sinceUpdateMs: 10 * CONFLICT_SETTLE_MS, ...o });
   check('conflictAction: fix when slot free, wait otherwise, unknown/ok do nothing', ca({}) === 'fix' && ca({ slotFree: false }) === 'wait' && ca({ conflict: 'unknown' }) === 'none' && ca({ conflict: 'ok' }) === 'none');
