@@ -122,6 +122,17 @@ export function followUpPrompt(followUps: readonly string[], context: readonly s
   ].join('\n\n');
 }
 
+/** First message of the fresh build session: the original request and the approved plan (nothing else is carried over from planning). */
+export function buildPrompt(input: { request: string; title: string | null; plan: string }): string {
+  const title = input.title?.trim();
+  return [
+    'The requester approved the plan below. Implement it now, following your instructions.',
+    `Original request from Discord:\n${input.request.trim()}`,
+    ...(title ? [`Title: ${title}`] : []),
+    `Approved plan:\n${input.plan.trim()}`,
+  ].join('\n\n');
+}
+
 export function conflictFixPrompt(prUrl: string): string {
   return (
     `Your PR ${prUrl} has merge conflicts with main. Run \`git fetch origin && git merge origin/main\`, resolve conflicts keeping both sides' intent, ` +

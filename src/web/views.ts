@@ -1208,7 +1208,7 @@ export function tokensCell(u: { input: number; output: number; reasoning: number
 const TOKENS_HEAD = `<th scope="col" title="input / output / reasoning / cache %. ${CACHE_HELP}">Tokens (in / out / reasoning / cache %)</th><th scope="col" class="r" title="Estimated from OpenCode Go list prices">Est. cost</th>`;
 
 const sessionHref = (sessionId: string, cursor?: string | null): string => `/dashboard/sessions/${encodeURIComponent(sessionId)}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
-const sessionLink = (sessionId: string): string => `<a href="${escapeHtml(sessionHref(sessionId))}">Session</a>`;
+const sessionLink = (sessionId: string, label = 'Session'): string => `<a href="${escapeHtml(sessionHref(sessionId))}">${escapeHtml(label)}</a>`;
 
 /** Link to the Requests page with both pagers' positions (page 1 is omitted). */
 function requestsHref(page: number, chatPage: number): string {
@@ -1225,7 +1225,7 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
   const rows = d.jobs.map((j) => {
     const title = j.title?.trim() || (j.request.length > 80 ? j.request.slice(0, 80) + '…' : j.request);
     const thread = `https://discord.com/channels/${d.guildId}/${j.threadId}`;
-    const pr = (j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '') + (j.sessionId ? sessionLink(j.sessionId) : '');
+    const pr = (j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '') + (j.sessionId ? sessionLink(j.sessionId) : '') + (j.planSessionId ? sessionLink(j.planSessionId, 'Plan') : '');
     const tokens = tokensCell({ input: j.tokensInput, output: j.tokensOutput, reasoning: j.tokensReasoning, cacheRead: j.tokensCacheRead, cacheWrite: j.tokensCacheWrite });
     const queuePos = j.status === 'queued' ? d.queuePositions?.[j.id] : undefined;
     const statusLabel = queuePos ? `queued #${queuePos}` : j.status;
@@ -1368,7 +1368,8 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
     const title = j.title?.trim() || (j.request.length > 80 ? j.request.slice(0, 80) + '…' : j.request);
     const badge = JOB_BADGE[j.status] ?? '';
     heading = `<h2 id="h-session">Feature request #${j.id}: ${escapeHtml(title)}</h2><span class="badge${badge ? ' ' + badge : ''}">${escapeHtml(j.status)}</span>`;
-    facts = [['Requested by', who(j.requesterId)], ['Created', fmtDate(j.createdAt, d.timezone)]];
+    const phase = j.planSessionId === null ? 'Plan and build (one session)' : j.planSessionId === d.sessionId ? 'Plan session (the build runs in a separate session)' : 'Build session (the plan was made in a separate session)';
+    facts = [['Requested by', who(j.requesterId)], ['Created', fmtDate(j.createdAt, d.timezone)], ['Showing', phase]];
   } else {
     const c = o.thread;
     heading = `<h2 id="h-session">${c.oneOff ? 'One-off chat reply' : 'Chat thread'}</h2>`;

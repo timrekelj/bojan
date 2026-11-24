@@ -1,0 +1,85 @@
+# Architecture details
+
+Per-area behaviour of the bot. `CLAUDE.md` has the module map and the rules; this file has the detail. Read only the section for the area you are changing (grep for its heading).
+
+## Core modules
+
+- `index.ts`: startup wiring (db, client, web server, weekly scheduler) and shutdown.
+- `config.ts`: env vars into `config` (required vars throw at import; `guildId`, `databasePath`, ...).
+- `bot.ts`: client and intents, slash command definitions, per-guild registration, event handlers, `/backfill`.
+- `db.ts`: `BotDatabase`, the only SQL access (schema, migrations, queries, key/value `bot_state` table).
+- `stats.ts`: pure time/week/timezone math and leaderboard formatting.
+- `weekly.ts` / `cards.ts`: Components V2 message builders (weekly stats; leaderboard and activity).
+- `chart.ts`: SVG-to-PNG daily chart (resvg uses system fonts; the Dockerfile installs DejaVu).
+- `scheduler.ts`: 30s tick that posts last week's stats once per week (`weekly:<guild>` state key).
+- `embeds/`: `providers.ts` (pure link detection and rewriting), `converter.ts` (webhook repost of the converted link).
+- `smoke.ts`: offline test script.
+
+## Levels
+
+`levels.ts`: MEE6-style leveling — pure XP roll/level math, `awardMessageXp` (30s per-user cooldown, `user_xp` table), `awardReactionXp` (1% chance per reaction, level + 1 XP; a win refreshes the message cooldown window), Components V2 level-up card; toggle + channel in dashboard settings.
+
+`colors.ts` + `color_roles`/`color_settings` tables: name-colour reaction roles. The roles are pre-made; the dashboard ticks which ones are colours and picks a channel, and `POST /color-settings` posts one Components V2 message per role (with a 🎨 marker reaction) and deletes messages of unselected roles. Reacting to a message in `bot.ts` gives that role and removes the member's other colour roles (one per member; `rolesToSwap`), removing the reaction drops it. Needs Manage Roles and roles below the bot's highest role.
+
+## Free games
+
+- Files: `freegames/types.ts`, `filters.ts` (`isBetaTitle`, `matchesFilters`, `filterGames`), `freestuff.ts` (FreeStuff webhook verify + normalizer), `cards.ts`, `form.ts` (dashboard form parsing), `actions.ts` (`announceInGuild`, `announceEverywhere`, `titleDedupeKey`).
+- Source: the FreeStuff webhook only, no polling (Epic's free games arrive through it with store `epic`) (`POST /webhooks/freestuff` in `web/server.ts`, logic in `freestuff.ts`, enabled by `FREESTUFF_PUBLIC_KEY`; push-only, no REST key). FreeStuff cards show `-# via FreeStuff`. Console products from FreeStuff are skipped.
+- **Dedupe**: every announce marks both `g.key` and `titleDedupeKey(g)` (`t:<platform>:<store>:<normalized title>`) in `free_posted`, and skips a game if either is posted. Use `announceInGuild` / `markGamesPosted` / `isGamePosted` from `actions.ts`, not raw `markFreePosted`. The webhook is signature-verified (Ed25519), replay-guarded, answers 204 first and announces asynchronously.
+- Everything is normalized to `FreeGame` (`types.ts`): `key` is a stable id (`fs:<id>`), `kind` is `game | dlc | beta`, `platform` is `pc | mobile`, and `store` is one of `ALL_STORES`. Beta/playtest/demo keys are detected by `isBetaTitle`.
+- Filters (`FreeSettings`: `stores`, `includeDlc`, `includeBeta` (default off), `includeMobile`) are applied by `matchesFilters` / `filterGames`. A new filter needs: the type, a DB column plus migration, `form.ts` parsing, the dashboard view, and the smoke tests.
+- **No backlog**: webhooks only deliver new announcements, so nothing is seeded on enabling the feature or changing filters. Announce dedupe uses `markFreePosted` / `isFreePosted`. The dashboard status shows whether `FREESTUFF_PUBLIC_KEY` is set and the announced count.
+
+## Dashboard / web
+
+- `web/server.ts`: Hono routes, OAuth, settings POST handlers, data loaders (`loadOverview`, `loadLogs`, `loadRequests`), `GET /dashboard/live` (JSON `{ parts: { <element id>: <html> } }`, 401 JSON when logged out; `view` = overview | logs | requests | settings | session, the last takes `id`), `GET /dashboard/sessions/:id` (`loadSession`: transcript of one OpenCode session; the id must belong to a `build_jobs`/`chat_threads` row of the guild via `db.findSessionOwner`, else 404; fetch failure renders an error note), `/favicon.svg`, `/assets/clouds.png`.
+- `web/views.ts`: server-rendered HTML and CSS. Five pages share `layout()` (sidebar on desktop, top bar + bottom tab bar below 900px): Overview `/dashboard` (`dashboardPage`), Settings `/dashboard/settings` (`settingsPage`), Requests `/dashboard/requests` (`requestsPage`), Logs `/dashboard/logs` (`logsPage`), Session `/dashboard/sessions/:id` (`sessionPage`/`sessionParts`, linked from the Requests tables, Requests nav item active, live regions `live-session-head`/`live-session` only on the newest page, no refresh with `?cursor=`).
+- Pagination: every list that can grow is server-side paginated through the shared pure `pagerHtml` (views.ts; Previous / Page X of Y / Next, links get a `#h-...` anchor, no pager for one page): embeds 10 (`?embedsPage=`), Logs 50 (`?page=`, kept with `level`/`tag`; the level tabs and tag form reset to page 1; `db.recentLogs` offset + `db.countLogs`), Requests: feature requests 20 (`?page=`) and chats 20 (`?chatPage=`, total = threads + one-offs), each pager link keeps the other param; the pagers live inside the `*Parts()` regions so `/dashboard/live` honours the params.
+- Cached tokens are shown as cache % (`cachePercent` = cacheRead / (input + cacheRead + cacheWrite)) everywhere in the dashboard.
+- Live regions: `LIVE_SCRIPT` keeps `<details id>` elements open across swaps, so give every details element in a live region a stable id. Live regions are `<div class="live" id="live-...">`; each page renders them through its `*Parts()` function (`overviewParts`, `logsParts`, `requestsParts`, `chromeParts`), and the live endpoint returns the same functions' output, so add a region in the `*Parts()` function, never only in the page. `LIVE_SCRIPT` polls every 15s while the tab is visible; the Settings page never refreshes its forms (only the deployment chip).
+- Background: `web/assets/clouds.png` (1-bit dithered cloud photo, white on transparent, CC0 source noted in `server.ts` and the README) drawn at natural size or an integer multiple (`--sky-size`), never `cover`; if the file changes, update `CLOUDS_VERSION` in `views.ts` (smoke checks the hash). `npm run build` copies `src/web/assets` to `dist/web/assets`.
+
+## Dokploy status
+
+`dokploy.ts`: optional deployment status pill (`DOKPLOY_URL`, `DOKPLOY_API_KEY`, `DOKPLOY_COMPOSE_ID`, all three or it is hidden). Pure `summarizeDeployments` (newest non-cancelled deployment of `deployment.allByCompose`), `fetchDeployments(cfg)` (5s timeout, 10s cache, never throws, `[dokploy]` log at most once a minute). No config/db imports.
+
+## Chat assistant
+
+`builder/chat.ts` + `chat-parse.ts`:
+
+- Any member's @mention opens a thread backed by one OpenCode session (agent `chat`, `.opencode/agents/chat.md`, web search + read-only access to a checkout of `main` at `/workspace/bojan`, refreshed with `OpenCodeAgent.refreshMain` before each new chat session).
+- The bot only answers messages that @mention it or reply to one of its messages (`isDirectedAtBot`); every other thread message produces no model call, reaction or typing and is not buffered: on each directed turn `ChatRunner.fetchContext` fetches the thread's messages from Discord (up to 50 before the batch, only those after the bot's last message, `sinceLastBotMessage`; fetch failure = no context) and prepends them under "Other messages in the thread since your last reply" (`formatThreadContext`), so context survives restarts.
+- Directed messages are batched (3s debounce, serialized per thread) and always answered when the agent produced visible text (the json `reply` flag is ignored).
+- Decision model: `chatDecisionModel` (default `opencode-go/jev-1.14`, `OpenCodeAgent.decide` → `experimental.generate.decisions`, predicate `FEATURE_REQUEST_QUESTION`, `isFeatureRequest` threshold 0.5, 15s timeout; failure = plain chat) runs only for a directed (@mention) message from an admin while building is enabled and configured (`shouldRunDecision`; also for one-off mentions, before any session is created), and sees the last ~30 thread messages before it (history, clipped to 6000 chars), the replied-to message and the "Latest message (the one to classify)" (`formatDecisionInput`), so a short "ship this" / "build it" referring to a bot change discussed earlier counts as a feature request while discussing alone does not.
+- If it says yes the chat agent is skipped: the build job starts in the same thread (`BuilderRunner.startJob` with the plain request text from `featureRequestText` and a transcript of up to 50 recent messages; the planner prompt says the request may refer to the discussion in the transcript, which never approves a plan) and "Got it, I'll make a plan for this." is posted only after `startJob` succeeded; pending notes stay for the next chat turn; after the job ends the thread is chat again.
+- Everyone else (non-admins) who mentions the bot goes to the chat agent, which, for a change request, asks them to say clearly what to build (e.g. "@bojan build <the change>") or to say "ship this" after discussing it in the thread.
+- The agent ends with a trailing json block `{reply}`; a reply without a valid block is never posted (asked once more, then dropped, `ChatReply.missingBlock`).
+- Build status changes queue `[build update]` notes (`formatBuildNote`, `chat_threads.pending_notes`) that are prepended to the thread's next chat prompt (no model call of their own).
+- Mentions inside foreign threads are one-off replies.
+- State: `chat_threads` table, `chatEnabled`/`chatModel`/`chatDecisionModel` in `getBuilderSettings`. `chat-parse.ts` is pure (reply parsing, chunking to 2000 chars, prompt formatting).
+- The `[build status]` block (`formatJobStatus`, `jobStatusBlock`) for the thread's newest in-flight job is prepended to chat turns, so chat keeps working during a job; while a job is active the decision model is skipped (no second job). `chat-parse.ts` also has `pickReplyTarget`.
+- Images: attachments (max 4, 5 MB each, `selectImages` + `images.ts` `downloadImages`) of the directed message and its replied-to message are downloaded and sent as inline `data:` URIs in `session.prompt` `files` (chat turns, one-off replies, the feature request's first planner turn and directed planner replies; thread context and build prompts stay text).
+- Feedback is via reactions (`builder/reactions.ts`): directed messages (mention or reply to the bot) get the guild's `hmmmm` emoji (fallback 🤔) until the turn ends, typing is shown only for turns with a directed message, and the first reply chunk is a Discord reply to the target message. The runner has no typing indicator: 📝 on the triggering message while planning, 🔨 on the plan message while building, then ✅ (PR opened) or ❌ (failed); `updatePresence` sets the bot activity to `Building <title>` (`buildingActivity` in `queue.ts`).
+
+## Self-building (`builder/`)
+
+- `queue.ts` (pure: queue order/slots, recovery decision, conflict action, resume/fix prompts), `parse.ts` (agent reply/json parsing, `prInfoFromJson`, naming, usage formatting, admin check; pure), `cards.ts` (Components V2 cards, pure), `opencode.ts` (`@opencode/client` wrapper: warm location, git worktree via shell, session, prompt-and-wait (`session.wait` is bounded to 60s slices, no warning for our own aborts, optional `onProgress` per slice), usage, Go limit meters).
+- `limits.ts` (OpenCode Go quota gate: refuses chat/plan/build model calls while any 5h/weekly/monthly meter is at `limitThreshold` % — dashboard setting, default 95 — and answers with the reset time; 30s cache, fail-open).
+- `runner.ts` (orchestration): plan Q&A in parallel per thread; the build runs in a FRESH `feature-build` session that gets only the request and the approved plan (`buildPrompt`, plan text = `build_jobs.last_plan`, kept current at approval); the planner session id moves to `build_jobs.plan_session_id` and `session_id` becomes the build session; old jobs with `plan_session_id` null keep building in the shared session; job usage is the sum of both sessions (`addUsage`). Build queue limited by `maxParallelBuilds` (statuses `queued`/`building`, FIFO by `approved_at`, drained when a build ends, on a 30s tick and after recovery). Token usage is refreshed in the DB while a session runs (`onProgress` = `saveUsage`). Restart recovery resumes interrupted sessions (max 2, `resume_count`). PR tracking via GitHub API every 2 min with one automatic merge-conflict fix per PR (`fix_attempts`).
+- `handler.ts` (messageCreate): thread messages feed the runner while a job is active, otherwise the chat assistant. In the planner phase only directed messages (mention or reply to the bot, e.g. to the plan card) trigger a turn via `handleReply(..., { trigger })`, other messages are context only (`preContext`, header "Other thread messages since your last reply") and can never approve. A directed message sent while a planner turn runs triggers one revising turn right after it (`followUps`, `followUpPrompt`; the stale reply of the running turn is held back and not posted unless it is an error or cancellation (`shouldHoldPlanReply`), and follow-up turns never approve (`noApprove`)). No bot output for non-directed messages in any path.
+- Jobs live in `build_jobs` (a thread may hold several over time; `getBuildJobByThread` returns the newest); settings via `getBuilderSettings` (bot_state). Needs `OPENCODE_PASSWORD`; agents are defined in `.opencode/agents/`.
+
+## Transcript page
+
+`builder/transcript.ts`: pure view model of an OpenCode session for the dashboard session page (`normalizeTranscript` clips text/tool input/output, tolerates unknown message types; assistant entries carry `timing` (first token, total, tools, retry) and every entry `gapMs` (idle since the previous entry ended), shown under each message; `fetchTranscript` pages `client.message.list` newest-first, 8s timeout).
+
+The session transcript is newest first (`fetchTranscript` returns newest first, 30 messages per page, parts inside one message stay chronological) with "Latest messages" / "Older messages" links below it.
+
+## Discord requirements
+
+- Gateway intents (`bot.ts`): regular intents Guilds, GuildMessages, GuildMessageReactions, GuildVoiceStates; privileged intents MessageContent, GuildMembers, GuildPresences. The privileged ones must be enabled in the developer portal.
+- Bot permissions: View Channels, Send Messages, Read Message History, Embed Links, Attach Files (weekly chart PNG), Manage Messages (embed converter deletes or suppresses the original), Manage Webhooks (embed converter reposts), Create Public Threads + Send Messages in Threads (self-building request threads), Add Reactions (status emoji; Use External Emojis is not needed), Manage Roles (name-colour roles; the roles must be below the bot's highest role). OAuth scopes `bot` + `applications.commands`. The dashboard allows Administrators or `ADMIN_ROLE_ID`. Setup details are in `README.md`; env vars are in `.env.example`.
+
+## Overview
+
+The bot tracks message/reaction/voice/activity stats, posts weekly stats, converts embed links, announces free games, and serves a Hono dashboard with Discord OAuth. Charts are rendered to PNG with `@resvg/resvg-js`. User-facing docs and setup live in `README.md`; `CLAUDE.md` covers working in the code.

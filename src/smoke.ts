@@ -31,10 +31,10 @@ import {
   type BuilderMessage,
 } from './builder/cards.js';
 import { extractReply, lastConversationIsAssistant } from './builder/opencode.js';
-import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
+import { addUsage, estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages, parseLimitThreshold } from './builder/form.js';
 import { blockingLimit, formatLimitDenial, LimitGate } from './builder/limits.js';
-import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
+import { BUILD_RESUME_PROMPT, buildPrompt, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { pagerHtml, rangeSummary } from './web/views.js';
@@ -1543,7 +1543,7 @@ rmSync(dir, { recursive: true, force: true });
   }
   check('fetchTranscript: times out', timedOut);
 
-  const job = { id: 7, guildId: G, threadId: 'th7', channelId: 'c', requesterId: 'u1', request: 'req', title: 'T <i>', status: 'building', sessionId: 'ses_job7', worktreeDir: null, branch: null, prUrl: 'https://github.com/x/y/pull/1', error: null, model: 'opencode-go/glm', tokensInput: 100, tokensOutput: 20, tokensReasoning: 5, tokensCacheRead: 300, tokensCacheWrite: 0, costUsd: 0.5, createdAt: 1, updatedAt: 1, approvedAt: null, triggerMessageId: null, planMessageId: null, planPostedAt: null, lastPlan: null, resumeCount: 0, fixAttempts: 0, conflictNotified: false } as const;
+  const job = { id: 7, guildId: G, threadId: 'th7', channelId: 'c', requesterId: 'u1', request: 'req', title: 'T <i>', status: 'building', sessionId: 'ses_job7', planSessionId: 'ses_plan7', worktreeDir: null, branch: null, prUrl: 'https://github.com/x/y/pull/1', error: null, model: 'opencode-go/glm', tokensInput: 100, tokensOutput: 20, tokensReasoning: 5, tokensCacheRead: 300, tokensCacheWrite: 0, costUsd: 0.5, createdAt: 1, updatedAt: 1, approvedAt: null, triggerMessageId: null, planMessageId: null, planPostedAt: null, lastPlan: null, resumeCount: 0, fixAttempts: 0, conflictNotified: false } as const;
   const sdata: SessionPageData = {
     sessionId: 'ses_job7', owner: { kind: 'job', job }, entries: normalizeTranscript([
       { id: 'e1', type: 'assistant', time: { created: 1 }, tokens: { input: 100, output: 1, reasoning: 0, cache: { read: 300, write: 0 } }, content: [
@@ -1601,7 +1601,17 @@ rmSync(dir, { recursive: true, force: true });
   const o1 = ownerDb.findSessionOwner(G, 'ses_own1');
   const o2 = ownerDb.findSessionOwner(G, 'ses_own2');
   check('findSessionOwner: job, chat, other guild, unknown', o1?.kind === 'job' && o2?.kind === 'chat' && ownerDb.findSessionOwner('other', 'ses_own1') === null && ownerDb.findSessionOwner(G, 'ses_nope') === null);
+  ownerDb.updateBuildJob(oj.id, { planSessionId: 'ses_plan1', sessionId: 'ses_build1' });
+  const oj2 = ownerDb.getBuildJob(oj.id);
+  const op = ownerDb.findSessionOwner(G, 'ses_plan1');
+  check('planSessionId round trip + findSessionOwner by plan and build session id', oj.planSessionId === null && oj2?.planSessionId === 'ses_plan1' && oj2.sessionId === 'ses_build1' && op?.kind === 'job' && op.job.id === oj.id && ownerDb.findSessionOwner(G, 'ses_build1')?.kind === 'job' && ownerDb.findSessionOwner(G, 'ses_own1') === null);
   ownerDb.close();
+  check('requestsParts: Plan link next to Session link', requestsHtml.includes('<a href="/dashboard/sessions/ses_plan7">Plan</a>') && !requestsParts({ jobs: [{ ...job, planSessionId: null }], totals: { jobs: 1, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chatTotals: { threads: 0, oneOffs: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [], page: 1, pages: 1, pageSize: 20, chatPage: 1, chatPages: 1, chatPageSize: 20, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } })['live-reqs']!.includes('>Plan<'));
+  check('sessionParts: header says plan session vs build session', sessionParts({ ...sdata, sessionId: 'ses_plan7' })['live-session-head']!.includes('Plan session') && sp['live-session-head']!.includes('Build session'));
+  const bp = buildPrompt({ request: 'add <ping>', title: 'Ping', plan: '- edit a.ts\n- test' });
+  check('buildPrompt: request, title, plan, approval', bp.includes('add <ping>') && bp.includes('Title: Ping') && bp.includes('Approved plan:\n- edit a.ts\n- test') && bp.includes('approved') && bp.includes('Implement it now') && !buildPrompt({ request: 'r', title: null, plan: 'p' }).includes('Title:'));
+  const us = addUsage({ input: 1, output: 2, reasoning: 3, cacheRead: 4, cacheWrite: 5, costUsd: 0.5 }, { input: 10, output: 20, reasoning: 30, cacheRead: 40, cacheWrite: 50, costUsd: 0.25 });
+  check('addUsage sums every field', us.input === 11 && us.output === 22 && us.reasoning === 33 && us.cacheRead === 44 && us.cacheWrite === 55 && us.costUsd === 0.75);
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

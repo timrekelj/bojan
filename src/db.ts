@@ -345,7 +345,8 @@ CREATE TABLE IF NOT EXISTS build_jobs (
   trigger_message_id TEXT,
   plan_message_id TEXT,
   plan_posted_at INTEGER,
-  last_plan TEXT
+  last_plan TEXT,
+  plan_session_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_build_jobs_status ON build_jobs (status);
 CREATE INDEX IF NOT EXISTS idx_build_jobs_thread ON build_jobs (thread_id);
@@ -383,6 +384,8 @@ export interface BuildJob {
   title: string | null;
   status: BuildJobStatus;
   sessionId: string | null;
+  /** The planner session, set once the build moved to a fresh session (then `sessionId` is the build session). */
+  planSessionId: string | null;
   worktreeDir: string | null;
   branch: string | null;
   prUrl: string | null;
@@ -543,6 +546,7 @@ function buildJobFromRow(r: Record<string, unknown>): BuildJob {
     title: (r.title as string | null) ?? null,
     status: r.status as BuildJobStatus,
     sessionId: (r.session_id as string | null) ?? null,
+    planSessionId: (r.plan_session_id as string | null) ?? null,
     worktreeDir: (r.worktree_dir as string | null) ?? null,
     branch: (r.branch as string | null) ?? null,
     prUrl: (r.pr_url as string | null) ?? null,
@@ -568,7 +572,7 @@ function buildJobFromRow(r: Record<string, unknown>): BuildJob {
 }
 
 /** Fields of a build job that callers may update (besides status/usage, which have their own methods). */
-export type BuildJobPatch = Partial<Pick<BuildJob, 'title' | 'sessionId' | 'worktreeDir' | 'branch' | 'prUrl' | 'error' | 'model' | 'approvedAt' | 'resumeCount' | 'fixAttempts' | 'conflictNotified' | 'triggerMessageId' | 'planMessageId' | 'planPostedAt' | 'lastPlan'>>;
+export type BuildJobPatch = Partial<Pick<BuildJob, 'title' | 'sessionId' | 'planSessionId' | 'worktreeDir' | 'branch' | 'prUrl' | 'error' | 'model' | 'approvedAt' | 'resumeCount' | 'fixAttempts' | 'conflictNotified' | 'triggerMessageId' | 'planMessageId' | 'planPostedAt' | 'lastPlan'>>;
 
 export type LogLevel = 'info' | 'warn' | 'error';
 export interface LogRow {
@@ -635,6 +639,7 @@ export class BotDatabase {
       ['plan_message_id', 'TEXT'],
       ['plan_posted_at', 'INTEGER'],
       ['last_plan', 'TEXT'],
+      ['plan_session_id', 'TEXT'],
     ] as const) {
       if (!queueCols.includes(name)) this.db.exec(`ALTER TABLE build_jobs ADD COLUMN ${name} ${ddl}`);
     }
@@ -1433,6 +1438,7 @@ export class BotDatabase {
     const cols: Record<keyof BuildJobPatch, string> = {
       title: 'title',
       sessionId: 'session_id',
+      planSessionId: 'plan_session_id',
       worktreeDir: 'worktree_dir',
       branch: 'branch',
       prUrl: 'pr_url',
@@ -1552,7 +1558,7 @@ export class BotDatabase {
 
   /** The build job or chat thread of `guildId` that owns an OpenCode session id; null for any other id. */
   findSessionOwner(guildId: string, sessionId: string): { kind: 'job'; job: BuildJob } | { kind: 'chat'; thread: ChatThread } | null {
-    const job = this.db.prepare('SELECT * FROM build_jobs WHERE guild_id = ? AND session_id = ? ORDER BY id DESC LIMIT 1').get(guildId, sessionId) as Record<string, unknown> | undefined;
+    const job = this.db.prepare('SELECT * FROM build_jobs WHERE guild_id = ? AND (session_id = ? OR plan_session_id = ?) ORDER BY id DESC LIMIT 1').get(guildId, sessionId, sessionId) as Record<string, unknown> | undefined;
     if (job) return { kind: 'job', job: buildJobFromRow(job) };
     const chat = this.db.prepare('SELECT * FROM chat_threads WHERE guild_id = ? AND session_id = ? ORDER BY last_active_at DESC LIMIT 1').get(guildId, sessionId) as Record<string, unknown> | undefined;
     return chat ? { kind: 'chat', thread: chatThreadFromRow(chat) } : null;

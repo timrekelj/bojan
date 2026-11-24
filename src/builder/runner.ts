@@ -19,13 +19,13 @@ import {
 } from './cards.js';
 import { ChatRunner } from './chat.js';
 import { LimitGate } from './limits.js';
-import { sessionUsageWithEstimate, type TokenUsage } from './pricing.js';
+import { addUsage, sessionUsageWithEstimate, type TokenUsage } from './pricing.js';
 import { NO_MENTIONS, withReply } from '../discord.js';
 import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
 import { formatBuildNote, type BuildNoteInfo, type PromptImage, MAX_IMAGES } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prInfoFromJson, type PrInfo, type PrRef } from './parse.js';
 import { BUILDING, DONE, FAILED, PLANNING, addReaction, removeOwnReaction } from './reactions.js';
-import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, formatPlannerMessage, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
+import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildPrompt, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, formatPlannerMessage, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
 
 const PLAN_TIMEOUT_MS = 15 * 60_000;
 const BUILD_TIMEOUT_MS = 90 * 60_000;
@@ -304,9 +304,14 @@ export class BuilderRunner {
   }
 
   private async saveUsage(job: BuildJob): Promise<void> {
-    if (!job.sessionId) return;
     try {
-      this.db.setBuildJobUsage(job.id, await sessionUsageWithEstimate(this.getAgent(), job.sessionId, this.db.getBuildJob(job.id)?.model));
+      // Re-read: the build session replaces `sessionId` (and `planSessionId` gets set) after `job` was loaded.
+      const cur = this.db.getBuildJob(job.id) ?? job;
+      if (!cur.sessionId) return;
+      const agent = this.getAgent();
+      let usage = await sessionUsageWithEstimate(agent, cur.sessionId, cur.model);
+      if (cur.planSessionId) usage = addUsage(usage, await sessionUsageWithEstimate(agent, cur.planSessionId, cur.model));
+      this.db.setBuildJobUsage(job.id, usage);
     } catch (err) {
       console.warn(`[builder] guild=${job.guildId} job=${job.id} could not read usage:`, err instanceof Error ? err.message : err);
     }
@@ -428,8 +433,11 @@ export class BuilderRunner {
       }
       return;
     }
-    // approved: build now when a slot is free (and nobody is waiting ahead), otherwise queue up
-    this.db.updateBuildJob(job.id, { approvedAt: Date.now() });
+    // approved: keep the latest full plan (the fresh build session is started from it, also for a queued launch);
+    // an approval reply with an empty plan keeps the last posted one.
+    this.db.updateBuildJob(job.id, { approvedAt: Date.now(), ...(plan.plan.trim() ? { lastPlan: plan.plan } : {}) });
+    // build now when a slot is free (and nobody is waiting ahead), otherwise queue up
+    job = this.db.getBuildJob(job.id) ?? job;
     const slotFree = freeSlots(this.db.countBuildingJobs(), this.db.getBuilderSettings().maxParallelBuilds) > 0;
     let limitNote: string | null = null;
     if (slotFree && this.db.listBuildJobsByStatus(['queued']).length === 0) {
@@ -503,10 +511,38 @@ export class BuilderRunner {
 
   private async runBuild(job: BuildJob): Promise<void> {
     const agent = this.getAgent();
-    await agent.switchAgent(job.sessionId as string, 'feature-build');
-    const reply = await agent.promptAndWait(job.sessionId as string, 'The user approved the plan above. Implement it now following your instructions.', BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(job));
+    const plan = job.lastPlan?.trim() ?? '';
+    let reply: AgentReply;
+    if (plan) {
+      // Fresh session: only the request and the approved plan, not the planner's conversation.
+      const build = job.planSessionId === null ? await this.startBuildSession(job) : job;
+      const prompt = buildPrompt({ request: job.request, title: job.title, plan });
+      reply = await agent.promptAndWait(build.sessionId as string, prompt, BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(build));
+    } else {
+      // No plan text to hand over: continue the planner session instead of building blind.
+      console.warn(`[builder] guild=${job.guildId} job=${job.id} no plan text stored, building in the planner session`);
+      await agent.switchAgent(job.sessionId as string, 'feature-build');
+      reply = await agent.promptAndWait(job.sessionId as string, 'The user approved the plan above. Implement it now following your instructions.', BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(job));
+    }
     await this.saveUsage(job);
     await this.handleBuildReply(this.db.getBuildJob(job.id) ?? job, reply);
+  }
+
+  /** New `feature-build` session in the job's worktree; the planner session moves to `planSessionId`. */
+  private async startBuildSession(job: BuildJob): Promise<BuildJob> {
+    const modelRef = job.model ?? this.db.getBuilderSettings().model;
+    const model = parseModelRef(modelRef);
+    if (!model) throw new Error(`Invalid model setting "${modelRef}" (expected provider/model)`);
+    const sessionId = await this.getAgent().createSession({
+      directory: job.worktreeDir as string,
+      agent: 'feature-build',
+      model,
+      title: `bojan job ${job.id} build`,
+      metadata: { jobId: job.id, threadId: job.threadId },
+    });
+    this.db.updateBuildJob(job.id, { planSessionId: job.sessionId, sessionId });
+    console.log(`[builder] guild=${job.guildId} job=${job.id} build session=${sessionId} (planner session=${job.sessionId}) model=${modelRef}`);
+    return this.db.getBuildJob(job.id) as BuildJob;
   }
 
   // ---- merge conflict fix ---------------------------------------------------
@@ -522,7 +558,7 @@ export class BuilderRunner {
     void this.inBackground(fresh, async (f) => {
       await this.post(f, buildConflictFixCard(f.title ?? ''), f.planMessageId);
       const agent = this.getAgent();
-      await agent.switchAgent(f.sessionId as string, 'feature-build');
+      if (f.planSessionId === null) await agent.switchAgent(f.sessionId as string, 'feature-build');
       const reply = await agent.promptAndWait(f.sessionId as string, conflictFixPrompt(f.prUrl as string), BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(f));
       await this.saveUsage(f);
       await this.handleFixReply(this.db.getBuildJob(f.id) ?? f, reply);
@@ -661,8 +697,13 @@ export class BuilderRunner {
         console.log(`[builder] guild=${job.guildId} job=${job.id} resuming ${kind} session (attempt ${current.resumeCount + 1})`);
         this.note(current, { event: 'resumed' });
         await this.post(current, buildResumingCard(current.title ?? ''));
-        if (kind === 'build') await agent.switchAgent(job.sessionId, 'feature-build');
-        const prompt = kind === 'build' ? (fix ? `${BUILD_RESUME_PROMPT} This run was resolving merge conflicts on ${job.prUrl}.` : BUILD_RESUME_PROMPT) : PLAN_RESUME_PROMPT;
+        // Old jobs (no planSessionId) build in the shared planner session, which still needs the agent switch.
+        if (kind === 'build' && current.planSessionId === null) await agent.switchAgent(job.sessionId, 'feature-build');
+        let prompt = kind === 'build' ? (fix ? `${BUILD_RESUME_PROMPT} This run was resolving merge conflicts on ${job.prUrl}.` : BUILD_RESUME_PROMPT) : PLAN_RESUME_PROMPT;
+        // The fresh build session was created but never got its first prompt: send the plan instead of a resume hint.
+        if (kind === 'build' && !fix && current.planSessionId !== null && !lastIsAssistant && reply.text === '' && current.lastPlan?.trim()) {
+          prompt = buildPrompt({ request: current.request, title: current.title, plan: current.lastPlan });
+        }
         reply = await agent.promptAndWait(job.sessionId, prompt, timeout, undefined, () => this.saveUsage(job));
         lastIsAssistant = true;
       }

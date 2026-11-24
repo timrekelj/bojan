@@ -25,6 +25,18 @@ export interface TokenUsage {
 
 export type TokenCounts = Omit<TokenUsage, 'costUsd'>;
 
+/** Field-wise sum of two usages (planner session + build session). */
+export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    reasoning: a.reasoning + b.reasoning,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    costUsd: a.costUsd + b.costUsd,
+  };
+}
+
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null);
 const obj = (v: unknown): Record<string, unknown> | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
 
