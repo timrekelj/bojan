@@ -61,6 +61,33 @@ export function levelTag(xp: number | null): string | null {
   return `lvl ${level} · ${fmt(intoLevel)}/${fmt(intoLevel + needed)}`;
 }
 
+/**
+ * Steam's level-badge tiers: the badge background moves in 10-level steps
+ * from slate to gold. Colours sampled (and rounded) from Steam's badge tiers.
+ */
+export const STEAM_LEVEL_BANDS: readonly { from: string; to: string }[] = [
+  { from: '#6b7c93', to: '#4a5b70' }, // 0–9   slate
+  { from: '#7f9c47', to: '#5c7730' }, // 10–19 olive green
+  { from: '#4f9ea8', to: '#2f7480' }, // 20–29 teal
+  { from: '#4f7fc0', to: '#2f5a93' }, // 30–39 blue
+  { from: '#7b5fb0', to: '#553e85' }, // 40–49 purple
+  { from: '#b05597', to: '#833a6e' }, // 50–59 pink
+  { from: '#c0564a', to: '#8f352c' }, // 60–69 red
+  { from: '#c07b3a', to: '#8f5522' }, // 70–79 orange
+  { from: '#c0a23a', to: '#8f7422' }, // 80–89 gold
+  { from: '#6d6d78', to: '#3c3c45' }, // 90–99 graphite
+];
+
+/** Top band (100+) is gold and caps there. */
+const STEAM_LEVEL_TOP = { from: '#d4af37', to: '#a3821f' };
+
+/** Badge gradient for a level: Steam-style tiered colours, 10 levels per band. */
+export function steamLevelColors(level: number): { from: string; to: string } {
+  const band = Number.isFinite(level) ? Math.floor(level / 10) : 0;
+  if (band >= STEAM_LEVEL_BANDS.length) return STEAM_LEVEL_TOP;
+  return STEAM_LEVEL_BANDS[Math.max(0, band)] ?? STEAM_LEVEL_TOP;
+}
+
 export interface XpAwardResult {
   /** XP gained from this message (5–10) or winning reaction (level + 1). */
   xpGained: number;
