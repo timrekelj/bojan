@@ -46,6 +46,12 @@ export function extractReply(messages: readonly MessageLike[]): AgentReply {
   return { id: m.id ?? null, text, finish: m.finish ?? null, error };
 }
 
+/** Newest-first list: is the newest `user`/`assistant` message an assistant one? (true when there is none) */
+export function lastConversationIsAssistant(messages: readonly MessageLike[]): boolean {
+  const m = messages.find((x) => x.type === 'user' || x.type === 'assistant');
+  return !m || m.type === 'assistant';
+}
+
 export interface GoLimitMeter {
   percent: number;
   limited: boolean;
@@ -230,6 +236,19 @@ export class OpenCodeAgent {
   async latestReply(sessionID: string): Promise<AgentReply> {
     const res = await this.client.message.list({ sessionID, order: 'desc', limit: 5, type: 'assistant' });
     return extractReply(res.data as unknown as MessageLike[]);
+  }
+
+  /**
+   * True when the newest user/assistant message is an assistant one (false: a prompt is still waiting
+   * for an answer). Other message types (idle, agent-switched, ...) are skipped.
+   */
+  async lastIsAssistant(sessionID: string): Promise<boolean> {
+    try {
+      const res = await this.client.message.list({ sessionID, order: 'desc', limit: 20 });
+      return lastConversationIsAssistant(res.data as unknown as MessageLike[]);
+    } catch {
+      return true;
+    }
   }
 
   async usage(sessionID: string): Promise<SessionUsage> {

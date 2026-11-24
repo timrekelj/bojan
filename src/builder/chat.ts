@@ -309,9 +309,9 @@ export class ChatRunner {
       await this.say(threadId, 'Building features is turned off right now, so I can\'t start that request.');
       return;
     }
-    const slot = this.builder.reserve();
+    const slot = this.builder.reserve(threadId);
     if (!slot.ok) {
-      await this.say(threadId, slot.active ? `I'm already working on another request. Follow it here: <#${slot.active.threadId}>` : "I'm already setting up another request. Please ask again in a minute.");
+      await this.say(threadId, slot.active ? "There's already a feature request in progress in this thread." : "I'm already setting up a request in this thread. Please ask again in a minute.");
       return;
     }
     try {
@@ -332,7 +332,7 @@ export class ChatRunner {
         context: formatTranscript(entries),
       });
     } catch (err) {
-      this.builder.release();
+      this.builder.release(threadId);
       console.error(`[chat] guild=${config.guildId} thread=${threadId} could not hand off to the builder:`, err);
       await this.say(threadId, 'Sorry, I could not start that request.');
     }

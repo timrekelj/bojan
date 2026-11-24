@@ -16,10 +16,11 @@ export async function handleBuilderMessage(message: Message, client: Client, db:
   if (message.guildId !== config.guildId || !client.user) return false;
 
   if (message.channel.isThread()) {
-    // A job in planning / awaiting_input / building owns the thread.
+    // A job in planning / awaiting_input / queued / building owns the thread.
     const job = db.getBuildJobByThread(message.channelId);
-    if (job && (job.status === 'planning' || job.status === 'awaiting_input' || job.status === 'building')) {
-      if (job.status === 'building') return true;
+    if (job && (job.status === 'planning' || job.status === 'awaiting_input' || job.status === 'queued' || job.status === 'building')) {
+      // Queued and building jobs are not talking to the planner: ignore thread messages.
+      if (job.status === 'queued' || job.status === 'building') return true;
       if (message.author.id !== job.requesterId && !isAdminMessage(message)) return true;
       const text = stripBotMention(message.content, client.user.id);
       if (text.length === 0) return true;

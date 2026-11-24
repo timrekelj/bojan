@@ -429,6 +429,8 @@ export function builderSection(d: DashboardData): string {
       <label class="switch"><input type="checkbox" name="enabled" value="1"${b.settings.enabled ? ' checked' : ''}><span class="track"></span><span><span class="lbl">Let admins turn chats into feature requests</span><span class="help">When an admin asks for a change to the bot, an OpenCode agent plans it, then opens a pull request.</span></span></label>
       <div class="field"><label for="builderModel">Build model</label><span class="help">provider/model, e.g. opencode-go/glm-5.3. Applies to new requests.</span>
         <input type="text" id="builderModel" name="model" value="${escapeHtml(b.settings.model)}" autocomplete="off" spellcheck="false"></div>
+      <div class="field"><label for="maxParallelBuilds">Parallel builds</label><span class="help">1–5. Requests can be planned in parallel; approved ones wait in a queue until fewer than this many are building. More than 1 risks merge conflicts between PRs (each conflicted PR gets one automatic fix attempt).</span>
+        <input type="number" id="maxParallelBuilds" name="maxParallelBuilds" min="1" max="5" step="1" value="${escapeHtml(String(b.settings.maxParallelBuilds))}"></div>
       ${limits}
       <div class="actions"><button type="submit">Save AI assistant settings</button> <a class="btn ghost" href="/dashboard/requests">View chats and feature requests</a></div>
     </form>
@@ -579,6 +581,8 @@ export interface RequestsPageData {
   pageSize: number;
   guildId: string;
   timezone: string;
+  /** job id -> 1-based place in the build queue (queued jobs only) */
+  queuePositions?: Record<number, number>;
   /** requesterId / startedBy -> cached display name */
   members: Record<string, string>;
   user: { username: string; avatar: string };
@@ -597,7 +601,9 @@ export function requestsPage(d: RequestsPageData): string {
     const thread = `https://discord.com/channels/${d.guildId}/${j.threadId}`;
     const pr = j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '—';
     const tokens = `${fmt(j.tokensInput)} / ${fmt(j.tokensOutput)} / ${fmt(j.tokensReasoning)} / ${fmt(j.tokensCacheRead + j.tokensCacheWrite)}`;
-    return `<tr><td>${j.id}</td><td>${escapeHtml(fmtDate(j.createdAt, d.timezone))}</td><td>${escapeHtml(d.members[j.requesterId] ?? j.requesterId)}</td><td class="url" title="${escapeHtml(j.request)}">${escapeHtml(title)}</td><td><span class="badge${j.status === 'failed' ? ' error' : ''}">${escapeHtml(j.status)}</span></td><td><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a></td><td>${pr}</td><td>${escapeHtml(tokens)}</td><td>${escapeHtml(fmtUsd(j.costUsd))}</td></tr>`;
+    const queuePos = j.status === 'queued' ? d.queuePositions?.[j.id] : undefined;
+    const statusLabel = queuePos ? `queued #${queuePos}` : j.status;
+    return `<tr><td>${j.id}</td><td>${escapeHtml(fmtDate(j.createdAt, d.timezone))}</td><td>${escapeHtml(d.members[j.requesterId] ?? j.requesterId)}</td><td class="url" title="${escapeHtml(j.request)}">${escapeHtml(title)}</td><td><span class="badge${j.status === 'failed' ? ' error' : ''}">${escapeHtml(statusLabel)}</span></td><td><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a></td><td>${pr}</td><td>${escapeHtml(tokens)}</td><td>${escapeHtml(fmtUsd(j.costUsd))}</td></tr>`;
   });
   const table =
     rows.length === 0

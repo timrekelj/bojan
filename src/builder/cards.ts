@@ -78,6 +78,35 @@ export function buildBuildingCard(title: string): BuilderMessage {
   return build(YELLOW, [`### Approved, building…`, title ? `**${title}**` : '', '-# This can take a while. I\'ll post here when the PR is ready.']);
 }
 
+export function buildQueuedCard(d: { title: string; position: number }): BuilderMessage {
+  return build(GREY, [
+    `### Approved — queued, #${d.position} in line`,
+    d.title ? `**${d.title}**` : '',
+    '-# Another build is running. I\'ll start this one as soon as a build slot is free.',
+  ]);
+}
+
+export function buildResumingCard(title: string): BuilderMessage {
+  return build(YELLOW, ['### Resuming after restart…', title ? `**${title}**` : '', '-# The bot restarted while this was running. I\'m picking it up again.']);
+}
+
+export function buildConflictFixCard(title: string): BuilderMessage {
+  return build(YELLOW, ['### PR conflicts with main — trying to fix', title ? `**${title}**` : '', '-# I\'m asking the build agent to merge main into the branch. This can take a while.']);
+}
+
+export function buildConflictFixedCard(d: { title: string; prUrl: string }): BuilderMessage {
+  return build(GREEN, ['### Conflicts resolved', d.title ? `**${d.title}**` : '', `[Pull request](${d.prUrl}) was updated and still merges automatically once checks pass.`]);
+}
+
+export function buildConflictManualCard(d: { title: string; prUrl: string; reason?: string }): BuilderMessage {
+  return build(RED, [
+    '### Could not resolve conflicts automatically',
+    d.title ? `**${d.title}**` : '',
+    `[Pull request](${d.prUrl}) conflicts with main and needs a manual merge.`,
+    d.reason ? clip(d.reason, 1500) : '',
+  ], 3);
+}
+
 export function buildPrOpenedCard(d: { title: string; prUrl: string; summary: string; usage?: UsageLike | null }): BuilderMessage {
   return build(GREEN, [
     '### Pull request opened',

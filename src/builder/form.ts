@@ -1,4 +1,4 @@
-import { DEFAULT_BUILDER_MODEL, DEFAULT_CHAT_MODEL, type BuilderSettings } from '../db.js';
+import { clampMaxParallel, DEFAULT_BUILDER_MODEL, DEFAULT_CHAT_MODEL, type BuilderSettings } from '../db.js';
 import { parseModelRef } from './parse.js';
 
 /** Empty -> default; invalid -> keep `current` and report; otherwise the trimmed value. */
@@ -9,12 +9,25 @@ function pickModel(raw: unknown, fallback: string, current: string, label: strin
   return { model: v, error: null };
 }
 
+/** Whole number clamped to 1–5; missing or not a number keeps `current`. */
+export function parseMaxParallel(raw: unknown, current: number): number {
+  const v = typeof raw === 'string' ? raw.trim() : '';
+  if (!/^-?\d+$/.test(v)) return current;
+  return clampMaxParallel(Number(v));
+}
+
 /** Parse the dashboard "AI assistant" form. An invalid model keeps `current` (the saved value). */
 export function parseBuilderForm(form: Record<string, unknown>, current: BuilderSettings): { settings: BuilderSettings; modelError: string | null } {
   const build = pickModel(form.model, DEFAULT_BUILDER_MODEL, current.model, 'Build model');
   const chat = pickModel(form.chatModel, DEFAULT_CHAT_MODEL, current.chatModel, 'Chat model');
   return {
-    settings: { enabled: form.enabled === '1', model: build.model, chatEnabled: form.chatEnabled === '1', chatModel: chat.model },
+    settings: {
+      enabled: form.enabled === '1',
+      model: build.model,
+      chatEnabled: form.chatEnabled === '1',
+      chatModel: chat.model,
+      maxParallelBuilds: parseMaxParallel(form.maxParallelBuilds, current.maxParallelBuilds),
+    },
     modelError: build.error ?? chat.error,
   };
 }

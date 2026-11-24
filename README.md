@@ -193,6 +193,13 @@ lets a build agent implement it, push a `bot/<job>` branch and open a PR with au
 protection gate the merge; Dokploy then redeploys from `main`. When the job is finished the thread returns to chat.
 Non-admins are told that only admins can request changes.
 
+Requests are planned in parallel (one request per thread at a time). Approved requests build up to **Parallel builds**
+at once (dashboard, 1–5, default 1; more than 1 risks PR conflicts); the rest wait in a FIFO queue and the thread
+shows "queued, #N in line". If the bot or agent container restarts mid-run (Dokploy redeploys both on every merge),
+the interrupted agent session is resumed (up to 2 times) instead of failing. If an open PR gets a merge conflict
+with `main`, the build agent gets one automatic attempt to merge `main` into the branch (no force push); if that
+fails, the thread is asked to merge manually.
+
 ```
 Discord thread <-> bot --HTTP (Basic auth)--> opencode container (feature-plan / feature-build agents)
                                                   |  git worktree of this repo, gh CLI

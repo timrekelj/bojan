@@ -105,8 +105,10 @@ export function replaceBotMention(content: string, botId: string, botName: strin
 export interface BuildNoteInfo {
   jobId: number;
   title: string | null;
-  event: 'approved' | 'pr_opened' | 'merged' | 'closed' | 'failed' | 'cancelled';
+  event: 'approved' | 'queued' | 'resumed' | 'conflict_fix_started' | 'conflict_fixed' | 'conflict_failed' | 'pr_opened' | 'merged' | 'closed' | 'failed' | 'cancelled';
   plan?: string;
+  /** 1-based place in the build queue ('queued'). */
+  position?: number;
   prUrl?: string | null;
   summary?: string;
   reason?: string;
@@ -120,6 +122,16 @@ export function formatBuildNote(n: BuildNoteInfo): string {
   switch (n.event) {
     case 'approved':
       return `${head} plan approved, building now.${n.plan ? ` Plan:\n${clip(n.plan.trim(), 2500)}` : ''}`;
+    case 'queued':
+      return `${head} plan approved, queued for a build slot (#${n.position ?? 1} in line).${n.plan ? ` Plan:\n${clip(n.plan.trim(), 2500)}` : ''}`;
+    case 'resumed':
+      return `${head} the bot restarted while this was running; resuming the agent.`;
+    case 'conflict_fix_started':
+      return `${head} PR has merge conflicts with main; trying to fix them automatically.${pr}`;
+    case 'conflict_fixed':
+      return `${head} merge conflicts fixed.${pr}`;
+    case 'conflict_failed':
+      return `${head} could not fix the merge conflicts automatically, needs a manual merge.${pr}${n.reason ? ` ${clip(n.reason.replace(/\s+/g, ' ').trim(), 400)}` : ''}`;
     case 'pr_opened':
       return `${head} PR opened${pr}${n.summary ? ` — ${clip(n.summary.replace(/\s+/g, ' ').trim(), 600)}` : ''}`;
     case 'merged':
