@@ -10,7 +10,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   the message author (reactions *received*) and the reactor (reactions
   *given*), plus the emoji. Tables: `messages`, `reactions`, `settings`,
   `embed_log`, `bot_state`, `activity_sessions`, `voice_sessions`,
-  `user_xp`. Reactions can also be backfilled with `/backfill`.
+  `user_xp`. Reactions can also be backfilled with `/backfill messages`.
 - **Presence / activity tracking** — with the privileged **Presence Intent**
   enabled, the bot records what members are playing/listening to/watching
   (e.g. "Playing World of Warcraft") as sessions in the `activity_sessions`
@@ -32,7 +32,9 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   than the last (level 1 at 100 XP, 2 at 300, 3 at 600, …), and on a
   level-up the bot posts a Components V2 card (no ping) to the configured
   channel. On by default; the channel is picked in the **dashboard**
-  (settings section) — until one is set, XP is tracked silently.
+  (settings section) — until one is set, XP is tracked silently. XP is not
+  retroactive by itself, but admins can run the one-time `/backfill xp` to
+  grant 10 XP for every already-recorded message.
 - **Weekly stats message** — on a configurable day/hour (per guild timezone,
   weeks run Monday–Sunday) the bot posts last week's recap to a configured
   channel: total messages and reactions, top-5 messagers, top-5 channels,
@@ -66,13 +68,18 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
     count, average session, per-day bar chart for the last 7 days, breakdown
     by details/status e.g. LoL game mode, recent sessions). `name` autocompletes
     from recorded activities (games, apps, custom statuses like `opencode`)
-  - `/backfill [channel] [days]` — (admin) seed the database from channel
-    history: messages **and** their reactions (it pages through the users who
-    reacted to each message, so this is slower than a plain message backfill
-    and rate-limited by Discord on big servers; use `days` to bound it).
-    All text channels by default. Safe to re-run — messages and reactions are
-    deduplicated by Discord id, so anything already counted live is not
+  - `/backfill messages [channel] [days]` — (admin) seed the database from
+    channel history: messages **and** their reactions (it pages through the
+    users who reacted to each message, so this is slower than a plain message
+    backfill and rate-limited by Discord on big servers; use `days` to bound
+    it). All text channels by default. Safe to re-run — messages and reactions
+    are deduplicated by Discord id, so anything already counted live is not
     counted twice. Progress is posted ephemerally while it runs.
+  - `/backfill xp` — (admin, one-time) grant 10 XP for every message already
+    in the database, so levels reflect full history instead of only counting
+    from when the bot started tracking XP. Refuses to run twice; if nothing
+    is recorded yet it says so (run `/backfill messages` first). No level-up
+    cards are posted for the granted XP.
   - All settings (including weekly stats and free games) are configured in the
     dashboard only; there are no settings slash commands.
 - **Admin dashboard** — a Hono web server (same process) with **Discord OAuth2

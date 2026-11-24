@@ -9,6 +9,9 @@ export const XP_MAX = 10;
 /** Per-user cooldown between XP awards. */
 export const XP_COOLDOWN_MS = 30_000;
 
+/** XP granted per already-recorded message by the one-time `/backfill xp`. */
+export const XP_BACKFILL_PER_MESSAGE = 10;
+
 const NO_MENTIONS = { parse: [] as never[] };
 
 /** Random XP per message, 5–10 inclusive. `rand` is injectable for tests. */

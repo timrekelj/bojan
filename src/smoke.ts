@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
-import { awardMessageXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, rollXp, totalXpForLevel, XP_COOLDOWN_MS } from './levels.js';
+import { awardMessageXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, levelUpText, rollXp, totalXpForLevel, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
@@ -152,6 +152,30 @@ check(
   (lvlMsg.flags & MessageFlags.IsComponentsV2) !== 0 && lvlMsg.components.length === 1 && lvlMsg.allowedMentions.parse.length === 0 && lvlJson.includes('<@u1>') && lvlJson.includes('level 3') && !('embeds' in lvlMsg),
 );
 check('level-up text fits the text budget', levelUpText(lvlData).length < 4000);
+
+// ---- one-time XP backfill (/backfill xp) ---------------------------------
+// G has 21 recorded messages (alice 10, bob 5, carol 3, dave 1, erin 2).
+// alice gets 50 earned XP first, gamer/speedrunner have roll XP but no messages.
+db.recordMessage('guild2', 'c1', 'alice', now, 'g2a');
+db.recordMessage('guild2', 'c1', 'alice', now + 1, 'g2b');
+const bfTs = now + 3 * XP_COOLDOWN_MS;
+db.addUserXp(G, 'alice', 50, bfTs);
+const gamerXpBefore = db.getUserXp(G, 'gamer')?.xp ?? 0;
+const bf = db.backfillMessageXp(G, bfTs);
+check('xp backfill counts all recorded messages', bf.members === 5 && bf.messages === 21 && bf.xpGranted === 21 * XP_BACKFILL_PER_MESSAGE, JSON.stringify(bf));
+check('xp backfill adds on top of earned xp', db.getUserXp(G, 'alice')?.xp === 50 + 10 * XP_BACKFILL_PER_MESSAGE, `${db.getUserXp(G, 'alice')?.xp}`);
+check(
+  'xp backfill creates rows and never touches xp earned without messages',
+  db.getUserXp(G, 'bob')?.xp === 5 * XP_BACKFILL_PER_MESSAGE && db.getUserXp(G, 'erin')?.xp === 2 * XP_BACKFILL_PER_MESSAGE && db.getUserXp(G, 'gamer')?.xp === gamerXpBefore,
+  JSON.stringify(db.getUserXpTotals(G)),
+);
+check('xp backfill sets last_xp_at', db.getUserXp(G, 'bob')?.lastXpAt === bfTs, `${db.getUserXp(G, 'bob')?.lastXpAt}`);
+check('xp backfill stays within its guild', db.getUserXp('guild2', 'alice') === null, JSON.stringify(db.getUserXpTotals('guild2')));
+const bfEmpty = db.backfillMessageXp('guild-empty', bfTs);
+check('xp backfill without recorded messages is a no-op', bfEmpty.members === 0 && bfEmpty.messages === 0 && bfEmpty.xpGranted === 0 && db.getUserXp('guild-empty', 'alice') === null, JSON.stringify(bfEmpty));
+// The one-time guard the command handler checks before running.
+db.setState(`xpbackfill:${G}`, 'done');
+check('xp backfill one-time flag roundtrip', db.getState(`xpbackfill:${G}`) === 'done');
 
 db.logEmbed({ guildId: G, channelId: 'c1', messageId: 'm1', url: 'https://x.com/a/status/1', provider: 'x', ts: now });
 check('embed log', db.recentEmbeds(G, 10).length === 1 && db.recentEmbeds(G, 10)[0]?.provider === 'x');
