@@ -12,6 +12,7 @@ import {
   formatTranscript,
   parseChatReply,
   replaceBotMention,
+  withLanguageRule,
   withNotes,
   type ChatMessageInfo,
 } from './chat-parse.js';
@@ -92,6 +93,11 @@ export class ChatRunner {
     return this.client.user?.displayName ?? 'bojan';
   }
 
+  /** Languages the chat assistant must reply in; read per turn so dashboard changes apply to ongoing threads. */
+  private chatLanguages(): string[] {
+    return this.db.getBuilderSettings().chatLanguages;
+  }
+
   private async newSession(title: string): Promise<{ sessionId: string; modelRef: string }> {
     const modelRef = this.db.getBuilderSettings().chatModel;
     const model = parseModelRef(modelRef);
@@ -161,6 +167,7 @@ export class ChatRunner {
       if (ref) referenced = messageInfo(ref, bot.id, this.botName());
     }
     const channelName = 'name' in message.channel ? (message.channel.name as string | null) : null;
+    // No language wrap here: the pending prompt goes through oneOff() or runTurn(), which both add the rule.
     const prompt = formatInitialPrompt({ channelName, trigger, referenced });
     const pending: Pending = { text: prompt, authorId: message.author.id, admin: isAdminMessage(message), directed: true };
 
@@ -255,7 +262,7 @@ export class ChatRunner {
     const stopTyping = this.typing(threadId);
     try {
       const notes = this.db.pendingChatNotes(threadId);
-      const prompt = withNotes(notes, batch.map((b) => b.text).join('\n'));
+      const prompt = withNotes(notes, withLanguageRule(batch.map((b) => b.text).join('\n'), this.chatLanguages()));
       const reply = await this.getAgent().promptAndWait(chat.sessionId, prompt, CHAT_TIMEOUT_MS);
       this.db.consumeChatNotes(threadId, notes.length);
       await this.saveUsage(threadId, chat.sessionId, chat.model);
@@ -277,7 +284,7 @@ export class ChatRunner {
     try {
       const { sessionId, modelRef } = await this.newSession(key);
       this.db.createChatThread({ threadId: key, guildId: config.guildId, channelId: message.channel.isThread() ? (message.channel.parentId ?? threadId) : threadId, sessionId, startedBy: message.author.id, model: modelRef, oneOff: true });
-      const reply = await this.getAgent().promptAndWait(sessionId, pending.text, CHAT_TIMEOUT_MS);
+      const reply = await this.getAgent().promptAndWait(sessionId, withLanguageRule(pending.text, this.chatLanguages()), CHAT_TIMEOUT_MS);
       await this.saveUsage(key, sessionId, modelRef);
       if (reply.error) throw new Error(`The agent reported an error: ${reply.error}`);
       await this.deliver(threadId, reply.text, [pending]);

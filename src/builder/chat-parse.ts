@@ -149,3 +149,18 @@ export function formatBuildNote(n: BuildNoteInfo): string {
 export function withNotes(notes: readonly string[], prompt: string): string {
   return notes.length === 0 ? prompt : `${notes.join('\n')}\n\n${prompt}`;
 }
+
+/**
+ * Standing rule naming the only languages the chat assistant may reply in. An empty language list
+ * (the default) means no constraint and produces no rule.
+ */
+export function languageDirective(languages: readonly string[]): string {
+  if (languages.length === 0) return '';
+  return `[language rule] The admins limited the languages you may use. Whatever language a member writes in, your visible reply must be in one of these languages only: ${languages.join(', ')}.`;
+}
+
+/** Prepend the language rule (when any) to a chat prompt. */
+export function withLanguageRule(prompt: string, languages: readonly string[]): string {
+  const rule = languageDirective(languages);
+  return rule.length === 0 ? prompt : `${rule}\n\n${prompt}`;
+}

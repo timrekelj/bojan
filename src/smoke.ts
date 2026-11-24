@@ -29,9 +29,9 @@ import {
 } from './builder/cards.js';
 import { extractReply, lastConversationIsAssistant } from './builder/opencode.js';
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
-import { parseBuilderForm } from './builder/form.js';
+import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
 import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, pickJobsToStart, queuePosition, sortQueue } from './builder/queue.js';
-import { chatThreadNameFor, chunkMessage, formatChatMessage, formatInitialPrompt, formatTranscript, parseChatReply, replaceBotMention, formatBuildNote, withNotes } from './builder/chat-parse.js';
+import { chatThreadNameFor, chunkMessage, formatChatMessage, formatInitialPrompt, formatTranscript, languageDirective, parseChatReply, replaceBotMention, formatBuildNote, withLanguageRule, withNotes } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
@@ -646,13 +646,18 @@ rmSync(dir, { recursive: true, force: true });
 
   // DB: build_jobs + settings
   const bdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-builder-')), 'b.db'));
-  check('builder settings defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && !bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash');
-  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ', maxParallelBuilds: 3 });
-  check('builder settings roundtrip', bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'prov/model' && bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'p/chat');
-  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', maxParallelBuilds: 99 });
-  check('builder settings: empty models fall back to defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash');
-  check('builder settings: maxParallelBuilds default 1, roundtrip, clamped', new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-mp-')), 'm.db')).getBuilderSettings().maxParallelBuilds === 1 && bdb.getBuilderSettings().maxParallelBuilds === 5);
+  check('builder settings defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && !bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash' && bdb.getBuilderSettings().chatLanguages.length === 0);
+  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ', chatEnabled: true, chatModel: ' p/chat ', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 3 });
+  check('builder settings roundtrip', bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'prov/model' && bdb.getBuilderSettings().chatEnabled && bdb.getBuilderSettings().chatModel === 'p/chat' && JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['Slovenian', 'English']));
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatLanguages: [], maxParallelBuilds: 99 });
+  check('builder settings: empty models fall back to defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3' && bdb.getBuilderSettings().chatModel === 'opencode-go/glm-5.3-flash' && bdb.getBuilderSettings().chatLanguages.length === 0);
+  bdb.setState('chat:languages', 'not json');
+  check('chat languages: invalid state means no constraint', bdb.getBuilderSettings().chatLanguages.length === 0);
+  bdb.setState('chat:languages', '["ok", 7, " "]');
+  check('chat languages: only valid strings survive the state roundtrip', JSON.stringify(bdb.getBuilderSettings().chatLanguages) === JSON.stringify(['ok']));
+  bdb.setBuilderSettings({ enabled: false, model: '', chatEnabled: false, chatModel: '', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 99 });
   check('no active job initially', bdb.activeBuildJobInThread('t1') === null && bdb.countBuildJobs(G) === 0);
+  check('builder settings: maxParallelBuilds default 1, roundtrip, clamped', new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-mp-')), 'm.db')).getBuilderSettings().maxParallelBuilds === 1 && bdb.getBuilderSettings().maxParallelBuilds === 5);
   const j1 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c1', requesterId: 'u1', request: 'add ping' }, 1000);
   check('createBuildJob defaults', j1.id > 0 && j1.status === 'planning' && j1.tokensInput === 0 && j1.costUsd === 0 && j1.sessionId === null && j1.createdAt === 1000);
   check('getBuildJobByThread / active', bdb.getBuildJobByThread('t1')?.id === j1.id && bdb.getBuildJobByThread('nope') === null && bdb.activeBuildJobInThread('t1')?.id === j1.id);
@@ -735,11 +740,15 @@ rmSync(dir, { recursive: true, force: true });
   check('goPriceFor: only opencode-go/*', goPriceFor('opencode-go/glm-5.3', prices) === glm && goPriceFor('anthropic/glm-5.3', prices) === null && goPriceFor('opencode-go/none', prices) === null && goPriceFor(null, prices) === null);
 
   // Settings form
-  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash', maxParallelBuilds: 1 };
-  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c', maxParallelBuilds: 1 }, modelError: null }));
+  const cur = { enabled: false, model: 'opencode-go/glm-5.3', chatEnabled: false, chatModel: 'opencode-go/glm-5.3-flash', chatLanguages: [] as string[], maxParallelBuilds: 1 };
+  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ', chatEnabled: '1', chatModel: 'q/c' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m', chatEnabled: true, chatModel: 'q/c', chatLanguages: [], maxParallelBuilds: 1 }, modelError: null }));
   check('parseBuilderForm: invalid model keeps current + error', (() => { const r = parseBuilderForm({ model: 'nomodel' }, { ...cur, enabled: true, model: 'x/y' }); return !r.settings.enabled && r.settings.model === 'x/y' && r.modelError !== null; })());
   check('parseBuilderForm: invalid chat model keeps current + error', (() => { const r = parseBuilderForm({ chatEnabled: '1', chatModel: 'bad model/x' }, { ...cur, chatModel: 'x/chat' }); return r.settings.chatEnabled && r.settings.chatModel === 'x/chat' && r.modelError !== null && r.modelError.startsWith('Chat model'); })());
   check('parseBuilderForm: empty -> defaults', (() => { const r = parseBuilderForm({ enabled: '1', model: '', chatModel: '' }, { ...cur, model: 'x/y', chatModel: 'x/z' }); return r.settings.model === 'opencode-go/glm-5.3' && r.settings.chatModel === 'opencode-go/glm-5.3-flash' && !r.settings.chatEnabled; })());
+  check('parseChatLanguages: trims, dedupes case-insensitively, drops empties', JSON.stringify(parseChatLanguages(' Slovenian ,english,, SLOVENIAN , English ')) === JSON.stringify(['Slovenian', 'english']) && JSON.stringify(parseChatLanguages(['a', 'b, a'])) === JSON.stringify(['a', 'b']));
+  check('parseChatLanguages: missing/garbage -> none; whitespace flattened; clipped at 30', parseChatLanguages(undefined).length === 0 && parseChatLanguages(7).length === 0 && parseChatLanguages('  neo   latin  ').join('|') === 'neo latin' && parseChatLanguages('x'.repeat(50))[0]!.length === 30);
+  check('parseChatLanguages: capped at 8 entries', parseChatLanguages(Array.from({ length: 12 }, (_, i) => `l${i}`).join(',')).length === 8 && parseChatLanguages(Array.from({ length: 12 }, (_, i) => `l${i}`)).length === 8);
+  check('parseBuilderForm: chat languages parsed from the form', parseBuilderForm({ chatLanguages: ' Slovenian, English ' }, cur).settings.chatLanguages.join(',') === 'Slovenian,English');
 
   check('parseBuilderForm: maxParallelBuilds parsed, clamped to 1..5, invalid keeps current', parseBuilderForm({ maxParallelBuilds: '3' }, cur).settings.maxParallelBuilds === 3 && parseBuilderForm({ maxParallelBuilds: '0' }, cur).settings.maxParallelBuilds === 1 && parseBuilderForm({ maxParallelBuilds: '-4' }, cur).settings.maxParallelBuilds === 1 && parseBuilderForm({ maxParallelBuilds: '99' }, cur).settings.maxParallelBuilds === 5 && parseBuilderForm({ maxParallelBuilds: 'abc' }, { ...cur, maxParallelBuilds: 4 }).settings.maxParallelBuilds === 4 && parseBuilderForm({ maxParallelBuilds: '2.5' }, { ...cur, maxParallelBuilds: 4 }).settings.maxParallelBuilds === 4 && parseBuilderForm({}, { ...cur, maxParallelBuilds: 2 }).settings.maxParallelBuilds === 2);
 
@@ -782,6 +791,8 @@ rmSync(dir, { recursive: true, force: true });
   check('formatBuildNote: approved includes plan, others', formatBuildNote({ jobId: 1, title: null, event: 'approved', plan: '- do x' }).includes('plan approved, building now. Plan:\n- do x') && formatBuildNote({ jobId: 1, title: 'T', event: 'merged', prUrl: 'u' }) === '[build update] job #1 "T": PR merged u' && formatBuildNote({ jobId: 1, title: 'T', event: 'closed' }).includes('closed without merging') && formatBuildNote({ jobId: 1, title: 'T', event: 'failed', reason: 'boom\nbad' }) === '[build update] job #1 "T": failed — boom bad' && formatBuildNote({ jobId: 1, title: 'T', event: 'cancelled' }).endsWith('cancelled'));
   check('formatBuildNote: long plan clipped', formatBuildNote({ jobId: 1, title: 'T', event: 'approved', plan: 'p'.repeat(5000) }).length < 2700);
   check('withNotes', withNotes([], 'hi') === 'hi' && withNotes(['a', 'b'], 'hi') === 'a\nb\n\nhi');
+  check('languageDirective: empty list -> no rule', languageDirective([]) === '' && languageDirective(['Slovenian']).length > 0);
+  check('withLanguageRule: untouched without languages, rule first otherwise', withLanguageRule('hi', []) === 'hi' && withLanguageRule('hi', ['Slovenian', 'English']).startsWith('[language rule]') && withLanguageRule('hi', ['Slovenian', 'English']).includes('Slovenian, English') && withLanguageRule('hi', ['Slovenian', 'English']).endsWith('\n\nhi'));
   check('replaceBotMention', replaceBotMention('<@123> and <@!123> hi <@456>', '123', 'bojan') === '@bojan and @bojan hi <@456>');
 
 
