@@ -247,7 +247,109 @@ CREATE TABLE IF NOT EXISTS voice_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_voice_guild_user ON voice_sessions (guild_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_voice_open ON voice_sessions (guild_id, user_id, ended_at);
+
+CREATE TABLE IF NOT EXISTS build_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL UNIQUE,
+  channel_id TEXT NOT NULL,
+  requester_id TEXT NOT NULL,
+  request TEXT NOT NULL,
+  title TEXT,
+  status TEXT NOT NULL,
+  session_id TEXT,
+  worktree_dir TEXT,
+  branch TEXT,
+  pr_url TEXT,
+  error TEXT,
+  model TEXT,
+  tokens_input INTEGER NOT NULL DEFAULT 0,
+  tokens_output INTEGER NOT NULL DEFAULT 0,
+  tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+  tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+  tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_build_jobs_status ON build_jobs (status);
 `;
+
+export type BuildJobStatus = 'planning' | 'awaiting_input' | 'building' | 'pr_open' | 'merged' | 'closed' | 'failed' | 'cancelled';
+
+export interface BuildJob {
+  id: number;
+  guildId: string;
+  threadId: string;
+  channelId: string;
+  requesterId: string;
+  request: string;
+  title: string | null;
+  status: BuildJobStatus;
+  sessionId: string | null;
+  worktreeDir: string | null;
+  branch: string | null;
+  prUrl: string | null;
+  error: string | null;
+  model: string | null;
+  tokensInput: number;
+  tokensOutput: number;
+  tokensReasoning: number;
+  tokensCacheRead: number;
+  tokensCacheWrite: number;
+  costUsd: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface BuildUsage {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd: number;
+}
+
+export interface BuilderSettings {
+  enabled: boolean;
+  model: string; // "providerID/modelID"
+}
+
+export const DEFAULT_BUILDER_MODEL = 'opencode-go/glm-5.3';
+
+/** Statuses in which a job occupies the single builder slot. */
+export const ACTIVE_BUILD_STATUSES: readonly BuildJobStatus[] = ['planning', 'awaiting_input', 'building'];
+
+function buildJobFromRow(r: Record<string, unknown>): BuildJob {
+  return {
+    id: r.id as number,
+    guildId: r.guild_id as string,
+    threadId: r.thread_id as string,
+    channelId: r.channel_id as string,
+    requesterId: r.requester_id as string,
+    request: r.request as string,
+    title: (r.title as string | null) ?? null,
+    status: r.status as BuildJobStatus,
+    sessionId: (r.session_id as string | null) ?? null,
+    worktreeDir: (r.worktree_dir as string | null) ?? null,
+    branch: (r.branch as string | null) ?? null,
+    prUrl: (r.pr_url as string | null) ?? null,
+    error: (r.error as string | null) ?? null,
+    model: (r.model as string | null) ?? null,
+    tokensInput: r.tokens_input as number,
+    tokensOutput: r.tokens_output as number,
+    tokensReasoning: r.tokens_reasoning as number,
+    tokensCacheRead: r.tokens_cache_read as number,
+    tokensCacheWrite: r.tokens_cache_write as number,
+    costUsd: r.cost_usd as number,
+    createdAt: r.created_at as number,
+    updatedAt: r.updated_at as number,
+  };
+}
+
+/** Fields of a build job that callers may update (besides status/usage, which have their own methods). */
+export type BuildJobPatch = Partial<Pick<BuildJob, 'title' | 'sessionId' | 'worktreeDir' | 'branch' | 'prUrl' | 'error' | 'model'>>;
 
 export type LogLevel = 'info' | 'warn' | 'error';
 export interface LogRow {
@@ -296,6 +398,11 @@ export class BotDatabase {
     const freeCols = this.db.prepare('PRAGMA table_info(free_settings)').all() as { name: string }[];
     if (!freeCols.some((c) => c.name === 'include_beta')) {
       this.db.exec('ALTER TABLE free_settings ADD COLUMN include_beta INTEGER NOT NULL DEFAULT 0');
+    }
+    // Migration for build_jobs created before the model column existed.
+    const jobCols = this.db.prepare('PRAGMA table_info(build_jobs)').all() as { name: string }[];
+    if (!jobCols.some((c) => c.name === 'model')) {
+      this.db.exec('ALTER TABLE build_jobs ADD COLUMN model TEXT');
     }
     // Console support was removed: drop the now-unused column (after the include_beta migration above).
     if (freeCols.some((c) => c.name === 'include_console')) {
@@ -877,6 +984,110 @@ export class BotDatabase {
 
   setState(key: string, value: string): void {
     this.db.prepare('INSERT INTO bot_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  }
+
+  // ---- self-building (build_jobs) -------------------------------------
+
+  getBuilderSettings(): BuilderSettings {
+    const model = this.getState('builder:model');
+    return {
+      enabled: this.getState('builder:enabled') === '1',
+      model: model && model.length > 0 ? model : DEFAULT_BUILDER_MODEL,
+    };
+  }
+
+  setBuilderSettings(s: BuilderSettings): void {
+    this.setState('builder:enabled', s.enabled ? '1' : '0');
+    this.setState('builder:model', s.model.trim().length > 0 ? s.model.trim() : DEFAULT_BUILDER_MODEL);
+  }
+
+  createBuildJob(j: { guildId: string; threadId: string; channelId: string; requesterId: string; request: string }, now = Date.now()): BuildJob {
+    const res = this.db
+      .prepare(`INSERT INTO build_jobs (guild_id, thread_id, channel_id, requester_id, request, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'planning', ?, ?)`)
+      .run(j.guildId, j.threadId, j.channelId, j.requesterId, j.request, now, now);
+    return this.getBuildJob(Number(res.lastInsertRowid)) as BuildJob;
+  }
+
+  getBuildJob(id: number): BuildJob | null {
+    const row = this.db.prepare('SELECT * FROM build_jobs WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? buildJobFromRow(row) : null;
+  }
+
+  getBuildJobByThread(threadId: string): BuildJob | null {
+    const row = this.db.prepare('SELECT * FROM build_jobs WHERE thread_id = ?').get(threadId) as Record<string, unknown> | undefined;
+    return row ? buildJobFromRow(row) : null;
+  }
+
+  setBuildJobStatus(id: number, status: BuildJobStatus, now = Date.now()): void {
+    this.db.prepare('UPDATE build_jobs SET status = ?, updated_at = ? WHERE id = ?').run(status, now, id);
+  }
+
+  updateBuildJob(id: number, patch: BuildJobPatch, now = Date.now()): void {
+    const cols: Record<keyof BuildJobPatch, string> = {
+      title: 'title',
+      sessionId: 'session_id',
+      worktreeDir: 'worktree_dir',
+      branch: 'branch',
+      prUrl: 'pr_url',
+      error: 'error',
+      model: 'model',
+    };
+    const sets: string[] = [];
+    const values: (string | null)[] = [];
+    for (const key of Object.keys(cols) as (keyof BuildJobPatch)[]) {
+      if (patch[key] === undefined) continue;
+      sets.push(`${cols[key]} = ?`);
+      values.push(patch[key] ?? null);
+    }
+    if (sets.length === 0) return;
+    this.db.prepare(`UPDATE build_jobs SET ${sets.join(', ')}, updated_at = ? WHERE id = ?`).run(...values, now, id);
+  }
+
+  /** Overwrite the stored usage with the session totals reported by OpenCode. */
+  setBuildJobUsage(id: number, u: BuildUsage, now = Date.now()): void {
+    this.db
+      .prepare(`UPDATE build_jobs SET tokens_input = ?, tokens_output = ?, tokens_reasoning = ?, tokens_cache_read = ?,
+                tokens_cache_write = ?, cost_usd = ?, updated_at = ? WHERE id = ?`)
+      .run(u.input, u.output, u.reasoning, u.cacheRead, u.cacheWrite, u.costUsd, now, id);
+  }
+
+  /** The job holding the single builder slot (planning / awaiting_input / building), if any. */
+  activeBuildJob(guildId: string): BuildJob | null {
+    const marks = ACTIVE_BUILD_STATUSES.map(() => '?').join(', ');
+    const row = this.db
+      .prepare(`SELECT * FROM build_jobs WHERE guild_id = ? AND status IN (${marks}) ORDER BY id DESC LIMIT 1`)
+      .get(guildId, ...ACTIVE_BUILD_STATUSES) as Record<string, unknown> | undefined;
+    return row ? buildJobFromRow(row) : null;
+  }
+
+  listBuildJobsByStatus(statuses: BuildJobStatus[]): BuildJob[] {
+    if (statuses.length === 0) return [];
+    const marks = statuses.map(() => '?').join(', ');
+    const rows = this.db.prepare(`SELECT * FROM build_jobs WHERE status IN (${marks}) ORDER BY id`).all(...statuses) as Record<string, unknown>[];
+    return rows.map(buildJobFromRow);
+  }
+
+  /** Newest first, for the dashboard. */
+  recentBuildJobs(guildId: string, limit: number, offset = 0): BuildJob[] {
+    const rows = this.db
+      .prepare('SELECT * FROM build_jobs WHERE guild_id = ? ORDER BY id DESC LIMIT ? OFFSET ?')
+      .all(guildId, limit, offset) as Record<string, unknown>[];
+    return rows.map(buildJobFromRow);
+  }
+
+  countBuildJobs(guildId: string): number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM build_jobs WHERE guild_id = ?').get(guildId) as { n: number }).n;
+  }
+
+  buildUsageTotals(guildId: string): BuildUsage & { jobs: number } {
+    const r = this.db
+      .prepare(`SELECT COUNT(*) AS jobs, COALESCE(SUM(tokens_input), 0) AS i, COALESCE(SUM(tokens_output), 0) AS o,
+                COALESCE(SUM(tokens_reasoning), 0) AS r, COALESCE(SUM(tokens_cache_read), 0) AS cr,
+                COALESCE(SUM(tokens_cache_write), 0) AS cw, COALESCE(SUM(cost_usd), 0) AS c
+                FROM build_jobs WHERE guild_id = ?`)
+      .get(guildId) as { jobs: number; i: number; o: number; r: number; cr: number; cw: number; c: number };
+    return { jobs: r.jobs, input: r.i, output: r.o, reasoning: r.r, cacheRead: r.cr, cacheWrite: r.cw, costUsd: r.c };
   }
 
   // ---- captured console logs ------------------------------------------

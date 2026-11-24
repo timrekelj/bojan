@@ -19,6 +19,18 @@ import { leaderboard, youSection } from './web/views.js';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { announceInGuild, markGamesPosted, titleDedupeKey, isGamePosted } from './freegames/actions.js';
 import { createReplayGuard, freeStuffTimestampValid, normalizeFreeStuffProduct, verifyFreeStuffSignature } from './freegames/freestuff.js';
+import {
+  branchName, formatCost, formatTokens, formatUsage, isAdminLike, normalizeBuildResult, normalizePlanResult, parseAgentReply,
+  parseModelRef, parsePrUrl, prStateFromJson, stripBotMention, threadNameFor, worktreeDirFor,
+} from './builder/parse.js';
+import {
+  buildBuildingCard, buildCancelledCard, buildClosedCard, buildFailedCard, buildMergedCard, buildNoteCard, buildPlanCard, buildPrOpenedCard,
+  type BuilderMessage,
+} from './builder/cards.js';
+import { extractReply } from './builder/opencode.js';
+import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
+import { parseBuilderForm } from './builder/form.js';
+import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'bojan-smoke-'));
@@ -559,6 +571,149 @@ rmSync(dir, { recursive: true, force: true });
     { total: 10, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check('youSection: empty state', emptyYou.includes('id="h-you"') && emptyYou.includes('No tracked activity'));
+}
+
+// ---- self-building (builder) ---------------------------------------------
+{
+  const json = (o: unknown): string => `\`\`\`json\n${JSON.stringify(o)}\n\`\`\``;
+  const r1 = parseAgentReply(`Looks good.\n\n${json({ status: 'approved', title: 'T', plan: 'line1\nline2 "q"', questions: [] })}\n\n  \n`);
+  check('parseAgentReply: visible text + json with escaped newlines/quotes', r1.visible === 'Looks good.' && r1.result?.status === 'approved' && r1.result?.plan === 'line1\nline2 "q"');
+  const r2 = parseAgentReply('Just text, no block.  \n');
+  check('parseAgentReply: missing block', r2.visible === 'Just text, no block.' && r2.result === null);
+  const r3 = parseAgentReply('Hi\n```json\n{not valid}\n```');
+  check('parseAgentReply: invalid JSON', r3.visible === 'Hi' && r3.result === null);
+  const r4 = parseAgentReply(`a\n${json({ status: 'needs_input' })}\nb\n${json({ status: 'approved' })}`);
+  check('parseAgentReply: last block wins', r4.result?.status === 'approved' && r4.visible.includes('b'));
+  check('parseAgentReply: crlf + empty input', parseAgentReply('x\r\n```json\r\n{"a":1}\r\n```\r\n').result?.a === 1 && parseAgentReply('').result === null);
+  check('parseAgentReply: non-object json ignored', parseAgentReply('x\n```json\n[1,2]\n```').result === null);
+
+  const plan = normalizePlanResult({ status: 'needs_input', title: ' T ', plan: 'p', questions: ['a', '', 5, ' b '] });
+  check('normalizePlanResult', plan?.title === 'T' && plan.questions.join('|') === 'a|b' && normalizePlanResult({ status: 'nope' }) === null && normalizePlanResult(null) === null);
+  const bOk = normalizeBuildResult({ status: 'pr_opened', pr_url: 'https://github.com/timrekelj/bojan/pull/12', summary: ' done ' });
+  check('normalizeBuildResult: pr_opened', bOk?.status === 'pr_opened' && bOk.summary === 'done');
+  check('normalizeBuildResult: failed / invalid', normalizeBuildResult({ status: 'failed', reason: 'x' })?.status === 'failed' && normalizeBuildResult({ status: 'pr_opened', pr_url: 'nope' }) === null && normalizeBuildResult({ status: 'x' }) === null);
+
+  check('branchName/worktreeDirFor', branchName(7) === 'bot/7' && worktreeDirFor(7) === '/workspace/jobs/7');
+  const pr = parsePrUrl('https://github.com/timrekelj/bojan/pull/34');
+  check('parsePrUrl: valid', pr?.owner === 'timrekelj' && pr.repo === 'bojan' && pr.number === 34 && parsePrUrl('https://github.com/a/b/pull/5/files')?.number === 5);
+  check('parsePrUrl: invalid', parsePrUrl('https://github.com/a/b/issues/5') === null && parsePrUrl('http://github.com/a/b/pull/5') === null && parsePrUrl('') === null);
+  const longName = threadNameFor('x'.repeat(500));
+  check('threadNameFor: <= 100 chars', longName.length <= 100 && threadNameFor('add   a\nping').includes('add a ping') && threadNameFor('   ').length > 0);
+  const mr = parseModelRef('opencode-go/glm-5.3');
+  check('parseModelRef', mr?.providerID === 'opencode-go' && mr.id === 'glm-5.3' && parseModelRef('a/b/c')?.id === 'b/c' && parseModelRef('nope') === null && parseModelRef('/x') === null && parseModelRef('x/') === null);
+  check('stripBotMention', stripBotMention('<@123> do it', '123') === 'do it' && stripBotMention('do it <@!123>', '123') === 'do it' && stripBotMention('<@456> x', '123') === '<@456> x');
+  check('formatTokens/formatCost/formatUsage', formatTokens(950) === '950' && formatTokens(1500) === '1.5k' && formatTokens(25_400) === '25k' && formatTokens(2_300_000) === '2.3M' && formatCost(0.01234) === '$0.0123' && formatUsage({ input: 1200, output: 300, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.5 }) === '1.2k in · 300 out · $0.5000');
+  check('isAdminLike', isAdminLike(true, [], null) && isAdminLike(false, ['r1'], 'r1') && !isAdminLike(false, ['r2'], 'r1') && !isAdminLike(false, ['r1'], null));
+  check('prStateFromJson', prStateFromJson({ state: 'closed', merged: true }) === 'merged' && prStateFromJson({ state: 'closed', merged_at: '2026-01-01T00:00:00Z' }) === 'merged' && prStateFromJson({ state: 'closed', merged: false }) === 'closed' && prStateFromJson({ state: 'open' }) === 'open');
+
+  const reply = extractReply([
+    { id: 'm2', type: 'assistant', content: [{ type: 'reasoning', text: 'hmm' }, { type: 'text', text: 'one' }, { type: 'text', text: 'two' }], finish: 'stop' },
+    { id: 'm1', type: 'assistant', content: [{ type: 'text', text: 'old' }] },
+  ]);
+  check('extractReply: newest assistant text parts', reply.id === 'm2' && reply.text === 'one\ntwo' && reply.finish === 'stop' && reply.error === null);
+  const errReply = extractReply([{ id: 'm3', type: 'assistant', content: [], finish: 'error', error: { type: 'auth', message: 'bad key' } }]);
+  check('extractReply: surfaces error; empty list', errReply.error === 'auth: bad key' && extractReply([]).id === null);
+
+  const textLen = (m: BuilderMessage): number =>
+    m.components.reduce((n, c) => n + c.components.reduce((k, t) => k + ((t as unknown as { data: { content?: string } }).data.content?.length ?? 0), 0), 0);
+  const huge = 'word '.repeat(3000);
+  const usage = { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.01 };
+  const cards: [string, BuilderMessage][] = [
+    ['plan', buildPlanCard({ title: 'T'.repeat(150), plan: huge, questions: Array.from({ length: 20 }, () => 'q'.repeat(300)) })],
+    ['note', buildNoteCard(huge)],
+    ['building', buildBuildingCard('Title')],
+    ['pr', buildPrOpenedCard({ title: 'T', prUrl: 'https://github.com/a/b/pull/1', summary: huge, usage })],
+    ['merged', buildMergedCard({ title: 'T', prUrl: 'https://github.com/a/b/pull/1', usage })],
+    ['closed', buildClosedCard({ title: 'T', prUrl: 'https://github.com/a/b/pull/1', usage })],
+    ['failed', buildFailedCard({ reason: huge, usage })],
+    ['cancelled', buildCancelledCard(usage)],
+  ];
+  for (const [name, card] of cards) {
+    check(`builder card "${name}" stays under 4000 chars, no mentions, V2`, textLen(card) > 0 && textLen(card) < 4000 && (card.allowedMentions.parse as string[]).length === 0 && card.flags === MessageFlags.IsComponentsV2, String(textLen(card)));
+  }
+  const planCard = buildPlanCard({ title: 'My title', plan: huge, questions: ['first?', 'second?'] });
+  const planJson = JSON.stringify(planCard.components[0]!.toJSON());
+  check('plan card keeps heading, numbered questions and footer when trimming', planJson.includes('### My title') && planJson.includes('1. first?') && planJson.includes('2. second?') && planJson.includes('Reply in this thread'));
+  const prJson = JSON.stringify(cards[3]![1].components[0]!.toJSON());
+  check('PR card has link and usage line', prJson.includes('pull/1') && prJson.includes('$0.0100'));
+
+  // DB: build_jobs + settings
+  const bdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-builder-')), 'b.db'));
+  check('builder settings defaults', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3');
+  bdb.setBuilderSettings({ enabled: true, model: ' prov/model ' });
+  check('builder settings roundtrip', bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'prov/model');
+  bdb.setBuilderSettings({ enabled: false, model: '' });
+  check('builder settings: empty model falls back to default', !bdb.getBuilderSettings().enabled && bdb.getBuilderSettings().model === 'opencode-go/glm-5.3');
+  check('no active job initially', bdb.activeBuildJob(G) === null && bdb.countBuildJobs(G) === 0);
+  const j1 = bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c1', requesterId: 'u1', request: 'add ping' }, 1000);
+  check('createBuildJob defaults', j1.id > 0 && j1.status === 'planning' && j1.tokensInput === 0 && j1.costUsd === 0 && j1.sessionId === null && j1.createdAt === 1000);
+  check('getBuildJobByThread / active', bdb.getBuildJobByThread('t1')?.id === j1.id && bdb.getBuildJobByThread('nope') === null && bdb.activeBuildJob(G)?.id === j1.id);
+  bdb.updateBuildJob(j1.id, { sessionId: 'ses_1', worktreeDir: '/w/1', branch: 'bot/1', title: 'Ping' }, 2000);
+  bdb.setBuildJobStatus(j1.id, 'awaiting_input', 2500);
+  const j1b = bdb.getBuildJob(j1.id)!;
+  check('updateBuildJob / setBuildJobStatus', j1b.sessionId === 'ses_1' && j1b.branch === 'bot/1' && j1b.title === 'Ping' && j1b.status === 'awaiting_input' && j1b.updatedAt === 2500 && bdb.activeBuildJob(G)?.id === j1.id);
+  bdb.setBuildJobUsage(j1.id, { input: 100, output: 20, reasoning: 5, cacheRead: 7, cacheWrite: 3, costUsd: 0.25 });
+  bdb.updateBuildJob(j1.id, { prUrl: 'https://github.com/a/b/pull/9' });
+  bdb.setBuildJobStatus(j1.id, 'pr_open');
+  check('pr_open frees the slot; listBuildJobsByStatus', bdb.activeBuildJob(G) === null && bdb.listBuildJobsByStatus(['pr_open']).length === 1 && bdb.getBuildJob(j1.id)!.prUrl === 'https://github.com/a/b/pull/9' && bdb.listBuildJobsByStatus([]).length === 0);
+  const j2 = bdb.createBuildJob({ guildId: G, threadId: 't2', channelId: 'c1', requesterId: 'u2', request: 'second' });
+  bdb.setBuildJobUsage(j2.id, { input: 10, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.05 });
+  const tot = bdb.buildUsageTotals(G);
+  check('buildUsageTotals', tot.jobs === 2 && tot.input === 110 && tot.output === 22 && tot.reasoning === 5 && tot.cacheRead === 7 && tot.cacheWrite === 3 && Math.abs(tot.costUsd - 0.3) < 1e-9);
+  check('recentBuildJobs newest first + paging', bdb.recentBuildJobs(G, 10)[0]!.id === j2.id && bdb.recentBuildJobs(G, 1, 1)[0]!.id === j1.id && bdb.recentBuildJobs('other', 10).length === 0);
+  let dup = false;
+  try { bdb.createBuildJob({ guildId: G, threadId: 't1', channelId: 'c', requesterId: 'u', request: 'x' }); } catch { dup = true; }
+  check('thread_id is unique', dup);
+  bdb.updateBuildJob(j1.id, { model: 'opencode-go/glm-5.3' });
+  check('build job model column', bdb.getBuildJob(j1.id)!.model === 'opencode-go/glm-5.3' && bdb.getBuildJob(j2.id)!.model === null);
+  const html = requestsPage({ jobs: bdb.recentBuildJobs(G, 50), totals: bdb.buildUsageTotals(G), page: 1, pages: 1, pageSize: 50, guildId: G, timezone: 'UTC', members: { u1: '<b>Ann</b>' }, user: { username: 'x', avatar: 'a' } });
+  check('requestsPage renders rows, cost and escapes names', html.includes('$0.2500') && html.includes('&lt;b&gt;Ann&lt;/b&gt;') && !html.includes('<b>Ann</b>') && html.includes(`discord.com/channels/${G}/t1`));
+  bdb.close();
+
+  // Migration: a build_jobs table from before the model column gets it on open.
+  const mdir = mkdtempSync(join(tmpdir(), 'bojan-builder-model-'));
+  const mraw = new DatabaseSync(join(mdir, 'm.db'));
+  mraw.exec('CREATE TABLE build_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, thread_id TEXT NOT NULL UNIQUE, channel_id TEXT NOT NULL, requester_id TEXT NOT NULL, request TEXT NOT NULL, title TEXT, status TEXT NOT NULL, session_id TEXT, worktree_dir TEXT, branch TEXT, pr_url TEXT, error TEXT, tokens_input INTEGER NOT NULL DEFAULT 0, tokens_output INTEGER NOT NULL DEFAULT 0, tokens_reasoning INTEGER NOT NULL DEFAULT 0, tokens_cache_read INTEGER NOT NULL DEFAULT 0, tokens_cache_write INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+  mraw.close();
+  const mdb = new BotDatabase(join(mdir, 'm.db'));
+  const mj = mdb.createBuildJob({ guildId: G, threadId: 'm1', channelId: 'c', requesterId: 'u', request: 'x' });
+  mdb.updateBuildJob(mj.id, { model: 'a/b' });
+  check('model column migration on old build_jobs', mdb.getBuildJob(mj.id)!.model === 'a/b');
+  mdb.close();
+
+  // Pricing
+  const prices = parseGoPrices({
+    data: [
+      { id: 'glm-5.3', cost: { text: { input: { price: 1.4, cache: { read: 0.26 } }, output: { price: 4.4 } } } },
+      { id: 'kimi', cost: { text: { input: { price: 1, cache: { read: 0.1, write: 1.25 } }, output: { price: 3 } } } },
+      { id: 'nocache', cost: { text: { input: { price: 2 }, output: { price: 5 } } } },
+      { id: 'noprice', cost: { text: {} } },
+      { cost: {} },
+      null,
+    ],
+  });
+  check('parseGoPrices: complete entries', prices.size === 3 && JSON.stringify(prices.get('glm-5.3')) === JSON.stringify({ input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: null }) && prices.get('kimi')!.cacheWrite === 1.25);
+  check('parseGoPrices: missing cache -> input price; garbage tolerated', prices.get('nocache')!.cacheRead === 2 && parseGoPrices(null).size === 0 && parseGoPrices({ data: 'x' }).size === 0);
+  const glm = prices.get('glm-5.3')!;
+  const est = estimateCostUsd({ input: 8561, output: 286, reasoning: 773, cacheRead: 9472, cacheWrite: 0 }, glm);
+  check('estimateCostUsd glm-5.3 example', Math.abs(est - 0.01910772) < 1e-9, String(est));
+  check('estimateCostUsd cache write fallback', Math.abs(estimateCostUsd({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 1_000_000 }, glm) - 1.4) < 1e-9 && Math.abs(estimateCostUsd({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 1_000_000 }, prices.get('kimi')!) - 1.25) < 1e-9);
+  check('goPriceFor: only opencode-go/*', goPriceFor('opencode-go/glm-5.3', prices) === glm && goPriceFor('anthropic/glm-5.3', prices) === null && goPriceFor('opencode-go/none', prices) === null && goPriceFor(null, prices) === null);
+
+  // Settings form
+  const cur = { enabled: false, model: 'opencode-go/glm-5.3' };
+  check('parseBuilderForm: valid', JSON.stringify(parseBuilderForm({ enabled: '1', model: ' p/m ' }, cur)) === JSON.stringify({ settings: { enabled: true, model: 'p/m' }, modelError: null }));
+  check('parseBuilderForm: invalid model keeps current + error', (() => { const r = parseBuilderForm({ model: 'nomodel' }, { enabled: true, model: 'x/y' }); return !r.settings.enabled && r.settings.model === 'x/y' && r.modelError !== null; })());
+  check('parseBuilderForm: empty -> default', parseBuilderForm({ enabled: '1', model: '' }, { enabled: false, model: 'x/y' }).settings.model === 'opencode-go/glm-5.3');
+
+  // Migration: a database from before build_jobs gets the table on open.
+  const odir = mkdtempSync(join(tmpdir(), 'bojan-builder-old-'));
+  const raw = new DatabaseSync(join(odir, 'old.db'));
+  raw.exec('CREATE TABLE bot_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  raw.close();
+  const odb = new BotDatabase(join(odir, 'old.db'));
+  check('old database gets build_jobs on open', odb.countBuildJobs(G) === 0 && !odb.getBuilderSettings().enabled);
+  odb.close();
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

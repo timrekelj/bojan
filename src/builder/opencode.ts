@@ -1,0 +1,246 @@
+// Thin wrapper around @opencode/client for the self-building feature.
+// Deliberately free of config/db imports so it can be exercised standalone.
+import { OpenCode } from '@opencode/client';
+import { branchName, worktreeDirFor, type ModelRef } from './parse.js';
+
+export const REPO_DIR = '/workspace/bojan';
+
+export interface AgentReply {
+  /** Id of the assistant message the reply came from (null when there is none). */
+  id: string | null;
+  /** Concatenated text parts of the newest assistant message ('' when none). */
+  text: string;
+  finish: string | null;
+  /** Provider/runtime error attached to the reply, formatted for humans. */
+  error: string | null;
+}
+
+export interface SessionUsage {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd: number;
+}
+
+/** Structural subset of an OpenCode session message, enough to extract a reply. */
+export interface MessageLike {
+  id?: string;
+  type: string;
+  content?: ReadonlyArray<{ type: string; text?: string }>;
+  finish?: string;
+  error?: { type?: string; message?: string };
+}
+
+/** Pick the newest assistant message (list is newest-first) and flatten its text parts. */
+export function extractReply(messages: readonly MessageLike[]): AgentReply {
+  const m = messages.find((x) => x.type === 'assistant');
+  if (!m) return { id: null, text: '', finish: null, error: null };
+  const text = (m.content ?? [])
+    .filter((c) => c.type === 'text' && typeof c.text === 'string')
+    .map((c) => c.text as string)
+    .join('\n')
+    .trim();
+  const error = m.error ? `${m.error.type ?? 'error'}: ${m.error.message ?? 'unknown error'}` : m.finish === 'error' ? 'The model run ended with an error.' : null;
+  return { id: m.id ?? null, text, finish: m.finish ?? null, error };
+}
+
+export interface GoLimitMeter {
+  percent: number;
+  limited: boolean;
+  resetsAt: number;
+}
+
+export interface AgentStatus {
+  reachable: boolean;
+  version: string | null;
+  error: string | null;
+  /** OpenCode Go plan meters; null when unavailable. */
+  limits: { rolling: GoLimitMeter; weekly: GoLimitMeter; monthly: GoLimitMeter } | null;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
+/** Probe the agent server for the dashboard: version, plus Go usage limits when available (never throws). */
+export async function probeAgent(baseUrl: string, password: string, timeoutMs = 3000): Promise<AgentStatus> {
+  const agent = new OpenCodeAgent(baseUrl, password);
+  let version: string;
+  try {
+    version = (await withTimeout(agent.client.server.info(), timeoutMs)).version;
+  } catch (err) {
+    return { reachable: false, version: null, error: err instanceof Error ? err.message : String(err), limits: null };
+  }
+  try {
+    const res = await withTimeout(agent.client.experimental.usage.limits({ location: { directory: REPO_DIR } }), timeoutMs);
+    const go = res.data?.go;
+    return { reachable: true, version, error: null, limits: go ? { rolling: go.rolling, weekly: go.weekly, monthly: go.monthly } : null };
+  } catch {
+    return { reachable: true, version, error: null, limits: null };
+  }
+}
+
+export class AgentTimeoutError extends Error {}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+export class OpenCodeAgent {
+  readonly client: ReturnType<typeof OpenCode.make>;
+
+  constructor(baseUrl: string, password: string) {
+    this.client = OpenCode.make({
+      baseUrl,
+      headers: { authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}` },
+    });
+  }
+
+  async ping(): Promise<void> {
+    await this.client.server.info();
+  }
+
+  /** Right after server boot a location can briefly list no agents: retry until it does. */
+  async warm(directory: string, attempts = 15): Promise<void> {
+    let last: unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await this.client.agent.list({ location: { directory } });
+        if (res.data.length > 0) return;
+      } catch (err) {
+        last = err;
+      }
+      await sleep(1000);
+    }
+    throw new Error(`OpenCode location ${directory} did not become ready${last instanceof Error ? `: ${last.message}` : ''}`);
+  }
+
+  /** Run a shell command in the agent container and return its output; throws on non-zero exit. */
+  async shell(directory: string, command: string, timeoutMs = 180_000): Promise<string> {
+    const location = { directory };
+    const created = await this.client.shell.create({ location, cwd: directory, command, timeout: timeoutMs });
+    const id = created.data.id;
+    const deadline = Date.now() + timeoutMs + 10_000;
+    let exit: number | undefined;
+    let status: string = created.data.status;
+    while (status === 'running') {
+      if (Date.now() > deadline) throw new AgentTimeoutError(`shell command timed out: ${command}`);
+      await sleep(500);
+      const got = await this.client.shell.get({ id, location });
+      status = got.data.status;
+      exit = got.data.exit;
+    }
+    const out = await this.client.shell.output({ id, location });
+    await this.client.shell.remove({ id, location }).catch(() => undefined);
+    if (status !== 'exited' || (exit ?? 0) !== 0) {
+      throw new Error(`shell command failed (${status}, exit ${exit ?? '?'}): ${out.data.output.slice(-600)}`);
+    }
+    return out.data.output;
+  }
+
+  /**
+   * New git worktree `/workspace/jobs/<id>` on branch `bot/<id>` from fresh origin/main.
+   * (Done with git directly: the worktree API treats `branch`/`from` as existing refs.)
+   */
+  async createWorktree(jobId: number): Promise<{ directory: string; branch: string }> {
+    const directory = worktreeDirFor(jobId);
+    const branch = branchName(jobId);
+    await this.shell(REPO_DIR, `git fetch --prune origin && git worktree add --no-track -b ${branch} ${directory} origin/main`);
+    return { directory, branch };
+  }
+
+  async createSession(opts: { directory: string; agent: string; model: ModelRef; title: string; metadata?: Record<string, string | number> }): Promise<string> {
+    const session = await this.client.session.create({
+      location: { directory: opts.directory },
+      agent: opts.agent,
+      model: { providerID: opts.model.providerID, id: opts.model.id },
+      title: opts.title.slice(0, 200),
+      metadata: opts.metadata ?? null,
+    });
+    return session.id;
+  }
+
+  async switchAgent(sessionID: string, agent: string): Promise<void> {
+    await this.client.session.switchAgent({ sessionID, agent });
+  }
+
+  async switchModel(sessionID: string, model: ModelRef): Promise<void> {
+    await this.client.session.switchModel({ sessionID, model: { providerID: model.providerID, id: model.id } });
+  }
+
+  async sessionExists(sessionID: string): Promise<boolean> {
+    try {
+      await this.client.session.get({ sessionID });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async isRunning(sessionID: string): Promise<boolean> {
+    const active = await this.client.session.active();
+    return sessionID in active;
+  }
+
+  /**
+   * Wait until the session stops. `wait` may give up on long runs (proxy/idle timeouts), so
+   * it is called again until the session is no longer active, up to `timeoutMs` overall.
+   */
+  async waitIdle(sessionID: string, timeoutMs: number, settleMs = 3000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const started = Date.now();
+    for (;;) {
+      if (Date.now() > deadline) throw new AgentTimeoutError(`agent did not finish within ${Math.round(timeoutMs / 60_000)} minutes`);
+      try {
+        await this.client.experimental.session.wait({ sessionID });
+      } catch (err) {
+        if (!(await this.isRunning(sessionID).catch(() => true))) return;
+        console.warn(`[builder] wait for session ${sessionID} interrupted (${err instanceof Error ? err.message : String(err)}), retrying`);
+        await sleep(2000);
+        continue;
+      }
+      // A prompt that was only just queued may not have started yet: give it a moment before trusting "idle".
+      if (await this.isRunning(sessionID)) continue;
+      if (Date.now() - started < settleMs) {
+        await sleep(500);
+        if (await this.isRunning(sessionID)) continue;
+      }
+      return;
+    }
+  }
+
+  async latestReply(sessionID: string): Promise<AgentReply> {
+    const res = await this.client.message.list({ sessionID, order: 'desc', limit: 5, type: 'assistant' });
+    return extractReply(res.data as unknown as MessageLike[]);
+  }
+
+  async usage(sessionID: string): Promise<SessionUsage> {
+    const s = await this.client.session.get({ sessionID });
+    return {
+      input: s.tokens.input,
+      output: s.tokens.output,
+      reasoning: s.tokens.reasoning,
+      cacheRead: s.tokens.cache.read,
+      cacheWrite: s.tokens.cache.write,
+      costUsd: s.cost,
+    };
+  }
+
+  /** Queue a prompt, wait for the agent to stop, and return its final reply. */
+  async promptAndWait(sessionID: string, text: string, timeoutMs: number): Promise<AgentReply> {
+    const before = (await this.latestReply(sessionID)).id;
+    await this.client.session.prompt({ sessionID, text });
+    await this.waitIdle(sessionID, timeoutMs);
+    const reply = await this.latestReply(sessionID);
+    if (reply.id !== null && reply.id === before && !reply.error) {
+      return { ...reply, text: '', error: 'The agent produced no new reply.' };
+    }
+    return reply;
+  }
+}

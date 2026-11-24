@@ -18,6 +18,8 @@ import { config } from './config.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
+import { handleBuilderMessage } from './builder/handler.js';
+import type { BuilderRunner } from './builder/runner.js';
 
 export function createClient(): Client {
   return new Client({
@@ -286,7 +288,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
   }
 }
 
-export function registerEvents(client: Client, db: BotDatabase): void {
+export function registerEvents(client: Client, db: BotDatabase, builder: BuilderRunner): void {
   client.once(Events.ClientReady, async (ready) => {
     console.log(`[bot] logged in as ${ready.user.tag} (${ready.user.id})`);
     await registerCommands(client).catch((err) => console.error('[bot] command registration failed:', err));
@@ -312,6 +314,7 @@ export function registerEvents(client: Client, db: BotDatabase): void {
     if (settings.embedChannels.length > 0) {
       void maybeConvert(message, db, settings.embedChannels);
     }
+    void handleBuilderMessage(message, client, db, builder).catch((err) => console.error('[builder] message handler failed:', err));
   });
 
   client.on(Events.MessageReactionAdd, (reaction, user) => {

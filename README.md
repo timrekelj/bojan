@@ -162,8 +162,9 @@ npm ci && npm run build && npm start    # with .env in place
    permissions: View Channels, Send Messages, Read Message History,
    **Manage Messages** (the embed converter deletes the original message),
    **Manage Webhooks** (it reposts via webhook), Embed Links, **Attach Files**
-   (the weekly stats post uploads a chart image). Open the URL and
-   invite the bot to your server.
+   (the weekly stats post uploads a chart image), **Create Public Threads** and
+   **Send Messages in Threads** (self-building feature requests, see below).
+   Open the URL and invite the bot to your server.
 4. `GUILD_ID`: enable Discord Developer Mode, right-click your server →
    Copy Server ID.
 5. `SESSION_SECRET`: `openssl rand -hex 32`.
@@ -178,6 +179,55 @@ npm ci && npm run build && npm start    # with .env in place
 
    The bot needs no inbound ports — only outbound HTTPS to Discord. Port 3000
    is just the dashboard.
+
+## Self-building (feature requests)
+
+An admin can @mention the bot with a feature request. The bot opens a thread, asks a headless
+[OpenCode](https://opencode.ai) agent to plan it, relays questions and replies, and, once the plan is approved,
+lets a build agent implement it, push a `bot/<job>` branch and open a PR with auto-merge. GitHub CI and branch
+protection gate the merge; Dokploy then redeploys from `main`.
+
+```
+Discord thread <-> bot --HTTP (Basic auth)--> opencode container (feature-plan / feature-build agents)
+                                                  |  git worktree of this repo, gh CLI
+                                                  v
+                                       PR -> CI (.github/workflows/ci.yml) -> auto-merge -> Dokploy redeploy
+```
+
+The agents are defined in `.opencode/agents/` (`feature-plan` is read-only, `feature-build` can edit and run
+shell, both hidden from the normal agent list). The agent container is the `opencode` service in
+`docker-compose.yml`, built from `docker/opencode/`. It publishes no ports; the bot reaches it at
+`http://opencode:4096` on the compose network.
+
+Enable it, pick the model (default `opencode-go/glm-5.3`) and check agent-server status and OpenCode Go plan usage in
+the dashboard's **Self-building** section. The **Feature requests** page (`/dashboard/requests`) lists every request
+with tokens and an estimated cost; OpenCode reports no cost for Go models, so it is computed from Go's published list
+prices (`https://opencode.ai/inference/go/v1/models`), not what a Go subscription actually charges.
+
+Setup:
+
+1. Add these variables to `.env` (Dokploy: the Environment tab); see `.env.example`. Compose passes only these to the
+   agent container.
+   - `OPENCODE_API_KEY`: your [OpenCode Go](https://opencode.ai/docs/console/go/) API key (model `opencode-go/glm-5.3`).
+   - `OPENCODE_PASSWORD`: a long random shared secret (`openssl rand -hex 32`), shared by the bot and the agent.
+     Clients use HTTP Basic auth with user `opencode`. If empty, the agent container idles and self-building is off.
+   - `GH_TOKEN`: a fine-grained personal access token limited to this repository, with Contents: Read and write
+     and Pull requests: Read and write.
+   - `REPO_URL`, `GIT_EMAIL`: optional overrides.
+2. In the GitHub repo settings: enable "Allow auto-merge", and add a branch protection rule (or ruleset) for `main`
+   that requires pull requests and the `build` status check from the CI workflow. Without required checks, auto-merge
+   would merge immediately.
+3. Dokploy: put the values in the compose app's Environment tab (it writes `.env` next to the compose file);
+   no domain or port is needed for the `opencode` service. Pushes to `main` redeploy both services; the `opencode-workspace`
+   and `opencode-state` volumes keep the clone and session history across redeploys.
+4. CI runs `npm run build` as a hard gate. `npm run smoke` is also run, but only failures outside the known
+   weekday-dependent checks (listed in `CLAUDE.md`) fail the job.
+
+Security: only server administrators can trigger a request (enforced by the bot). The agent container never
+receives bot secrets (compose passes it only its own five variables, not the whole `.env`; the bot does see
+`GH_TOKEN` and `OPENCODE_API_KEY` through `.env`), has no published port, requires the shared password, and its token can
+only touch this repository. The build agent is denied reading `.env*`, pushing to `main`, force-pushing and editing
+`.github/workflows` or `.opencode/`; branch protection is the real enforcement, so keep it enabled.
 
 ## Offline smoke test
 

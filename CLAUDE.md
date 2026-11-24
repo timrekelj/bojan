@@ -14,6 +14,7 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 - `embeds/`: `providers.ts` (pure link detection and rewriting), `converter.ts` (webhook repost of the converted link).
 - `freegames/`: `types.ts`, `filters.ts` (`isBetaTitle`, `matchesFilters`, `filterGames`), `freestuff.ts` (FreeStuff webhook verify + normalizer), `cards.ts`, `form.ts` (dashboard form parsing), `actions.ts` (`announceInGuild`, `announceEverywhere`, `titleDedupeKey`).
 - `web/server.ts`: Hono routes, OAuth, settings POST handlers. `web/views.ts`: server-rendered HTML and CSS.
+- `builder/` (self-building): `parse.ts` (agent reply/json parsing, naming, usage formatting, admin check; pure), `cards.ts` (Components V2 cards, pure), `opencode.ts` (`@opencode/client` wrapper: warm location, git worktree via shell, session, prompt-and-wait, usage), `runner.ts` (one-job-at-a-time orchestration: plan Q&A, build, PR tracking via GitHub API every 2 min, restart recovery), `handler.ts` (messageCreate: admin @mention starts a job thread; thread replies feed the runner). Jobs live in `build_jobs`; settings via `getBuilderSettings` (bot_state). Needs `OPENCODE_PASSWORD`; agents are defined in `.opencode/agents/`.
 - `smoke.ts`: offline test script.
 
 ## Commands
@@ -44,4 +45,4 @@ Self-hosted, single-guild Discord bot (TypeScript ESM, Node >= 22.5, discord.js 
 
 ## Discord requirements
 - Gateway intents (`bot.ts`): regular intents Guilds, GuildMessages, GuildMessageReactions, GuildVoiceStates; privileged intents MessageContent, GuildMembers, GuildPresences. The privileged ones must be enabled in the developer portal.
-- Bot permissions: View Channels, Send Messages, Read Message History, Embed Links, Attach Files (weekly chart PNG), Manage Messages (embed converter deletes or suppresses the original), Manage Webhooks (embed converter reposts). OAuth scopes `bot` + `applications.commands`. The dashboard allows Administrators or `ADMIN_ROLE_ID`. Setup details are in `README.md`; env vars are in `.env.example`.
+- Bot permissions: View Channels, Send Messages, Read Message History, Embed Links, Attach Files (weekly chart PNG), Manage Messages (embed converter deletes or suppresses the original), Manage Webhooks (embed converter reposts), Create Public Threads + Send Messages in Threads (self-building request threads). OAuth scopes `bot` + `applications.commands`. The dashboard allows Administrators or `ADMIN_ROLE_ID`. Setup details are in `README.md`; env vars are in `.env.example`.

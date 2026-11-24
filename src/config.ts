@@ -23,6 +23,10 @@ export const config = {
   sessionSecret: required('SESSION_SECRET'),
   /** FreeStuff webhook signing key (base64 SPKI DER). null = webhook disabled. */
   freestuffPublicKey: process.env.FREESTUFF_PUBLIC_KEY?.trim() || null,
+  /** OpenCode agent server (self-building feature). */
+  opencodeUrl: optional('OPENCODE_URL', 'http://opencode:4096').replace(/\/+$/, ''),
+  /** Basic-auth password for the OpenCode server. null = self-building unavailable. */
+  opencodePassword: process.env.OPENCODE_PASSWORD?.trim() || null,
   databasePath: resolve(optional('DATABASE_PATH', 'data/bot.db')),
 };
 

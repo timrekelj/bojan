@@ -4,6 +4,7 @@ import { installLogCapture } from './logs.js';
 import { createClient, registerEvents } from './bot.js';
 import { startWeeklyScheduler } from './scheduler.js';
 import { startWebServer } from './web/server.js';
+import { BuilderRunner } from './builder/runner.js';
 
 async function main(): Promise<void> {
   const db = new BotDatabase(config.databasePath);
@@ -11,15 +12,18 @@ async function main(): Promise<void> {
   console.log(`[db] sqlite database at ${config.databasePath}`);
 
   const client = createClient();
-  registerEvents(client, db);
+  const builder = new BuilderRunner(client, db);
+  registerEvents(client, db, builder);
 
   startWebServer(client, db);
   startWeeklyScheduler(client, db);
 
   await client.login(config.token);
+  builder.start();
 
   const shutdown = (): void => {
     console.log('\n[shutdown] closing...');
+    builder.stop();
     client.destroy();
     db.close();
     process.exit(0);

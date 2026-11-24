@@ -1,5 +1,6 @@
-import type { LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
+import type { BuildJob, BuildUsage, BuilderSettings, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, lastWeekBounds, weekRangeLabel } from '../stats.js';
+import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 
 export function escapeHtml(s: string): string {
@@ -193,7 +194,7 @@ function page(title: string, body: string): string {
 }
 
 function layout(title: string, body: string, user: { username: string; avatar: string }): string {
-  const header = `<header class="topbar"><div class="topbar-in"><div class="brand">${mark(3)}Bojan</div><div class="me"><img src="${escapeHtml(user.avatar)}" alt=""><span>${escapeHtml(user.username)}</span><a href="/dashboard/logs">Logs</a><a href="/logout">Log out</a></div></div></header>`;
+  const header = `<header class="topbar"><div class="topbar-in"><div class="brand">${mark(3)}Bojan</div><div class="me"><img src="${escapeHtml(user.avatar)}" alt=""><span>${escapeHtml(user.username)}</span><a href="/dashboard/requests">Feature requests</a><a href="/dashboard/logs">Logs</a><a href="/logout">Log out</a></div></div></header>`;
   return page(title, `${header}<main class="wrap">${body}</main>`);
 }
 
@@ -233,6 +234,15 @@ export interface DashboardData {
     postedCount: number;
     flash: { kind: 'saved' } | null;
   };
+  builder: BuilderSectionData;
+}
+
+export interface BuilderSectionData {
+  settings: BuilderSettings;
+  passwordSet: boolean;
+  /** null when OPENCODE_PASSWORD is unset (nothing to probe). */
+  agent: AgentStatus | null;
+  flash: { kind: 'saved' } | { kind: 'error'; reason: string } | null;
 }
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -390,6 +400,38 @@ function freeSection(d: DashboardData): string {
   </section>`;
 }
 
+function limitMeter(label: string, m: { percent: number; limited: boolean; resetsAt: number }, tz: string): string {
+  return `${escapeHtml(label)} ${escapeHtml(String(Math.round(m.percent)))}%${m.limited ? ' (limited)' : ''}, resets ${escapeHtml(fmtDate(m.resetsAt, tz))}`;
+}
+
+export function builderSection(d: DashboardData): string {
+  const b = d.builder;
+  const flash =
+    b.flash?.kind === 'saved'
+      ? '<div class="flash" role="status">Self-building settings saved.</div>'
+      : b.flash?.kind === 'error'
+        ? `<div class="flash" role="alert">${escapeHtml(b.flash.reason)}</div>`
+        : '';
+  const a = b.agent;
+  const status = [
+    b.passwordSet ? 'OPENCODE_PASSWORD set' : 'OPENCODE_PASSWORD not set',
+    a ? (a.reachable ? `agent server reachable (v${a.version ?? '?'})` : `agent server unreachable: ${a.error ?? 'unknown error'}`) : 'agent server not checked',
+  ].join(' · ');
+  const limits = a?.limits
+    ? `<p class="muted">OpenCode Go usage: ${[limitMeter('5h', a.limits.rolling, d.settings.timezone), limitMeter('weekly', a.limits.weekly, d.settings.timezone), limitMeter('monthly', a.limits.monthly, d.settings.timezone)].join(' · ')}</p>`
+    : '';
+  return `<section id="builder" aria-labelledby="h-builder"><div class="sec-head"><h2 id="h-builder">Self-building</h2><span class="sub">${escapeHtml(status)}</span></div>
+    ${flash}
+    <form class="panel" method="post" action="/builder-settings">
+      <label class="switch"><input type="checkbox" name="enabled" value="1"${b.settings.enabled ? ' checked' : ''}><span class="track"></span><span><span class="lbl">Let admins request features by mentioning the bot</span><span class="help">Each request runs an OpenCode agent that opens a pull request.</span></span></label>
+      <div class="field"><label for="builderModel">Model</label><span class="help">provider/model, e.g. opencode-go/glm-5.3. Applies to new requests.</span>
+        <input type="text" id="builderModel" name="model" value="${escapeHtml(b.settings.model)}" autocomplete="off" spellcheck="false"></div>
+      ${limits}
+      <div class="actions"><button type="submit">Save self-building settings</button> <a class="btn ghost" href="/dashboard/requests">View feature requests</a></div>
+    </form>
+  </section>`;
+}
+
 function uptime(sec: number): string {
   const days = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
@@ -399,7 +441,7 @@ function uptime(sec: number): string {
 
 // Strips the one-shot flash params so a refresh doesn't show the toast again.
 const CLEAR_FLASH_SCRIPT =
-  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('weekly');u.searchParams.delete('reason');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('weekly');u.searchParams.delete('reason');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
 
 export interface LogsPageData {
   rows: LogRow[];
@@ -515,9 +557,61 @@ export function dashboardPage(d: DashboardData): string {
     <form id="send-now-form" method="post" action="/weekly/send-now"></form>
   </section>
   ${freeSection(d)}
+  ${builderSection(d)}
   <section aria-labelledby="h-embeds"><div class="sec-head"><h2 id="h-embeds">Embed conversions</h2></div>
     ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}
   </section>
-  ${d.saved || d.weeklyFlash || d.free.flash ? CLEAR_FLASH_SCRIPT : ''}`;
+  ${d.saved || d.weeklyFlash || d.free.flash || d.builder.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout('Dashboard', body, d.user);
+}
+
+export interface RequestsPageData {
+  jobs: BuildJob[];
+  totals: BuildUsage & { jobs: number };
+  page: number;
+  pages: number;
+  pageSize: number;
+  guildId: string;
+  timezone: string;
+  /** requesterId -> cached display name */
+  members: Record<string, string>;
+  user: { username: string; avatar: string };
+}
+
+/** "$0.0123" */
+export function fmtUsd(v: number): string {
+  return `$${v.toFixed(4)}`;
+}
+
+export function requestsPage(d: RequestsPageData): string {
+  const t = d.totals;
+  const cached = (u: { cacheRead: number; cacheWrite: number }): number => u.cacheRead + u.cacheWrite;
+  const rows = d.jobs.map((j) => {
+    const title = j.title?.trim() || (j.request.length > 80 ? j.request.slice(0, 80) + '…' : j.request);
+    const thread = `https://discord.com/channels/${d.guildId}/${j.threadId}`;
+    const pr = j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '—';
+    const tokens = `${fmt(j.tokensInput)} / ${fmt(j.tokensOutput)} / ${fmt(j.tokensReasoning)} / ${fmt(j.tokensCacheRead + j.tokensCacheWrite)}`;
+    return `<tr><td>${j.id}</td><td>${escapeHtml(fmtDate(j.createdAt, d.timezone))}</td><td>${escapeHtml(d.members[j.requesterId] ?? j.requesterId)}</td><td class="url" title="${escapeHtml(j.request)}">${escapeHtml(title)}</td><td><span class="badge${j.status === 'failed' ? ' error' : ''}">${escapeHtml(j.status)}</span></td><td><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a></td><td>${pr}</td><td>${escapeHtml(tokens)}</td><td>${escapeHtml(fmtUsd(j.costUsd))}</td></tr>`;
+  });
+  const table =
+    rows.length === 0
+      ? emptyState('No feature requests yet.')
+      : `<div class="scroll"><table><thead><tr><th scope="col">ID</th><th scope="col">Created</th><th scope="col">Requester</th><th scope="col">Title</th><th scope="col">Status</th><th scope="col">Thread</th><th scope="col">PR</th><th scope="col" title="input / output / reasoning / cached">Tokens (in / out / reasoning / cached)</th><th scope="col" title="Estimated from OpenCode Go list prices">Est. cost</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+  const step = (label: string, target: number, enabled: boolean): string =>
+    enabled ? `<a class="pager-btn" href="/dashboard/requests?page=${target}">${label}</a>` : `<span class="pager-btn" aria-disabled="true">${label}</span>`;
+  const pager =
+    d.pages > 1
+      ? `<div class="pager"><p class="muted">${fmt(t.jobs)} requests</p><nav class="pager-nav" aria-label="Feature request pages">${step('Previous', d.page - 1, d.page > 1)}<span>Page ${d.page} of ${d.pages}</span>${step('Next', d.page + 1, d.page < d.pages)}</nav></div>`
+      : '';
+  const body = `<div class="head"><h1 class="title">Feature requests</h1><p class="lede"><a href="/dashboard">← Back to dashboard</a> · costs are estimates from OpenCode Go list prices</p></div>
+  <div class="kpis">
+    ${kpi(fmt(t.jobs), 'Requests')}
+    ${kpi(fmt(t.input), 'Input tokens')}
+    ${kpi(fmt(t.output), 'Output tokens')}
+    ${kpi(fmt(t.reasoning), 'Reasoning tokens')}
+    ${kpi(fmt(cached(t)), 'Cached tokens')}
+    ${kpi(fmtUsd(t.costUsd), 'Est. cost')}
+  </div>
+  <section aria-labelledby="h-req"><div class="sec-head"><h2 id="h-req">Requests</h2></div>${table}${pager}</section>`;
+  return layout('Feature requests', body, d.user);
 }

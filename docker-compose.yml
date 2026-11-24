@@ -9,5 +9,24 @@ services:
       - "3001:3000" # dashboard; put a reverse proxy with HTTPS in front for public access
     restart: unless-stopped
 
+  # Headless OpenCode agent that plans/builds features. Internal network only: no ports are
+  # published; the bot reaches it at http://opencode:4096 (Basic auth, see .env.example).
+  # Gets only its own variables (substituted from .env), never the bot's Discord secrets.
+  opencode:
+    build: docker/opencode
+    container_name: bojan-opencode
+    environment:
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENCODE_PASSWORD: ${OPENCODE_PASSWORD:-}
+      GH_TOKEN: ${GH_TOKEN:-}
+      REPO_URL: ${REPO_URL:-https://github.com/timrekelj/bojan.git}
+      GIT_EMAIL: ${GIT_EMAIL:-bojan-bot@users.noreply.github.com}
+    volumes:
+      - opencode-workspace:/workspace
+      - opencode-state:/home/node/.local/share/opencode
+    restart: unless-stopped
+
 volumes:
   bojan-data: {}
+  opencode-workspace: {}
+  opencode-state: {}

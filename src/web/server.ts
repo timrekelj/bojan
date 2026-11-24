@@ -6,11 +6,13 @@ import { ChannelType, type Client } from 'discord.js';
 import type { BotDatabase, Settings } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { dashboardPage, errorPage, loginPage, logsPage, type DashboardData } from './views.js';
+import { dashboardPage, errorPage, loginPage, logsPage, requestsPage, type DashboardData } from './views.js';
 import { postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
 import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from '../freegames/freestuff.js';
 import { parseFreeForm } from '../freegames/form.js';
+import { parseBuilderForm } from '../builder/form.js';
+import { probeAgent } from '../builder/opencode.js';
 
 interface Session {
   userId: string;
@@ -30,6 +32,7 @@ const STATE_COOKIE = 'oauth_state';
 const sessions = new Map<string, Session>(); // sid -> session
 const startedAt = Date.now();
 const EMBEDS_PAGE_SIZE = 10;
+const REQUESTS_PAGE_SIZE = 50;
 
 // 1-based page from a query value; garbage or < 1 -> 1, past the end -> last page.
 export function parsePage(raw: string | undefined, pages: number): number {
@@ -265,6 +268,10 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       if (name) channelNames[channelId] = name;
     }
 
+    const builderFlash: DashboardData['builder']['flash'] =
+      c.req.query('builderSaved') === '1' ? { kind: 'saved' } : c.req.query('builderError') ? { kind: 'error', reason: (c.req.query('builderError') ?? '').slice(0, 200) } : null;
+    const agent = config.opencodePassword ? await probeAgent(config.opencodeUrl, config.opencodePassword, 3000) : null;
+
     const you: DashboardData['you'] = {
       allRank: db.userRank(config.guildId, session.userId),
       weekRank: db.userRank(config.guildId, session.userId, week.start, week.end),
@@ -322,6 +329,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
           postedCount: db.countFreePosted(config.guildId),
           flash: freeFlash,
         },
+        builder: { settings: db.getBuilderSettings(), passwordSet: !!config.opencodePassword, agent, flash: builderFlash },
       }),
     );
   });
@@ -342,6 +350,32 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         user: { username: session.username, avatar: session.avatar },
       }),
     );
+  });
+
+  app.get('/dashboard/requests', requireAdmin, (c) => {
+    const session = c.get('session');
+    const guild = client.guilds.cache.get(config.guildId);
+    const totals = db.buildUsageTotals(config.guildId);
+    const pages = Math.max(1, Math.ceil(totals.jobs / REQUESTS_PAGE_SIZE));
+    const page = parsePage(c.req.query('page'), pages);
+    const jobs = db.recentBuildJobs(config.guildId, REQUESTS_PAGE_SIZE, (page - 1) * REQUESTS_PAGE_SIZE);
+    const members: Record<string, string> = {};
+    for (const { requesterId } of jobs) {
+      if (members[requesterId]) continue;
+      const name = guild?.members.cache.get(requesterId)?.displayName ?? client.users.cache.get(requesterId)?.displayName;
+      if (name) members[requesterId] = name;
+    }
+    return c.html(
+      requestsPage({ jobs, totals, page, pages, pageSize: REQUESTS_PAGE_SIZE, guildId: config.guildId, timezone: db.getSettings(config.guildId).timezone, members, user: { username: session.username, avatar: session.avatar } }),
+    );
+  });
+
+  app.post('/builder-settings', requireAdmin, async (c) => {
+    const form = await c.req.parseBody();
+    const { settings, modelError } = parseBuilderForm(form, db.getBuilderSettings());
+    db.setBuilderSettings(settings);
+    console.log(`[web] self-building settings updated by ${c.get('session').username} (enabled=${settings.enabled} model=${settings.model})`);
+    return c.redirect(modelError ? `/dashboard?builderError=${encodeURIComponent(`${modelError} — model not changed`)}#builder` : '/dashboard?builderSaved=1#builder');
   });
 
   app.post('/free-settings', requireAdmin, async (c) => {
