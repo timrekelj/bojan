@@ -1,7 +1,6 @@
 // Offline smoke test: exercises the DB layer, stats math and provider
 // detection without needing a Discord token. Run with: npm run smoke
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { applyPendingImport, isSqliteHeader, planImportSwap, stageImport } from './dbImport.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { MessageFlags } from 'discord.js';
 import { renderDailyChart } from './chart.js';
 import { buildWeeklyStatsMessage } from './weekly.js';
@@ -560,41 +559,6 @@ rmSync(dir, { recursive: true, force: true });
     { total: 10, timezone: 'UTC', channelNames: {}, username: 'Nine' },
   );
   check('youSection: empty state', emptyYou.includes('id="h-you"') && emptyYou.includes('No tracked activity'));
-}
-
-// ---- database import ------------------------------------------------------
-{
-  const idir = mkdtempSync(join(tmpdir(), 'bojan-import-'));
-  const header = Buffer.concat([Buffer.from('SQLite format 3\0', 'latin1'), Buffer.alloc(8)]);
-  check('isSqliteHeader: accepts the magic', isSqliteHeader(header));
-  check('isSqliteHeader: rejects junk and short input', !isSqliteHeader(Buffer.from('SQLite format 4\0xxxx')) && !isSqliteHeader(Buffer.from('SQLite format 3')) && !isSqliteHeader(new Uint8Array(0)));
-
-  const target = join(idir, 'bot.db');
-  check('planImportSwap: nothing staged -> no moves', planImportSwap(target, () => false, 'T').length === 0);
-  const plan = planImportSwap(target, (p) => p === `${target}.import` || p === target || p === `${target}-wal`, 'T');
-  check('planImportSwap: backs up db + wal, then moves import', plan.length === 3 && plan[0]!.to === `${target}.bak-T` && plan[1]!.to === `${target}.bak-T-wal` && plan[2]!.from === `${target}.import` && plan[2]!.to === target);
-
-  writeFileSync(target, 'old');
-  writeFileSync(`${target}-wal`, 'oldwal');
-  writeFileSync(`${target}.import`, 'new');
-  check('applyPendingImport: swaps', applyPendingImport(target, new Date('2026-01-02T03:04:05.678Z')) === true);
-  const bak = `${target}.bak-2026-01-02T03-04-05-678Z`;
-  check('applyPendingImport: new db in place, old db + wal backed up, import gone', readFileSync(target, 'utf8') === 'new' && readFileSync(bak, 'utf8') === 'old' && readFileSync(`${bak}-wal`, 'utf8') === 'oldwal' && !existsSync(`${target}.import`) && !existsSync(`${target}-wal`));
-  check('applyPendingImport: no-op without staged import', applyPendingImport(target) === false && readFileSync(target, 'utf8') === 'new');
-
-  const good = new BotDatabase(join(idir, 'good.db'));
-  good.close();
-  const goodBytes = readFileSync(join(idir, 'good.db'));
-  check('stageImport: accepts a real bot db', stageImport(target, goodBytes) === null && existsSync(`${target}.import`) && !existsSync(`${target}.import.part`));
-  rmSync(`${target}.import`, { force: true });
-  check('stageImport: rejects non-sqlite and cleans up', stageImport(target, Buffer.from('hello world, not sqlite')) !== null && !existsSync(`${target}.import`));
-  check('stageImport: rejects sqlite without messages table', (() => {
-    const other = new DatabaseSync(join(idir, 'other.db'));
-    other.exec('CREATE TABLE x (a)');
-    other.close();
-    return stageImport(target, readFileSync(join(idir, 'other.db'))) !== null && !existsSync(`${target}.import`);
-  })());
-  rmSync(idir, { recursive: true, force: true });
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

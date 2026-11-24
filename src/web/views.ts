@@ -225,8 +225,6 @@ export interface DashboardData {
   you: YouData;
   saved: boolean;
   weeklyFlash: { kind: 'sent' } | { kind: 'error'; reason: string } | null;
-  /** Set when the last database upload was rejected. */
-  dbImportError: string | null;
   free: {
     settings: FreeSettings;
     roles: { id: string; name: string }[];
@@ -401,7 +399,7 @@ function uptime(sec: number): string {
 
 // Strips the one-shot flash params so a refresh doesn't show the toast again.
 const CLEAR_FLASH_SCRIPT =
-  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('weekly');u.searchParams.delete('reason');u.searchParams.delete('dbImport');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('weekly');u.searchParams.delete('reason');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
 
 export interface LogsPageData {
   rows: LogRow[];
@@ -471,7 +469,6 @@ export function dashboardPage(d: DashboardData): string {
   ${d.saved ? '<div class="flash" role="status">Settings saved.</div>' : ''}
   ${d.weeklyFlash?.kind === 'sent' ? '<div class="flash" role="status">Weekly stats sent.</div>' : ''}
   ${d.weeklyFlash?.kind === 'error' ? `<div class="flash" role="alert">Couldn't send weekly stats: ${escapeHtml(d.weeklyFlash.reason || 'unknown error')}</div>` : ''}
-  ${d.dbImportError ? `<div class="flash" role="alert">Database import failed: ${escapeHtml(d.dbImportError)}</div>` : ''}
   <div class="head">
     <h1 class="title">Server overview</h1>
     <p class="lede" aria-label="Bot health"><span class="dot${b.ping >= 0 ? ' ok' : ''}"></span>${escapeHtml(status)} · <a href="/dashboard/logs?level=error">${escapeHtml(errorsNote)}</a></p>
@@ -521,17 +518,6 @@ export function dashboardPage(d: DashboardData): string {
   <section aria-labelledby="h-embeds"><div class="sec-head"><h2 id="h-embeds">Embed conversions</h2></div>
     ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}
   </section>
-  <section aria-labelledby="h-database" id="database"><div class="sec-head"><h2 id="h-database">Database</h2></div>
-    <form class="panel" method="post" action="/database/import" enctype="multipart/form-data">
-      <fieldset>
-        <legend>Import database</legend>
-        <p class="sub"><strong>Warning:</strong> this replaces ALL current data with the uploaded SQLite file and restarts the bot. The current database is kept as a backup file next to it.</p>
-        <div class="field"><label for="database-file">SQLite file</label><span class="help">A bot.db from a previous install (max 500 MB).</span>
-          <input type="file" id="database-file" name="database" accept=".db,.sqlite,.sqlite3" required></div>
-      </fieldset>
-      <div class="actions"><button type="submit" onclick="return confirm('This replaces ALL current data with the uploaded database and restarts the bot. Continue?')">Import and restart</button></div>
-    </form>
-  </section>
-  ${d.saved || d.weeklyFlash || d.free.flash || d.dbImportError ? CLEAR_FLASH_SCRIPT : ''}`;
+  ${d.saved || d.weeklyFlash || d.free.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout('Dashboard', body, d.user);
 }

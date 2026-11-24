@@ -11,7 +11,6 @@ import { postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
 import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from '../freegames/freestuff.js';
 import { parseFreeForm } from '../freegames/form.js';
-import { MAX_IMPORT_BYTES, stageImport } from '../dbImport.js';
 
 interface Session {
   userId: string;
@@ -132,8 +131,7 @@ async function checkGuildAdmin(accessToken: string): Promise<{ ok: boolean; user
   return { ok: false, user, reason: `member endpoint -> ${memberRes.status}, guilds endpoint -> ${guildsRes.status}` };
 }
 
-export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffPublicKey?: string | null; requestRestart?: () => void } = {}): Hono {
-  const requestRestart = opts.requestRestart;
+export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffPublicKey?: string | null } = {}): Hono {
   const app = new Hono();
   const freestuffKey = opts.freestuffPublicKey === undefined ? config.freestuffPublicKey : opts.freestuffPublicKey;
   const freestuffReplay = createReplayGuard();
@@ -317,7 +315,6 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
             : c.req.query('weekly') === 'error'
               ? { kind: 'error', reason: (c.req.query('reason') ?? '').slice(0, 200) }
               : null,
-        dbImportError: c.req.query('dbImport') === 'error' ? (c.req.query('reason') ?? '').slice(0, 200) || 'unknown error' : null,
         free: {
           settings: freeSettings,
           roles: listRoles(),
@@ -406,32 +403,6 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     return c.redirect('/dashboard?weekly=sent');
   });
 
-  // Replace the whole database: stage + validate the upload, then restart so the
-  // startup swap (applyPendingImport) puts it in place before the db is opened.
-  app.post('/database/import', requireAdmin, async (c) => {
-    const user = c.get('session').username;
-    const fail = (reason: string) => {
-      console.error(`[web] database import by ${user} rejected: ${reason}`);
-      return c.redirect(`/dashboard?dbImport=error&reason=${encodeURIComponent(reason.slice(0, 200))}#database`);
-    };
-    let body: Record<string, unknown>;
-    try {
-      body = await c.req.parseBody();
-    } catch (err) {
-      return fail(`could not read the upload: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    const file = body.database;
-    if (!(file instanceof File) || file.size === 0) return fail('no file uploaded');
-    if (file.size > MAX_IMPORT_BYTES) return fail('the file is larger than 500 MB');
-    const problem = stageImport(config.databasePath, new Uint8Array(await file.arrayBuffer()));
-    if (problem) return fail(problem);
-    console.log(`[web] database import staged by ${user} (${file.size} bytes); restarting to apply`);
-    if (requestRestart) setTimeout(requestRestart, 1000);
-    return c.html(
-      `<!doctype html><meta charset="utf-8"><title>Import staged</title><body style="font-family:system-ui;max-width:32rem;margin:4rem auto"><h1>Import staged</h1><p>The uploaded database passed validation. The bot is restarting to apply it; the current database is kept as a backup file next to it. Reload the <a href="/dashboard">dashboard</a> in a few seconds.</p></body>`,
-    );
-  });
-
   app.get('/api/stats.json', requireAdmin, (c) => {
     const settings = db.getSettings(config.guildId);
     const week = lastWeekBounds(settings.timezone);
@@ -450,8 +421,8 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   return app;
 }
 
-export function startWebServer(client: Client, db: BotDatabase, requestRestart?: () => void): void {
-  const app = createWebApp(client, db, { requestRestart });
+export function startWebServer(client: Client, db: BotDatabase): void {
+  const app = createWebApp(client, db);
   serve({ fetch: app.fetch, port: config.dashboardPort, hostname: '0.0.0.0' }, (info) => {
     console.log(`[web] dashboard on http://localhost:${info.port} (register ${config.dashboardUrl}/auth/callback as the OAuth redirect)`);
     console.log(

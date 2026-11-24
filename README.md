@@ -134,9 +134,7 @@ docker compose down                 # stop
 
 The SQLite database lives in the named Docker volume `bojan-data` (mounted at
 `/app/data`, owned by the non-root `node` user), so it survives container
-rebuilds and needs no `chown`. To move an existing database in, use the
-dashboard's **Database → Import database** upload; the bot restarts and keeps
-the old file as `bot.db.bak-<timestamp>`. Run exactly one replica — SQLite is
+rebuilds and needs no `chown`. Run exactly one replica — SQLite is
 single-writer.
 
 After editing `.env`, use `docker compose up -d` (it recreates the container
