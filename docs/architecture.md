@@ -17,7 +17,7 @@ Per-area behaviour of the bot. `CLAUDE.md` has the module map and the rules; thi
 
 ## Levels
 
-`levels.ts`: MEE6-style leveling — pure XP roll/level math, `awardMessageXp` (30s per-user cooldown, `user_xp` table), `awardReactionXp` (1% chance per reaction, level + 1 XP; a win refreshes the message cooldown window), Components V2 level-up card; toggle + channel in dashboard settings.
+`levels.ts`: MEE6-style leveling — pure XP roll/level math, `awardMessageXp` (30s per-user cooldown, `user_xp` table), `awardReactionXp` (1% chance per reaction, level + 1 XP; a win refreshes the message cooldown window), `awardVoiceXp` (10 XP per completed 10-minute voice block, paid by the `startVoiceXpTicker` loop in `scheduler.ts`), Components V2 level-up card; toggle + channel in dashboard settings.
 
 `colors.ts` + `color_roles`/`color_settings` tables: name-colour reaction roles. The roles are pre-made; the dashboard ticks which ones are colours and picks a channel, and `POST /color-settings` posts one Components V2 message per role (with a 🎨 marker reaction) and deletes messages of unselected roles. Reacting to a message in `bot.ts` gives that role and removes the member's other colour roles (one per member; `rolesToSwap`), removing the reaction drops it. Needs Manage Roles and roles below the bot's highest role.
 

@@ -1,5 +1,5 @@
-import { ContainerBuilder, MessageFlags, TextDisplayBuilder } from 'discord.js';
-import type { BotDatabase } from './db.js';
+import { ContainerBuilder, MessageFlags, TextDisplayBuilder, type Client, type SendableChannels } from 'discord.js';
+import type { BotDatabase, VoiceXpRow } from './db.js';
 import { fmt } from './stats.js';
 import { BLURPLE } from './weekly.js';
 import { NO_MENTIONS } from './discord.js';
@@ -108,6 +108,37 @@ export function awardReactionXp(db: BotDatabase, guildId: string, userId: string
   return { xpGained, xp, newLevel, leveledUp: newLevel > levelFromXp(row?.xp ?? 0) };
 }
 
+/** Length of one voice XP block. */
+export const VOICE_XP_BLOCK_MS = 600_000;
+/** XP granted per completed voice block. */
+export const VOICE_XP_PER_BLOCK = 10;
+
+/** Whole voice blocks in an elapsed time; partial blocks are dropped. */
+export function voiceXpBlocks(elapsedMs: number): number {
+  return Math.max(0, Math.floor(elapsedMs / VOICE_XP_BLOCK_MS));
+}
+
+/**
+ * Award 10 XP for every newly completed voice block of one open session.
+ * Returns null when no block has completed since the last award, so the
+ * ticker can call it freely; XP is stored permanently in `user_xp`.
+ */
+export function awardVoiceXp(
+  db: BotDatabase,
+  guildId: string,
+  userId: string,
+  row: VoiceXpRow,
+  now: number,
+): XpAwardResult | null {
+  const blocks = voiceXpBlocks(now - row.startedAt);
+  const delta = blocks - row.awardedBlocks;
+  if (delta <= 0) return null;
+  const xpGained = delta * VOICE_XP_PER_BLOCK;
+  const xp = db.awardVoiceXp(guildId, userId, row.id, blocks, xpGained, now);
+  const newLevel = levelFromXp(xp);
+  const leveledUp = newLevel > levelFromXp(xp - xpGained);
+  return { xpGained, xp, newLevel, leveledUp };
+}
 
 export interface LevelUpData {
   userId: string;
@@ -135,4 +166,30 @@ export function buildLevelUpMessage(data: LevelUpData) {
     components: [container],
     allowedMentions: NO_MENTIONS,
   };
+}
+
+/**
+ * Post the level-up announcement in the configured channel. Best-effort: a
+ * failed announcement never breaks XP tracking.
+ */
+export async function announceLevelUp(
+  client: Client,
+  guildId: string,
+  levelupChannelId: string,
+  data: { userId: string; username: string; level: number; xp: number },
+): Promise<void> {
+  try {
+    const guild = client.guilds.cache.get(guildId) ?? (await client.guilds.fetch(guildId));
+    const channel = await guild.channels.fetch(levelupChannelId).catch(() => null);
+    if (!channel || !channel.isSendable()) {
+      console.error(`[levels] level-up channel ${levelupChannelId} unavailable in guild ${guildId}`);
+      return;
+    }
+    await (channel as SendableChannels).send(
+      buildLevelUpMessage({ ...data, nextLevelXp: levelProgress(data.xp).nextLevelXp }),
+    );
+    console.log(`[levels] ${data.userId} reached level ${data.level} in guild ${guildId}`);
+  } catch (err) {
+    console.error(`[levels] level-up announcement failed in guild ${guildId}:`, err);
+  }
 }

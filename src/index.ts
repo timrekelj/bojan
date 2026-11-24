@@ -2,7 +2,7 @@ import { BotDatabase } from './db.js';
 import { config } from './config.js';
 import { installLogCapture } from './logs.js';
 import { createClient, registerEvents } from './bot.js';
-import { startWeeklyScheduler } from './scheduler.js';
+import { startVoiceXpTicker, startWeeklyScheduler } from './scheduler.js';
 import { startWebServer } from './web/server.js';
 import { BuilderRunner } from './builder/runner.js';
 
@@ -17,6 +17,7 @@ async function main(): Promise<void> {
 
   startWebServer(client, db);
   startWeeklyScheduler(client, db);
+  startVoiceXpTicker(client, db);
 
   await client.login(config.token);
   builder.start();

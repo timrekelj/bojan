@@ -12,7 +12,6 @@ import {
   type ChatInputCommandInteraction,
   type Message,
   type PartialUser,
-  type SendableChannels,
   type TextChannel,
   type User,
 } from 'discord.js';
@@ -21,7 +20,7 @@ import { config } from './config.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
-import { awardMessageXp, awardReactionXp, buildLevelUpMessage, levelProgress, levelTag, XP_BACKFILL_PER_MESSAGE } from './levels.js';
+import { announceLevelUp, awardMessageXp, awardReactionXp, levelTag, XP_BACKFILL_PER_MESSAGE } from './levels.js';
 import { handleBuilderMessage } from './builder/handler.js';
 import type { BuilderRunner } from './builder/runner.js';
 import { rolesToSwap } from './colors.js';
@@ -330,32 +329,6 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
       backfillRunning = false;
     }
     return;
-  }
-}
-
-/**
- * Post the level-up announcement in the configured channel. Best-effort: a
- * failed announcement never breaks XP tracking.
- */
-async function announceLevelUp(
-  client: Client,
-  guildId: string,
-  levelupChannelId: string,
-  data: { userId: string; username: string; level: number; xp: number },
-): Promise<void> {
-  try {
-    const guild = client.guilds.cache.get(guildId) ?? (await client.guilds.fetch(guildId));
-    const channel = await guild.channels.fetch(levelupChannelId).catch(() => null);
-    if (!channel || !channel.isSendable()) {
-      console.error(`[levels] level-up channel ${levelupChannelId} unavailable in guild ${guildId}`);
-      return;
-    }
-    await (channel as SendableChannels).send(
-      buildLevelUpMessage({ ...data, nextLevelXp: levelProgress(data.xp).nextLevelXp }),
-    );
-    console.log(`[levels] ${data.userId} reached level ${data.level} in guild ${guildId}`);
-  } catch (err) {
-    console.error(`[levels] level-up announcement failed in guild ${guildId}:`, err);
   }
 }
 
