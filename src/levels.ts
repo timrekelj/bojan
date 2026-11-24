@@ -100,6 +100,32 @@ export function steamLevelShape(level: number): string {
   return STEAM_LEVEL_SHAPES[index] ?? 'circle';
 }
 
+export interface BadgeOutline {
+  tag: 'circle' | 'rect' | 'polygon';
+  attrs: string;
+}
+
+/**
+ * Outline geometry for the hollow dashboard badge, in a 52×52 viewBox inset
+ * ~2.5px so a 3px stroke is not clipped. Keyed by the `STEAM_LEVEL_SHAPES` names.
+ */
+export const STEAM_LEVEL_OUTLINES: Record<string, BadgeOutline> = {
+  circle: { tag: 'circle', attrs: 'cx="26" cy="26" r="22.5"' },
+  squircle: { tag: 'rect', attrs: 'x="3" y="3" width="46" height="46" rx="13"' },
+  hex: { tag: 'polygon', attrs: 'points="26,2.5 47.5,14.5 47.5,37.5 26,49.5 4.5,37.5 4.5,14.5"' },
+  shield: { tag: 'polygon', attrs: 'points="2.5,2.5 49.5,2.5 49.5,32 26,49.5 2.5,32"' },
+  diamond: { tag: 'polygon', attrs: 'points="26,2.5 49.5,26 26,49.5 2.5,26"' },
+  octagon: { tag: 'polygon', attrs: 'points="15,2.5 37,2.5 49.5,15 49.5,37 37,49.5 15,49.5 2.5,37 2.5,15"' },
+  hexflat: { tag: 'polygon', attrs: 'points="13,2.5 39,2.5 49.5,26 39,49.5 13,49.5 2.5,26"' },
+  pentagon: { tag: 'polygon', attrs: 'points="26,2.5 49.5,20 41,49.5 11,49.5 2.5,20"' },
+  bevel: { tag: 'polygon', attrs: 'points="8,2.5 44,2.5 49.5,8 49.5,44 44,49.5 8,49.5 2.5,44 2.5,8"' },
+};
+
+/** Hollow badge outline for a level: the shape follows `steamLevelShape`. */
+export function steamLevelOutline(level: number): BadgeOutline {
+  return STEAM_LEVEL_OUTLINES[steamLevelShape(level)] ?? STEAM_LEVEL_OUTLINES['circle']!;
+}
+
 export interface XpAwardResult {
   /** XP gained from this message (5–10) or winning reaction (level + 1). */
   xpGained: number;
