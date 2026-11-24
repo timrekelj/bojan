@@ -109,6 +109,11 @@ export function shouldHoldPlanReply(input: { pendingFollowUps: number; error: bo
   return input.pendingFollowUps > 0 && !input.error && input.planStatus !== 'cancelled';
 }
 
+/** Planner thread message with explicit author attribution, so a display name is never read as part of the request. */
+export function formatPlannerMessage(authorName: string, text: string): string {
+  return `Message from Discord user "${authorName.replace(/"/g, "'")}": ${text}`;
+}
+
 /** Prompt for the planner turn that runs after directed messages arrived during the previous turn. */
 export function followUpPrompt(followUps: readonly string[], context: readonly string[] = [], contextHeader = ''): string {
   return [

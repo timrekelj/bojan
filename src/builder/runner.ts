@@ -24,7 +24,7 @@ import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
 import { formatBuildNote, type BuildNoteInfo, type PromptImage, MAX_IMAGES } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prInfoFromJson, type PrInfo, type PrRef } from './parse.js';
 import { BUILDING, DONE, FAILED, PLANNING, addReaction, removeOwnReaction } from './reactions.js';
-import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
+import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, formatPlannerMessage, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
 
 const PLAN_TIMEOUT_MS = 15 * 60_000;
 const BUILD_TIMEOUT_MS = 90 * 60_000;
@@ -153,7 +153,7 @@ export class BuilderRunner {
 
   /** A thread message for a job that is planning or awaiting input. */
   handleReply(job: BuildJob, authorName: string, text: string, opts: { sentAt?: number; messageId?: string; trigger?: boolean; images?: PromptImage[] } = {}): void {
-    this.enqueue(job.id, { text: `${authorName}: ${text}`, sentAt: opts.sentAt ?? Date.now(), messageId: opts.messageId, images: opts.images }, opts.trigger ?? true);
+    this.enqueue(job.id, { text: formatPlannerMessage(authorName, text), sentAt: opts.sentAt ?? Date.now(), messageId: opts.messageId, images: opts.images }, opts.trigger ?? true);
   }
 
   // ---- per-job serialization -------------------------------------------

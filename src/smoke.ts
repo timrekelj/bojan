@@ -31,7 +31,7 @@ import {
 import { extractReply, lastConversationIsAssistant } from './builder/opencode.js';
 import { estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages } from './builder/form.js';
-import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
+import { BUILD_RESUME_PROMPT, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { detectProvider, extractUrl, extractUrlOutsideCode, transformUrl, isShortLink } from './embeds/providers.js';
@@ -1022,6 +1022,8 @@ rmSync(dir, { recursive: true, force: true });
   check('decideRecovery: fails after 2 resume attempts with a reason', failDec.action === 'fail' && failDec.reason.includes('2 resume attempts'), JSON.stringify(failDec));
   check('decideRecovery: plan with valid result handled; clean plain text handled; empty/interrupted resumes', decideRecovery({ kind: 'plan', reply: rep(okPlan), lastIsAssistant: true, resumeCount: 0 }).action === 'handle' && decideRecovery({ kind: 'plan', reply: rep('Which store?'), lastIsAssistant: true, resumeCount: 0 }).action === 'handle' && decideRecovery({ kind: 'plan', reply: rep(''), lastIsAssistant: true, resumeCount: 0 }).action === 'resume' && decideRecovery({ kind: 'plan', reply: rep('half', null, 'x'), lastIsAssistant: true, resumeCount: 1 }).action === 'resume' && decideRecovery({ kind: 'plan', reply: rep(''), lastIsAssistant: true, resumeCount: 2 }).action === 'fail');
   {
+    check('planner message attribution', formatPlannerMessage('Game Explorer', 'add medals') === 'Message from Discord user "Game Explorer": add medals');
+    check('planner message quote in name', formatPlannerMessage('Ga"me', 'x') === `Message from Discord user "Ga'me": x`);
     const p = followUpPrompt(['Tim: a', 'Tim: b'], ['Bob: hi'], 'CTX:');
     check('follow-up prompt', p.startsWith('CTX:\nBob: hi\n\n') && p.includes(`${FOLLOW_UP_HEADER}\nTim: a\nTim: b`) && p.includes('can not approve') && followUpPrompt(['x']) === `${FOLLOW_UP_HEADER}\nx`);
     check('shouldHoldPlanReply', !shouldHoldPlanReply({ pendingFollowUps: 0, error: false, planStatus: 'needs_input' }) && !shouldHoldPlanReply({ pendingFollowUps: 1, error: true, planStatus: null }) && !shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: 'cancelled' }) && shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: 'needs_input' }) && shouldHoldPlanReply({ pendingFollowUps: 2, error: false, planStatus: 'approved' }) && shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: null }));
