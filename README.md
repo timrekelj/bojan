@@ -84,6 +84,8 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
     dashboard only; there are no settings slash commands.
 - **Admin dashboard** — a Hono web server (same process) with **Discord OAuth2
   login**; only server administrators (or a configured admin role) get in.
+  Sessions are stored in the database (7-day lifetime), so restarting or
+  redeploying the bot doesn't log you out.
   Shows bot status (ping, uptime, DB size), this-week and all-time
   leaderboards, recent embed conversions, and a settings form (stats channel,
   weekly day/hour/timezone, embed-conversion channels, leveling on/off plus
@@ -290,7 +292,7 @@ src/
   freegames/actions.ts  shared per-guild announce, title dedupe
   freegames/freestuff.ts FreeStuff webhook signature check + product normalizer
   freegames/form.ts     dashboard form parser
-  web/server.ts       Hono dashboard, Discord OAuth2, signed-cookie sessions
+  web/server.ts       Hono dashboard, Discord OAuth2, DB-persisted signed-cookie sessions
   web/views.ts        HTML templates
   smoke.ts            offline test
 ```
