@@ -25,7 +25,7 @@ import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
 import { formatBuildNote, type BuildNoteInfo, type PromptImage, MAX_IMAGES } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prInfoFromJson, type PrInfo, type PrRef } from './parse.js';
 import { BUILDING, DONE, FAILED, PLANNING, addReaction, removeOwnReaction } from './reactions.js';
-import { BUILD_ERROR_RETRY_PROMPT, PLAN_ERROR_RETRY_PROMPT, MAX_ERROR_RETRIES, isTransientAgentError, BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildPrompt, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, formatPlannerMessage, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
+import { BUILD_ERROR_RETRY_PROMPT, PLAN_ERROR_RETRY_PROMPT, MAX_ERROR_RETRIES, canCancel, retryAction, isTransientAgentError, BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildPrompt, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, formatPlannerMessage, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
 
 const PLAN_TIMEOUT_MS = 15 * 60_000;
 const BUILD_TIMEOUT_MS = 90 * 60_000;
@@ -62,7 +62,7 @@ function excerpt(text: string): string {
 }
 
 /** The part of OpenCodeAgent the runner uses (lets tests plug in a fake). */
-export type AgentApi = Pick<OpenCodeAgent, 'warm' | 'createWorktree' | 'createSession' | 'switchAgent' | 'sessionExists' | 'waitIdle' | 'latestReply' | 'lastIsAssistant' | 'usage' | 'promptAndWait' | 'decide' | 'refreshMain' | 'limitMeters'>;
+export type AgentApi = Pick<OpenCodeAgent, 'warm' | 'createWorktree' | 'createSession' | 'switchAgent' | 'sessionExists' | 'waitIdle' | 'latestReply' | 'lastIsAssistant' | 'usage' | 'promptAndWait' | 'decide' | 'refreshMain' | 'limitMeters' | 'interrupt'>;
 
 export interface RunnerDeps {
   agent?: AgentApi;
@@ -163,6 +163,65 @@ export class BuilderRunner {
   /** A thread message for a job that is planning or awaiting input. */
   handleReply(job: BuildJob, authorName: string, text: string, opts: { sentAt?: number; messageId?: string; trigger?: boolean; images?: PromptImage[] } = {}): void {
     this.enqueue(job.id, { text: formatPlannerMessage(authorName, text), sentAt: opts.sentAt ?? Date.now(), messageId: opts.messageId, images: opts.images }, opts.trigger ?? true);
+  }
+
+  // ---- dashboard actions ------------------------------------------------
+
+  /** True once an admin cancelled the job: late results of an interrupted run must not touch it. */
+  private isCancelled(jobId: number): boolean {
+    return this.db.getBuildJob(jobId)?.status === 'cancelled';
+  }
+
+  /** Cancel a job from the dashboard: status first (so the interrupted run's late result is ignored), then stop the session. */
+  async cancelJob(jobId: number, adminName: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const job = this.db.getBuildJob(jobId);
+    if (!job || job.guildId !== config.guildId) return { ok: false, reason: 'Request not found.' };
+    if (!canCancel(job.status)) return { ok: false, reason: `A ${job.status} request can not be cancelled.` };
+    this.db.setBuildJobStatus(jobId, 'cancelled');
+    const s = this.states.get(jobId);
+    if (s) {
+      s.buffer.length = 0;
+      s.preContext.length = 0;
+      s.followUps.length = 0;
+    }
+    if (job.sessionId && this.configured) {
+      try {
+        await this.getAgent().interrupt(job.sessionId);
+      } catch (err) {
+        console.warn(`[builder] guild=${job.guildId} job=${job.id} could not interrupt session ${job.sessionId}:`, err instanceof Error ? err.message : err);
+      }
+    }
+    console.log(`[builder] guild=${job.guildId} job=${job.id} cancelled from the dashboard by ${adminName}`);
+    const fresh = this.db.getBuildJob(jobId) ?? job;
+    this.note(fresh, { event: 'cancelled' });
+    this.updatePresence();
+    this.drainQueue();
+    await this.post(fresh, buildCancelledCard(this.usageOf(fresh)));
+    return { ok: true };
+  }
+
+  /** Retry a failed job: queue the build again (approved plan) or re-prompt the planner (never approved). */
+  async retryJob(jobId: number, adminName: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const job = this.db.getBuildJob(jobId);
+    if (!job || job.guildId !== config.guildId) return { ok: false, reason: 'Request not found.' };
+    const action = retryAction(job);
+    if (action === 'none') return { ok: false, reason: 'This request can not be retried.' };
+    if (!this.configured) return { ok: false, reason: 'The OpenCode agent is not configured.' };
+    this.db.updateBuildJob(jobId, { error: null, resumeCount: 0 });
+    console.log(`[builder] guild=${job.guildId} job=${job.id} retry (${action}) requested by ${adminName}`);
+    if (action === 'plan') {
+      this.db.setBuildJobStatus(jobId, 'awaiting_input');
+      // followUp: the system's re-prompt is not a user message, so this turn can never approve the plan.
+      this.enqueue(jobId, { text: PLAN_ERROR_RETRY_PROMPT, sentAt: Date.now(), followUp: true });
+      return { ok: true };
+    }
+    this.db.setBuildJobStatus(jobId, 'queued');
+    const queued = this.db.getBuildJob(jobId) ?? job;
+    const position = queuePosition(this.db.listBuildJobsByStatus(['queued']), jobId);
+    this.note(queued, { event: 'queued', plan: queued.lastPlan ?? undefined, position });
+    await this.post(queued, buildQueuedCard({ title: queued.title ?? '', position }));
+    this.drainQueue();
+    return { ok: true };
   }
 
   // ---- per-job serialization -------------------------------------------
@@ -279,6 +338,7 @@ export class BuilderRunner {
   }
 
   private async fail(jobId: number, reason: string): Promise<void> {
+    if (this.isCancelled(jobId)) return;
     const wasBuilding = this.db.getBuildJob(jobId)?.status === 'building';
     this.db.updateBuildJob(jobId, { error: reason.slice(0, 2000) });
     this.db.setBuildJobStatus(jobId, 'failed');
@@ -323,12 +383,12 @@ export class BuilderRunner {
     let reply = first;
     for (let attempt = 1; attempt <= MAX_ERROR_RETRIES && isTransientAgentError(reply.error) && !this.stopped; attempt++) {
       const cur = this.db.getBuildJob(job.id);
-      if (!cur || cur.status !== status) break;
+      if (!cur || cur.status !== status || cur.status === 'cancelled') break;
       console.warn(`[builder] guild=${job.guildId} job=${job.id} transient agent error (${reply.error}), retry ${attempt}/${MAX_ERROR_RETRIES}`);
       await new Promise((resolve) => setTimeout(resolve, 5000 * attempt));
       if (this.stopped) break;
       const again = this.db.getBuildJob(job.id);
-      if (!again || again.status !== status) break;
+      if (!again || again.status !== status || again.status === 'cancelled') break;
       reply = await this.getAgent().promptAndWait(sessionId, retryPrompt, timeoutMs, undefined, onProgress);
       await this.saveUsage(job);
     }
@@ -338,7 +398,7 @@ export class BuilderRunner {
   /** One planning turn: set up on the first call, then prompt the planner and handle its reply. */
   private async runTurn(jobId: number, prompt: string, latestUserMessageAt: number, triggerId?: string, images: readonly PromptImage[] = [], noApprove = false): Promise<void> {
     let job = this.db.getBuildJob(jobId);
-    if (!job) return;
+    if (!job || job.status === 'cancelled') return;
     const trigger = triggerId ?? job.triggerMessageId;
     const denial = await this.limitDenial();
     if (denial) {
@@ -350,6 +410,7 @@ export class BuilderRunner {
         return;
       }
       // Keep the job so the member can continue after the reset; the dropped message can be resent.
+      if (this.isCancelled(jobId)) return;
       this.db.setBuildJobStatus(jobId, 'awaiting_input');
       await this.post(fresh, buildNoteCard(denial), trigger);
       return;
@@ -358,6 +419,8 @@ export class BuilderRunner {
     try {
       this.db.setBuildJobStatus(jobId, 'planning');
       if (!job.sessionId) job = await this.setup(job);
+      // Cancelled while the worktree/session was being set up: don't prompt it.
+      if (this.isCancelled(jobId)) return;
       const current = job;
       const first = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS, images, () => this.saveUsage(current));
       const reply = await this.retryTransient(job, job.sessionId as string, first, PLAN_ERROR_RETRY_PROMPT, PLAN_TIMEOUT_MS, () => this.saveUsage(current));
@@ -408,6 +471,7 @@ export class BuilderRunner {
    * a plan card was already posted.
    */
   private async handlePlanReply(job: BuildJob, reply: AgentReply, latestUserMessageAt: number, replyTo?: string | null, noApprove = false): Promise<void> {
+    if (this.isCancelled(job.id)) return;
     if (reply.error) {
       await this.fail(job.id, `The agent reported an error: ${reply.error}`);
       return;
@@ -534,8 +598,12 @@ export class BuilderRunner {
     let reply: AgentReply;
     if (plan) {
       // Fresh session: only the request and the approved plan, not the planner's conversation.
-      const build = job.planSessionId === null ? await this.startBuildSession(job) : job;
-      const prompt = buildPrompt({ request: job.request, title: job.title, plan });
+      const existing = job.planSessionId !== null;
+      const build = existing ? job : await this.startBuildSession(job);
+      if (this.isCancelled(job.id)) return;
+      // A build session that already answered once (a retry) continues where it stopped; one that never got its first prompt gets the full one.
+      const answered = existing && (await agent.latestReply(build.sessionId as string).then((r) => r.id !== null, () => false));
+      const prompt = answered ? BUILD_ERROR_RETRY_PROMPT : buildPrompt({ request: job.request, title: job.title, plan });
       reply = await agent.promptAndWait(build.sessionId as string, prompt, BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(build));
       reply = await this.retryTransient(job, build.sessionId as string, reply, BUILD_ERROR_RETRY_PROMPT, BUILD_TIMEOUT_MS, () => this.saveUsage(build));
     } else {
@@ -588,6 +656,7 @@ export class BuilderRunner {
   }
 
   private async handleFixReply(job: BuildJob, reply: AgentReply): Promise<void> {
+    if (this.isCancelled(job.id)) return;
     if (reply.error) return this.failFix(job.id, `The build agent reported an error: ${reply.error}`);
     const { visible, result } = parseAgentReply(reply.text);
     const build = normalizeBuildResult(result);
@@ -607,6 +676,7 @@ export class BuilderRunner {
 
   /** The PR is still open, so the job is not failed: record why and ask for a manual merge (once). */
   private async failFix(jobId: number, reason: string): Promise<void> {
+    if (this.isCancelled(jobId)) return;
     this.db.updateBuildJob(jobId, { error: reason.slice(0, 2000), conflictNotified: true });
     this.db.setBuildJobStatus(jobId, 'pr_open');
     const job = this.db.getBuildJob(jobId);
@@ -617,6 +687,7 @@ export class BuilderRunner {
   }
 
   private async handleBuildReply(job: BuildJob, reply: AgentReply): Promise<void> {
+    if (this.isCancelled(job.id)) return;
     if (reply.error) {
       await this.fail(job.id, `The build agent reported an error: ${reply.error}`);
       return;

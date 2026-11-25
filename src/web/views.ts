@@ -6,6 +6,7 @@ import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 import type { DeployStatus } from '../dokploy.js';
 import type { TranscriptEntry, TranscriptPart } from '../builder/transcript.js';
+import { canCancel, retryAction } from '../builder/queue.js';
 
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -307,6 +308,13 @@ const CSS = `
   td.url a { display: block; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
   td.url a:hover { text-decoration: underline; }
   td.req { width: 100%; max-width: 0; white-space: normal; }
+  tr[data-href] { cursor: pointer; }
+  a.row-link { color: inherit; text-decoration: none; }
+  tr[data-href]:hover a.row-link, a.row-link:focus-visible { text-decoration: underline; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
+  .actions form { margin: 0; }
+  .btn.danger { background: transparent; color: var(--err); border-color: var(--err); font-weight: 500; }
+  .btn.danger:hover { background: var(--err-soft); filter: none; }
   .req-t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .req-m { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .links { display: inline-flex; align-items: center; gap: 12px; }
@@ -498,6 +506,13 @@ set('ok','Updated '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-d
 }).catch(function(){set('retry','Reconnecting…')}).then(function(){busy=false;if(again){again=false;tick()}})}
 setInterval(tick,15000);
 document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')tick()});
+function rowGo(e){
+var t=e.target;if(!t||!t.closest||e.defaultPrevented||e.button!==(e.type==='auxclick'?1:0))return;
+if(t.closest('a,button,input,select,textarea,form,label,summary'))return;
+var r=t.closest('tr[data-href]'),h=r&&r.getAttribute('data-href');if(!h)return;
+if(e.type==='auxclick'||e.metaKey||e.ctrlKey||e.shiftKey)window.open(h,'_blank','noopener');else location.href=h}
+document.addEventListener('click',rowGo);
+document.addEventListener('auxclick',rowGo);
 document.addEventListener('click',function(e){
 var a=e.target&&e.target.closest?e.target.closest('.live a.tab'):null;
 if(!a||stop||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;
@@ -1243,6 +1258,19 @@ export interface RequestsPageData {
   members: Record<string, string>;
   user: { username: string; avatar: string | null };
   deploy?: DeployStatus;
+  /** One-shot toast after a cancel/retry redirect. */
+  flash?: PageFlash;
+}
+
+export interface PageFlash {
+  kind: 'ok' | 'error';
+  text: string;
+}
+
+/** Toast for a cancel/retry redirect, plus a script that strips its query params so a refresh doesn't repeat it. */
+function actionFlashHtml(flash: PageFlash | undefined): string {
+  if (!flash) return '';
+  return `<div class="flash" role="${flash.kind === 'error' ? 'alert' : 'status'}">${escapeHtml(flash.text)}</div><script>(()=>{const u=new URL(location.href);u.searchParams.delete('done');u.searchParams.delete('error');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>`;
 }
 
 /** "$0.0123" */
@@ -1292,12 +1320,14 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
   const rows = d.jobs.map((j) => {
     const title = j.title?.trim() || (j.request.length > 80 ? j.request.slice(0, 80) + '…' : j.request);
     const thread = `https://discord.com/channels/${d.guildId}/${j.threadId}`;
-    const pr = (j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '') + (j.sessionId ? sessionLink(j.sessionId) : '') + (j.planSessionId ? sessionLink(j.planSessionId, 'Plan') : '');
+    const pr = j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '';
+    const href = j.sessionId ? sessionHref(j.sessionId) : null;
+    const titleHtml = href ? `<a class="req-t row-link" href="${escapeHtml(href)}" title="${escapeHtml(j.request)}">${escapeHtml(title)}</a>` : `<span class="req-t" title="${escapeHtml(j.request)}">${escapeHtml(title)}</span>`;
     const tokens = tokensCell({ input: j.tokensInput, output: j.tokensOutput, reasoning: j.tokensReasoning, cacheRead: j.tokensCacheRead, cacheWrite: j.tokensCacheWrite });
     const queuePos = j.status === 'queued' ? d.queuePositions?.[j.id] : undefined;
     const statusLabel = queuePos ? `queued #${queuePos}` : j.status;
     const badge = JOB_BADGE[j.status] ?? '';
-    return `<tr><td class="dim" data-label="ID">${j.id}</td><td class="req" data-label="Request"><span class="req-t" title="${escapeHtml(j.request)}">${escapeHtml(title)}</span><span class="req-m">${escapeHtml(d.members[j.requesterId] ?? j.requesterId)} · ${escapeHtml(fmtDate(j.createdAt, d.timezone))}</span></td><td data-label="Status"><span class="badge${badge ? ' ' + badge : ''}">${escapeHtml(statusLabel)}</span></td><td data-label="Links"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${pr}</span></td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(j.costUsd))}</td></tr>`;
+    return `<tr${href ? ` data-href="${escapeHtml(href)}"` : ''}><td class="dim" data-label="ID">${j.id}</td><td class="req" data-label="Request">${titleHtml}<span class="req-m">${escapeHtml(d.members[j.requesterId] ?? j.requesterId)} · ${escapeHtml(fmtDate(j.createdAt, d.timezone))}</span></td><td data-label="Status"><span class="badge${badge ? ' ' + badge : ''}">${escapeHtml(statusLabel)}</span></td><td data-label="Links"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${pr}</span></td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(j.costUsd))}</td></tr>`;
   });
   const table =
     rows.length === 0
@@ -1307,7 +1337,9 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
   const chatRows = d.chats.map((c) => {
     const thread = `https://discord.com/channels/${d.guildId}/${c.threadId.split(':')[0]}`;
     const tokens = tokensCell({ input: c.tokensInput, output: c.tokensOutput, reasoning: c.tokensReasoning, cacheRead: c.tokensCacheRead, cacheWrite: c.tokensCacheWrite });
-    return `<tr><td data-label="Thread"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${c.sessionId ? sessionLink(c.sessionId) : ''}${c.oneOff ? '<span class="badge">one-off</span>' : ''}</span></td><td data-label="Started by">${escapeHtml(d.members[c.startedBy] ?? c.startedBy)}</td><td class="dim" data-label="Last active">${escapeHtml(fmtDate(c.lastActiveAt, d.timezone))}</td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(c.costUsd))}</td></tr>`;
+    const href = c.sessionId ? sessionHref(c.sessionId) : null;
+    const who = escapeHtml(d.members[c.startedBy] ?? c.startedBy);
+    return `<tr${href ? ` data-href="${escapeHtml(href)}"` : ''}><td data-label="Thread"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${c.oneOff ? '<span class="badge">one-off</span>' : ''}</span></td><td data-label="Started by">${href ? `<a class="row-link" href="${escapeHtml(href)}">${who}</a>` : who}</td><td class="dim" data-label="Last active">${escapeHtml(fmtDate(c.lastActiveAt, d.timezone))}</td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(c.costUsd))}</td></tr>`;
   });
   const chatTable =
     chatRows.length === 0
@@ -1340,7 +1372,7 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
 
 export function requestsPage(d: RequestsPageData, now: number = Date.now()): string {
   const parts = requestsParts(d, now);
-  const body = `
+  const body = `${actionFlashHtml(d.flash)}
   ${region('live-chat-kpis', parts, 'kpis')}
   ${region('live-chats', parts)}
   ${region('live-req-kpis', parts, 'kpis six')}
@@ -1364,6 +1396,8 @@ export interface SessionPageData {
   members: Record<string, string>;
   user: { username: string; avatar: string | null };
   deploy?: DeployStatus;
+  /** One-shot toast after a cancel/retry redirect. */
+  flash?: PageFlash;
 }
 
 const TOOL_BADGE: Record<string, string> = { completed: 'ok', error: 'error', running: 'warn', streaming: 'warn' };
@@ -1426,7 +1460,7 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
   const model = (o.kind === 'job' ? o.job.model : o.thread.model) ?? 'default';
   const threadId = o.kind === 'job' ? o.job.threadId : o.thread.threadId.split(':')[0];
   const link = (href: string, label: string): string => `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  const links = [link(`https://discord.com/channels/${d.guildId}/${threadId}`, 'Thread'), ...(o.kind === 'job' && o.job.prUrl ? [link(o.job.prUrl, 'PR')] : [])].join('');
+  let links = [link(`https://discord.com/channels/${d.guildId}/${threadId}`, 'Thread'), ...(o.kind === 'job' && o.job.prUrl ? [link(o.job.prUrl, 'PR')] : [])].join('');
   const who = (id: string): string => d.members[id] ?? id;
   let heading: string;
   let facts: [string, string][];
@@ -1448,8 +1482,21 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
     ['Tokens (in / out / reasoning / cache %)', tokensCell({ input: usage.tokensInput, output: usage.tokensOutput, reasoning: usage.tokensReasoning, cacheRead: usage.tokensCacheRead, cacheWrite: usage.tokensCacheWrite })],
     ['Est. cost', fmtUsd(usage.costUsd)],
   ];
+  let actions = '';
+  if (o.kind === 'job') {
+    const j = o.job;
+    const other = j.planSessionId === null ? null : j.planSessionId === d.sessionId ? (j.sessionId ? { id: j.sessionId, label: 'Build session' } : null) : { id: j.planSessionId, label: 'Plan session' };
+    if (other) links += sessionLink(other.id, other.label);
+    const form = (verb: 'cancel' | 'retry', label: string, cls: string, ask: string): string =>
+      `<form method="post" action="/dashboard/requests/${j.id}/${verb}?back=session"><button type="submit" class="btn ${cls}" onclick="return confirm('${ask}')">${label}</button></form>`;
+    const buttons = [
+      canCancel(j.status) ? form('cancel', 'Cancel', 'danger', `Cancel request #${j.id}? The running agent is stopped.`) : '',
+      retryAction(j) !== 'none' ? form('retry', 'Retry', 'ghost', `Retry request #${j.id}?`) : '',
+    ].join('');
+    if (buttons) actions = `<div class="actions">${buttons}</div>`;
+  }
   const dl = `<dl class="facts">${rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd></div>`).join('')}<div><dt>Session</dt><dd><code>${escapeHtml(d.sessionId)}</code></dd></div><div><dt>Links</dt><dd><span class="links">${links}</span></dd></div></dl>`;
-  const head = `<section class="card" aria-labelledby="h-session"><div class="card-head">${heading}</div>${dl}</section>`;
+  const head = `<section class="card" aria-labelledby="h-session"><div class="card-head">${heading}</div>${actions}${dl}</section>`;
 
   let timeline: string;
   // Entries arrive newest first; parts inside one assistant message stay chronological.
@@ -1471,7 +1518,7 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
 
 export function sessionPage(d: SessionPageData, now: number = Date.now()): string {
   const parts = sessionParts(d, now);
-  const body = `
+  const body = `${actionFlashHtml(d.flash)}
   ${region('live-session-head', parts)}
   ${region('live-session', parts)}`;
   return layout(

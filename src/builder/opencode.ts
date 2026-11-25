@@ -193,6 +193,12 @@ export class OpenCodeAgent {
     }
   }
 
+  /** Stop whatever the session is running. Returns false when nothing was running. */
+  async interrupt(sessionID: string): Promise<boolean> {
+    const res = await this.client.session.interrupt({ sessionID });
+    return res.interrupted;
+  }
+
   async isRunning(sessionID: string): Promise<boolean> {
     const active = await this.client.session.active();
     return sessionID in active;

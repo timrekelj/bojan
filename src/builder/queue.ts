@@ -23,6 +23,23 @@ export function planChanged(prev: string | null, next: string): boolean {
   return normalizePlanText(prev) !== n;
 }
 
+/** Jobs an admin may cancel from the dashboard: those that have not produced a PR yet. */
+export function canCancel(status: string): boolean {
+  return status === 'planning' || status === 'awaiting_input' || status === 'queued' || status === 'building';
+}
+
+/**
+ * What the dashboard Retry button does for a job: `build` (approved plan exists: queue the build again),
+ * `plan` (a planner session exists but the plan was never approved: re-prompt the planner), or `none`
+ * (only failed jobs can be retried).
+ */
+export function retryAction(job: { status: string; approvedAt: number | null; lastPlan: string | null; sessionId: string | null }): 'build' | 'plan' | 'none' {
+  if (job.status !== 'failed') return 'none';
+  if (job.approvedAt !== null && (job.lastPlan ?? '').trim() !== '') return 'build';
+  if (job.sessionId) return 'plan';
+  return 'none';
+}
+
 export const MAX_RESUMES = 2;
 /** After a conflict fix, GitHub may keep reporting the stale state for a while. */
 export const CONFLICT_SETTLE_MS = 3 * 60_000;
