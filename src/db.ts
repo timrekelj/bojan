@@ -4,6 +4,7 @@ import { statSync } from 'node:fs';
 import { XP_BACKFILL_PER_MESSAGE } from './levels.js';
 import { localParts, zonedToUtcMs } from './stats.js';
 import { ALL_STORES, type FreeSettings, type Store } from './freegames/types.js';
+import type { ChallengeMetric } from './challenges/types.js';
 
 export interface Settings {
   guildId: string;
@@ -380,6 +381,34 @@ CREATE TABLE IF NOT EXISTS chat_threads (
   last_active_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_threads_guild ON chat_threads (guild_id, last_active_at);
+
+CREATE TABLE IF NOT EXISTS challenges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  metric TEXT NOT NULL,
+  activity_name TEXT,
+  target INTEGER NOT NULL,
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT,
+  reward_role_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_challenges_guild_status ON challenges (guild_id, status, ends_at);
+
+CREATE TABLE IF NOT EXISTS challenge_participants (
+  challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (challenge_id, user_id)
+);
 `;
 
 export type BuildJobStatus = 'planning' | 'awaiting_input' | 'queued' | 'building' | 'pr_open' | 'merged' | 'closed' | 'failed' | 'cancelled';
@@ -488,8 +517,65 @@ export interface ChatThread {
   lastActiveAt: number;
 }
 
-function parseNotes(raw: string): string[] {
-  try {
+export interface Challenge {
+  id: number;
+  guildId: string;
+  name: string;
+  description: string;
+  metric: ChallengeMetric;
+  /** Only set for the `activity` metric. */
+  activityName: string | null;
+  /** Count for messages/reactions, minutes for voice/activity. */
+  target: number;
+  startsAt: number;
+  endsAt: number;
+  channelId: string;
+  messageId: string | null;
+  rewardRoleId: string | null;
+  status: 'active' | 'ended';
+  createdBy: string;
+  createdAt: number;
+  endedAt: number | null;
+}
+
+export interface ChallengeParticipant {
+  challengeId: number;
+  userId: string;
+  displayName: string;
+  joinedAt: number;
+}
+
+function challengeFromRow(r: Record<string, unknown>): Challenge {
+  return {
+    id: r.id as number,
+    guildId: r.guild_id as string,
+    name: r.name as string,
+    description: r.description as string,
+    metric: r.metric as ChallengeMetric,
+    activityName: (r.activity_name as string | null) ?? null,
+    target: r.target as number,
+    startsAt: r.starts_at as number,
+    endsAt: r.ends_at as number,
+    channelId: r.channel_id as string,
+    messageId: (r.message_id as string | null) ?? null,
+    rewardRoleId: (r.reward_role_id as string | null) ?? null,
+    status: r.status === 'ended' ? 'ended' : 'active',
+    createdBy: r.created_by as string,
+    createdAt: r.created_at as number,
+    endedAt: (r.ended_at as number | null) ?? null,
+  };
+}
+
+function challengeParticipantFromRow(r: Record<string, unknown>): ChallengeParticipant {
+  return {
+    challengeId: r.challenge_id as number,
+    userId: r.user_id as string,
+    displayName: r.display_name as string,
+    joinedAt: r.joined_at as number,
+  };
+}
+
+function parseNotes(raw: string): string[] {  try {
     const v: unknown = JSON.parse(raw);
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
   } catch {
@@ -542,8 +628,7 @@ function chatThreadFromRow(r: Record<string, unknown>): ChatThread {
   };
 }
 
-/** Statuses in which a job owns its thread (at most one such job per thread). */
-export const ACTIVE_BUILD_STATUSES: readonly BuildJobStatus[] = ['planning', 'awaiting_input', 'queued', 'building'];
+/** Statuses in which a job owns its thread (at most one such job per thread). */export const ACTIVE_BUILD_STATUSES: readonly BuildJobStatus[] = ['planning', 'awaiting_input', 'queued', 'building'];
 
 function buildJobFromRow(r: Record<string, unknown>): BuildJob {
   return {
@@ -1624,6 +1709,122 @@ export class BotDatabase {
                 FROM chat_threads WHERE guild_id = ?`)
       .get(guildId) as { threads: number; oneoffs: number; i: number; o: number; r: number; cr: number; cw: number; c: number };
     return { threads: r.threads, oneOffs: r.oneoffs, input: r.i, output: r.o, reasoning: r.r, cacheRead: r.cr, cacheWrite: r.cw, costUsd: r.c };
+  }
+
+  // ---- challenges (izzivi) --------------------------------------------
+
+  createChallenge(
+    c: {
+      guildId: string;
+      name: string;
+      description: string;
+      metric: ChallengeMetric;
+      activityName: string | null;
+      target: number;
+      startsAt: number;
+      endsAt: number;
+      channelId: string;
+      rewardRoleId: string | null;
+      createdBy: string;
+    },
+    now = Date.now(),
+  ): Challenge {
+    const res = this.db
+      .prepare(
+        `INSERT INTO challenges (guild_id, name, description, metric, activity_name, target, starts_at, ends_at, channel_id, reward_role_id, status, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+      )
+      .run(c.guildId, c.name, c.description, c.metric, c.activityName, c.target, c.startsAt, c.endsAt, c.channelId, c.rewardRoleId, c.createdBy, now);
+    return this.getChallenge(Number(res.lastInsertRowid))!;
+  }
+
+  getChallenge(id: number): Challenge | null {
+    const row = this.db.prepare('SELECT * FROM challenges WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? challengeFromRow(row) : null;
+  }
+
+  /** Newest first, for the dashboard section. */
+  recentChallenges(guildId: string, limit = 10): Challenge[] {
+    const rows = this.db.prepare('SELECT * FROM challenges WHERE guild_id = ? ORDER BY id DESC LIMIT ?').all(guildId, limit) as unknown as Record<string, unknown>[];
+    return rows.map(challengeFromRow);
+  }
+
+  /** Challenges not yet ended (also those whose deadline just passed; the ticker finalizes them). */
+  activeChallenges(): Challenge[] {
+    const rows = this.db.prepare(`SELECT * FROM challenges WHERE status = 'active' ORDER BY ends_at ASC`).all() as unknown as Record<string, unknown>[];
+    return rows.map(challengeFromRow);
+  }
+
+  setChallengeMessage(id: number, messageId: string | null): void {
+    this.db.prepare('UPDATE challenges SET message_id = ? WHERE id = ?').run(messageId, id);
+  }
+
+  /** Mark a challenge ended; false when it already was (safe against ticker/manual races). */
+  endChallenge(id: number, now = Date.now()): boolean {
+    const res = this.db.prepare(`UPDATE challenges SET status = 'ended', ended_at = COALESCE(ended_at, ?) WHERE id = ? AND status = 'active'`).run(now, id);
+    return Number(res.changes) > 0;
+  }
+
+  deleteChallenge(id: number): boolean {
+    const res = this.db.prepare('DELETE FROM challenges WHERE id = ?').run(id);
+    return Number(res.changes) > 0;
+  }
+
+  joinChallenge(challengeId: number, userId: string, displayName: string, now = Date.now()): boolean {
+    const res = this.db.prepare('INSERT OR IGNORE INTO challenge_participants (challenge_id, user_id, display_name, joined_at) VALUES (?, ?, ?, ?)').run(challengeId, userId, displayName, now);
+    return Number(res.changes) > 0;
+  }
+
+  leaveChallenge(challengeId: number, userId: string): boolean {
+    const res = this.db.prepare('DELETE FROM challenge_participants WHERE challenge_id = ? AND user_id = ?').run(challengeId, userId);
+    return Number(res.changes) > 0;
+  }
+
+  challengeParticipants(challengeId: number): ChallengeParticipant[] {
+    const rows = this.db.prepare('SELECT * FROM challenge_participants WHERE challenge_id = ? ORDER BY joined_at ASC, user_id ASC').all(challengeId) as unknown as Record<string, unknown>[];
+    return rows.map(challengeParticipantFromRow);
+  }
+
+  challengeParticipantCount(challengeId: number): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS c FROM challenge_participants WHERE challenge_id = ?').get(challengeId) as { c: number };
+    return row.c;
+  }
+
+  /**
+   * Progress per member in [from, to): counts for messages/reactions, the
+   * summed overlap of sessions with the window (ms) for voice/activity.
+   * Open sessions count up to `now` but never past `to`.
+   */
+  challengeTotals(guildId: string, metric: ChallengeMetric, activityName: string | null, from: number, to: number, now = Date.now()): Record<string, number> {
+    const out: Record<string, number> = {};
+    let rows: { userId: string; value: number }[];
+    if (metric === 'messages') {
+      rows = this.db
+        .prepare('SELECT user_id AS userId, COUNT(*) AS value FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ? GROUP BY user_id')
+        .all(guildId, from, to) as unknown as { userId: string; value: number }[];
+    } else if (metric === 'reactions') {
+      rows = this.db
+        .prepare('SELECT reactor_id AS userId, COUNT(*) AS value FROM reactions WHERE guild_id = ? AND ts >= ? AND ts < ? GROUP BY reactor_id')
+        .all(guildId, from, to) as unknown as { userId: string; value: number }[];
+    } else {
+      if (metric === 'activity' && !activityName) return out;
+      const nameClause = metric === 'activity' ? 'AND name = ?' : '';
+      const params: (string | number)[] = [now, to, from, guildId];
+      if (metric === 'activity') params.push(activityName!);
+      params.push(to, now, from);
+      rows = this.db
+        .prepare(
+          `SELECT user_id AS userId,
+                  SUM(MIN(CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END, ?) - MAX(started_at, ?)) AS value
+           FROM ${metric === 'activity' ? 'activity_sessions' : 'voice_sessions'}
+           WHERE guild_id = ? ${nameClause} ${metric === 'activity' ? 'AND type <> 4' : ''}
+             AND started_at < ? AND (CASE WHEN ended_at IS NULL THEN ? ELSE ended_at END) > ?
+           GROUP BY user_id`,
+        )
+        .all(...params) as unknown as { userId: string; value: number }[];
+    }
+    for (const r of rows) if (r.value > 0) out[r.userId] = r.value;
+    return out;
   }
 
   // ---- captured console logs ------------------------------------------

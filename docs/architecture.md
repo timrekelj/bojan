@@ -21,6 +21,15 @@ Per-area behaviour of the bot. `CLAUDE.md` has the module map and the rules; thi
 
 `colors.ts` + `color_roles`/`color_settings` tables: name-colour reaction roles. The roles are pre-made; the dashboard ticks which ones are colours and picks a channel, and `POST /color-settings` posts one Components V2 message per role (with a 🎨 marker reaction) and deletes messages of unselected roles. Reacting to a message in `bot.ts` gives that role and removes the member's other colour roles (one per member; `rolesToSwap`), removing the reaction drops it. Needs Manage Roles and roles below the bot's highest role.
 
+## Challenges
+
+`challenges/types.ts`, `form.ts`, `cards.ts`, `actions.ts`: time-limited goals on the existing stats. Dashboard Settings → Challenges is a 3-step server-only wizard (no JS): details (name, description, metric `messages | reactions | voice | activity`, activity name), schedule (target, start/end date, channel, optional reward role), review. `POST /challenge-wizard` validates every step with `parseWizardStep` and renders the next step with hidden inputs; the final step inserts the row and posts the card (`createAndPostChallenge` deletes the row again if the send fails). Dates are UTC days: empty start = now, the end date's whole day counts (`challengeWindow`); `defaultEndDate` = +7 days. The target is a count for messages/reactions and minutes for voice/activity.
+
+- Tables: `challenges` (+ index `(guild_id, status, ends_at)`) and `challenge_participants` (`ON DELETE CASCADE`). `db.challengeTotals(guildId, metric, activityName, from, to, now)` returns progress per user: message/reaction counts in `[from, to)`, or the summed session overlap in ms for voice/activity (open sessions count up to `now`, clipped to the window).
+- Card (`buildChallengeCard`): Components V2, top 10 by progress (`rankProgress`: value desc, ties by join time), `value / target`, join count, `Join`/`Leave` buttons (`challenge:join:<id>` / `challenge:leave:<id>`), no mentions. Ended cards hide the buttons. `bot.ts` routes the button interactions to `handleChallengeButton` (ephemeral reply, then refresh).
+- Progress is retroactive from the challenge start for everyone who joined (not from the join moment), and join/leave only changes who is ranked.
+- End: `finalizeChallenge` (idempotent `endChallenge`) grants the reward role permanently to the top 3 with progress > 0, then refreshes the card. `startChallengeTicker` (`scheduler.ts`, called from `index.ts`) finalizes `endsAt <= now` every 60 s and refreshes active cards at most every 5 minutes. Admins can also end or delete a challenge from the dashboard (`/challenge-end`, `/challenge-delete` deletes the card message too).
+
 ## Free games
 
 - Files: `freegames/types.ts`, `filters.ts` (`isBetaTitle`, `matchesFilters`, `filterGames`), `freestuff.ts` (FreeStuff webhook verify + normalizer), `cards.ts`, `form.ts` (dashboard form parsing), `actions.ts` (`announceInGuild`, `announceEverywhere`, `titleDedupeKey`).

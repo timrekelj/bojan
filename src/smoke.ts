@@ -8,15 +8,18 @@ import { isWeeklyDue } from './scheduler.js';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { BotDatabase, clampLimitThreshold, type WebSessionRow } from './db.js';
+import { BotDatabase, clampLimitThreshold, type ActivityInput, type WebSessionRow } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, STEAM_LEVEL_OUTLINES, STEAM_LEVEL_SHAPES, steamLevelColors, steamLevelOutline, steamLevelShape, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
 import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
+import { buildChallengeCard } from './challenges/cards.js';
+import { challengeButtonId, challengeStatus, challengeWindow, dayEndMs, dayStartMs, defaultEndDate, emptyDraft, formatChallengeTarget, formatChallengeValue, parseChallengeButtonId, parseWizardStep, rankProgress } from './challenges/form.js';
+import { CHALLENGE_METRICS, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, challengeSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -1057,6 +1060,15 @@ rmSync(dir, { recursive: true, force: true });
     saved: true,
     weeklyFlash: null,
     free: { settings: { guildId: G, channelId: 'c1', pingRoleId: 'r1', stores: ['steam'], includeDlc: false, includeBeta: true, includeMobile: false }, roles: [{ id: 'r1', name: 'Gamers' }], webhookEnabled: false, postedCount: 3, flash: null },
+    challenges: {
+      wizard: { step: 1, draft: { name: 'Skelce', description: 'Do konca leta.', metric: 'messages', activityName: '', target: 500, startDate: '', endDate: '2026-12-31', channelId: 'c1', rewardRoleId: 'r1' }, errors: [] },
+      list: [],
+      channels: [{ id: 'c1', name: 'general' }],
+      roles: [{ id: 'r1', name: 'Gamers' }],
+      activityNames: ['Counter-Strike 2'],
+      canManageRoles: true,
+      flash: null,
+    },
     color: { channelId: 'c2', roles: [{ id: 'r1', name: 'Gamers' }, { id: 'cr1', name: 'Red <x>' }], selected: ['cr1'], posted: 1, canManage: true, flash: null },
     builder: {
       settings: { enabled: true, model: 'opencode-go/m"1', chatEnabled: false, chatModel: 'opencode-go/c', chatDecisionModel: 'opencode-go/d', chatLanguages: ['Slovenian', 'English'], maxParallelBuilds: 2, limitThreshold: 90 },
@@ -1119,7 +1131,7 @@ rmSync(dir, { recursive: true, force: true });
   check(
     'settingsPage: section nav, labels tied to inputs, flash, no live polling without Dokploy',
     setHtmlV.includes('<nav class="secnav" aria-label="Settings sections">') &&
-      ['weekly', 'embeds', 'leveling', 'colors', 'free', 'builder'].every((id) => setHtmlV.includes(`<a href="#${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
+      ['weekly', 'embeds', 'leveling', 'colors', 'free', 'challenges', 'builder'].every((id) => setHtmlV.includes(`<a href="#${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
       ['statsChannel', 'timezone', 'levelupChannel', 'freeChannel', 'freeRole', 'chatModel', 'chatDecisionModel', 'chatLanguages', 'builderModel', 'maxParallelBuilds', 'limitThreshold'].every((id) => setHtmlV.includes(`<label for="${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
       setHtmlV.includes('<div class="flash" role="status">Settings saved.</div>') && setHtmlV.includes("searchParams.delete('saved')") &&
       setHtmlV.includes('<a href="/dashboard/settings" aria-current="page">') && (setHtmlV.match(/<h1/g) ?? []).length === 1 &&
@@ -1129,6 +1141,46 @@ rmSync(dir, { recursive: true, force: true });
   check('settingsPage: with Dokploy only the deployment chip is live; builder error flash is escaped', setDeploy.includes('data-live="settings"') && setDeploy.includes('id="live-deploy"') && !setDeploy.includes('id="livestat"') && setDeploy.includes('Deployed 1 min ago') && setDeploy.includes('<div class="flash" role="alert">bad &lt;model&gt;</div>') && !setDeploy.includes('Settings saved.'));
   const bsec = builderSection({ builder: { ...setData.builder, passwordSet: false, agent: null }, settings: setData.settings });
   check('builderSection: standalone card with its own form; no meters without limits', bsec.startsWith('<section class="card" id="builder"') && bsec.includes('action="/builder-settings"') && bsec.includes('OPENCODE_PASSWORD not set') && bsec.includes('Agent server not checked') && !bsec.includes('class="meter"'));
+
+  const chWizard1 = challengeSection({ challenges: setData.challenges, settings: setData.settings });
+  check(
+    'challengeSection: card + step 1 fields, POST target, empty list',
+    chWizard1.startsWith('<section class="card" id="challenges"') && chWizard1.includes('action="/challenge-wizard"') && chWizard1.includes('<input type="hidden" name="step" value="1">') &&
+      ['challengeName', 'challengeDescription', 'challengeMetric', 'challengeActivity'].every((id) => chWizard1.includes(`id="${id}"`)) &&
+      chWizard1.includes('name="name"') && chWizard1.includes('name="description"') && chWizard1.includes('name="metric"') && chWizard1.includes('name="activityName"') &&
+      chWizard1.includes('Step 1 of 3') && chWizard1.includes('No challenges yet') && chWizard1.includes('Manage Roles granted'),
+  );
+  const chWizard2 = challengeSection({ settings: setData.settings, challenges: { ...setData.challenges, wizard: { step: 2, draft: setData.challenges.wizard.draft, errors: [] } } });
+  check(
+    'challengeSection: step 2 carries step 1 as hidden inputs and shows the schedule',
+    chWizard2.includes('<input type="hidden" name="step" value="2">') && chWizard2.includes('<input type="hidden" name="name" value="Skelce">') && chWizard2.includes('name="metric" value="messages"') &&
+      chWizard2.includes('id="challengeTarget"') && chWizard2.includes('id="challengeStart"') && chWizard2.includes('id="challengeEnd"') && chWizard2.includes('id="challengeChannel"') && chWizard2.includes('Step 2 of 3'),
+  );
+  const chWizard3 = challengeSection({ settings: setData.settings, challenges: { ...setData.challenges, wizard: { step: 3, draft: setData.challenges.wizard.draft, errors: ['Bad <thing>'] } } });
+  check(
+    'challengeSection: step 3 summary, escaped errors, Create submit',
+    chWizard3.includes('<input type="hidden" name="step" value="3">') && chWizard3.includes('<input type="hidden" name="target" value="500">') && chWizard3.includes('Create challenge') && chWizard3.includes('Bad &lt;thing&gt;') && !chWizard3.includes('Bad <thing>'),
+  );
+  const chListSection = challengeSection({
+    settings: setData.settings,
+    challenges: {
+      ...setData.challenges,
+      list: [
+        { challenge: { id: 7, guildId: G, name: 'Skelce', description: 'Do konca leta.', metric: 'messages', activityName: null, target: 500, startsAt: T - 1000, endsAt: T + 86_400_000, channelId: 'c1', messageId: 'm', rewardRoleId: null, status: 'active', createdBy: 'a', createdAt: T, endedAt: null }, status: 'active', joined: 2, rows: [{ userId: 'u1', name: 'Ana <x>', value: 120, rank: 1 }, { userId: 'u2', name: 'Bojan', value: 0, rank: 2 }] },
+        { challenge: { id: 8, guildId: G, name: 'Ended one', description: '', metric: 'messages', activityName: null, target: 10, startsAt: T - 1000, endsAt: T, channelId: 'c1', messageId: 'm2', rewardRoleId: null, status: 'ended', createdBy: 'a', createdAt: T, endedAt: T }, status: 'ended', joined: 0, rows: [] },
+      ],
+    },
+  });
+  check(
+    'challengeSection: list shows progress with escaped names, End for active, Delete always',
+    chListSection.includes('Ana &lt;x&gt;') && chListSection.includes('<b>120</b> / 500') && chListSection.includes('action="/challenge-end"') && chListSection.includes('action="/challenge-delete"') &&
+      chListSection.includes('1 active') && chListSection.includes('No participants yet.') && !chListSection.includes('Ana <x>'),
+  );
+  check(
+    'settingsPage: challenges section between free games and assistant, flash script clears its params',
+    setHtmlV.indexOf('id="free"') < setHtmlV.indexOf('id="challenges"') && setHtmlV.indexOf('id="challenges"') < setHtmlV.indexOf('id="builder"') &&
+      setHtmlV.includes("searchParams.delete('challengeCreated')") && setHtmlV.includes("searchParams.delete('challengeError')"),
+  );
 
   const logsHtml = logsPage({ rows: [{ id: 1, ts: T, level: 'error', tag: 'web', message: 'boom <x>\n  at y' }, { id: 2, ts: T, level: 'info', tag: null, message: 'ok' }], tags: ['web', 'bot'], level: 'error', tag: 'web', page: 1, pages: 1, pageSize: 10, total: 2, timezone: 'UTC', user: { username: 'Two', avatar: null } }, T);
   check(
@@ -1737,6 +1789,121 @@ rmSync(dir, { recursive: true, force: true });
   check('buildPrompt: request, title, plan, approval', bp.includes('add <ping>') && bp.includes('Title: Ping') && bp.includes('Approved plan:\n- edit a.ts\n- test') && bp.includes('approved') && bp.includes('Implement it now') && !buildPrompt({ request: 'r', title: null, plan: 'p' }).includes('Title:'));
   const us = addUsage({ input: 1, output: 2, reasoning: 3, cacheRead: 4, cacheWrite: 5, costUsd: 0.5 }, { input: 10, output: 20, reasoning: 30, cacheRead: 40, cacheWrite: 50, costUsd: 0.25 });
   check('addUsage sums every field', us.input === 11 && us.output === 22 && us.reasoning === 33 && us.cacheRead === 44 && us.cacheWrite === 55 && us.costUsd === 0.75);
+
+  // ---- challenges (izzivi) ----------------------------------------------------
+  const chNow = Date.UTC(2026, 5, 1, 12);
+  const wctx = { channels: new Set(['c1']), roles: new Set(['r1']), now: chNow };
+  check(
+    'challenge form: default end is +7 UTC days, day bounds are midnights',
+    defaultEndDate(chNow) === '2026-06-08' && dayStartMs('2026-06-08') === Date.UTC(2026, 5, 8) && dayEndMs('2026-06-08') === Date.UTC(2026, 5, 9) && dayStartMs('2026-02-30') === null && emptyDraft(chNow).endDate === '2026-06-08',
+  );
+  const winNow = challengeWindow('', '2026-06-08', chNow);
+  const winFuture = challengeWindow('2026-06-03', '2026-06-08', chNow);
+  check(
+    'challengeWindow: empty start = now, future start honoured, end = next midnight; past/invalid rejected',
+    winNow.ok && winNow.window.startsAt === chNow && winNow.window.endsAt === Date.UTC(2026, 5, 9) &&
+      winFuture.ok && winFuture.window.startsAt === Date.UTC(2026, 5, 3) &&
+      !challengeWindow('', '2026-05-01', chNow).ok && !challengeWindow('2026-02-30', '2026-06-08', chNow).ok && !challengeWindow('2026-06-09', '2026-06-08', chNow).ok,
+  );
+  check(
+    'challengeStatus: upcoming, active, auto-ended past the deadline, stored ended',
+    challengeStatus({ status: 'active', startsAt: chNow + 1, endsAt: chNow + 10 }, chNow) === 'upcoming' &&
+      challengeStatus({ status: 'active', startsAt: chNow - 10, endsAt: chNow + 10 }, chNow) === 'active' &&
+      challengeStatus({ status: 'active', startsAt: 0, endsAt: chNow }, chNow) === 'ended' &&
+      challengeStatus({ status: 'ended', startsAt: 0, endsAt: chNow + 10 }, chNow) === 'ended',
+  );
+  const step1 = parseWizardStep({ step: '1', name: 'Skelce', description: 'Do konca leta.', metric: 'messages', activityName: '', target: '', startDate: '', endDate: '2026-12-31', channelId: '', rewardRoleId: '' }, 1, wctx);
+  check('parseWizardStep: step 1 accepts details without the schedule', step1.errors.length === 0 && step1.draft.name === 'Skelce' && step1.draft.metric === 'messages');
+  const step1Default = parseWizardStep({ name: 'Skelce', metric: 'messages' }, 1, wctx);
+  check('parseWizardStep: step 1 fills the default +7 day end date', step1Default.errors.length === 0 && step1Default.draft.endDate === defaultEndDate(chNow));
+  const step2 = parseWizardStep({ step: '2', name: 'Skelce', description: '', metric: 'voice', activityName: '', target: '120', startDate: '2026-06-02', endDate: '2026-06-30', channelId: 'c1', rewardRoleId: 'r1' }, 2, wctx);
+  check('parseWizardStep: step 2 accepts a full schedule', step2.errors.length === 0 && step2.draft.target === 120 && step2.draft.channelId === 'c1');
+  const badStep = parseWizardStep({ metric: 'nope', name: '', endDate: 'not-a-date', target: '0', channelId: 'c9', rewardRoleId: 'r9' }, 3, wctx);
+  check(
+    'parseWizardStep: reports name, metric, target, date, channel and role errors',
+    badStep.errors.length >= 6 &&
+      badStep.errors.some((e) => e.includes('name')) && badStep.errors.some((e) => e.includes('metric')) && badStep.errors.some((e) => e.includes('target')) &&
+      badStep.errors.some((e) => e.includes('end date')) && badStep.errors.some((e) => e.includes('channel')) && badStep.errors.some((e) => e.includes('role')),
+    badStep.errors.join(' | '),
+  );
+  const activityStep = parseWizardStep({ name: 'CS', metric: 'activity', activityName: '', endDate: '2026-12-31' }, 1, wctx);
+  check('parseWizardStep: activity metric requires the activity name', activityStep.errors.some((e) => e.includes('activity name')));
+  const ranked = rankProgress([{ userId: 'a', joinedAt: 2 }, { userId: 'b', joinedAt: 1 }, { userId: 'c', joinedAt: 3 }], { a: 5, b: 5, c: 9 });
+  check('rankProgress: value desc, ties by join time, zero progress included', ranked.map((r) => `${r.rank}:${r.userId}`).join() === '1:c,2:b,3:a' && ranked[2]?.value === 5);
+  check(
+    'challenge values: counts vs durations, targets in minutes',
+    formatChallengeValue('messages', 1234) === '1,234' && formatChallengeValue('voice', 3_600_000) === '1h' && formatChallengeTarget('voice', 90) === '1h 30m' &&
+      metricLabel('reactions') === 'Reactions given' && metricTargetUnit('voice') === 'minutes' && isTimeMetric('activity') && CHALLENGE_METRICS.length === 4,
+  );
+  check(
+    'parseChallengeButtonId: join/leave ids, rejects garbage',
+    parseChallengeButtonId(challengeButtonId('join', 7))?.action === 'join' && parseChallengeButtonId('challenge:leave:12')?.challengeId === 12 && parseChallengeButtonId('challenge:join:0') === null && parseChallengeButtonId('challenge:kick:1') === null,
+  );
+
+  const chDb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-challenges-')), 'challenges.db'));
+  const CHG = 'chg-guild';
+  const chChallenge = chDb.createChallenge(
+    { guildId: CHG, name: 'Skelce', description: 'Do konca leta.', metric: 'messages', activityName: null, target: 500, startsAt: chNow - 1000, endsAt: chNow + 86_400_000, channelId: 'c1', rewardRoleId: 'r1', createdBy: 'admin' },
+    chNow,
+  );
+  check('challenges DB: create/get defaults to active', chChallenge.id > 0 && chChallenge.status === 'active' && chChallenge.messageId === null && chDb.getChallenge(chChallenge.id)?.name === 'Skelce');
+  check(
+    'challenges DB: join is idempotent, leave works, display names stored',
+    chDb.joinChallenge(chChallenge.id, 'u1', 'Ana', chNow) && !chDb.joinChallenge(chChallenge.id, 'u1', 'Ana again', chNow) && chDb.joinChallenge(chChallenge.id, 'u2', 'Bojan', chNow + 1) &&
+      chDb.challengeParticipantCount(chChallenge.id) === 2 && chDb.challengeParticipants(chChallenge.id)[0]?.displayName === 'Ana' &&
+      chDb.leaveChallenge(chChallenge.id, 'u2') && !chDb.leaveChallenge(chChallenge.id, 'u2') && chDb.challengeParticipantCount(chChallenge.id) === 1,
+  );
+  chDb.setChallengeMessage(chChallenge.id, 'm1');
+  check('challenges DB: message id, recent list, active list', chDb.getChallenge(chChallenge.id)?.messageId === 'm1' && chDb.recentChallenges(CHG).some((c) => c.id === chChallenge.id) && chDb.activeChallenges().some((c) => c.id === chChallenge.id));
+  check('challenges DB: endChallenge is idempotent and keeps the first timestamp', chDb.endChallenge(chChallenge.id, chNow + 5) && !chDb.endChallenge(chChallenge.id, chNow + 6) && chDb.getChallenge(chChallenge.id)?.endedAt === chNow + 5 && !chDb.activeChallenges().some((c) => c.id === chChallenge.id));
+
+  const T0 = Date.UTC(2026, 6, 1);
+  const T1 = T0 + 7 * 86_400_000;
+  const TMID = T0 + 2 * 86_400_000;
+  chDb.recordMessage(CHG, 'c', 'u1', T0 + 10, 'cm1');
+  chDb.recordMessage(CHG, 'c', 'u1', TMID, 'cm2');
+  chDb.recordMessage(CHG, 'c', 'u2', T1 - 1, 'cm3');
+  chDb.recordMessage(CHG, 'c', 'u2', T1, 'cm4'); // outside (to is exclusive)
+  chDb.recordMessage(CHG, 'c', 'u3', T0 - 1, 'cm5');
+  for (const [reactorId, ts] of [['u1', T0 + 5], ['u1', T0 + 6], ['u2', T0 + 7], ['u2', T1]] as const) {
+    chDb.recordReaction({ guildId: CHG, channelId: 'c', messageId: `rm${ts}`, authorId: 'author', reactorId, emojiKey: 'x', emojiLabel: 'x', ts });
+  }
+  chDb.recordVoiceState(CHG, 'u1', 'v', T0 - 1000);
+  chDb.recordVoiceState(CHG, 'u1', null, T0 + 3_600_000);
+  chDb.recordVoiceState(CHG, 'u2', 'v', T0 + 3_600_000); // open, clipped by `to`
+  const presence = (ts: number): ActivityInput[] => [{ name: 'Counter-Strike 2', type: 0, details: null, state: null, applicationId: null, startedAt: T0 }];
+  chDb.recordPresence(CHG, 'u1', presence(T0 + 1000), T0 + 1000);
+  chDb.recordPresence(CHG, 'u1', [], T0 + 3_600_000);
+  chDb.recordPresence(CHG, 'u2', [{ name: 'Other game', type: 0, details: null, state: null, applicationId: null, startedAt: T0 }], T0 + 1000);
+  chDb.recordPresence(CHG, 'u2', [{ name: 'Other game', type: 0, details: null, state: null, applicationId: null, startedAt: T0 }], TMID);
+  const msgTotals = chDb.challengeTotals(CHG, 'messages', null, T0, T1, TMID);
+  const reactTotals = chDb.challengeTotals(CHG, 'reactions', null, T0, T1, TMID);
+  const voiceTotals = chDb.challengeTotals(CHG, 'voice', null, T0, T1, TMID);
+  const actTotals = chDb.challengeTotals(CHG, 'activity', 'Counter-Strike 2', T0, T1, TMID);
+  check('challengeTotals: messages count inside [from, to)', msgTotals.u1 === 2 && msgTotals.u2 === 1 && msgTotals.u3 === undefined, JSON.stringify(msgTotals));
+  check('challengeTotals: reactions given by reactor', reactTotals.u1 === 2 && reactTotals.u2 === 1, JSON.stringify(reactTotals));
+  check('challengeTotals: voice clips sessions to the window, open counts to now', voiceTotals.u1 === 3_600_000 && voiceTotals.u2 === TMID - (T0 + 3_600_000), JSON.stringify(voiceTotals));
+  check('challengeTotals: activity is filtered by name and clipped', actTotals.u1 === 3_600_000 && actTotals.u2 === undefined, JSON.stringify(actTotals));
+  check('challenges DB: delete removes participants (cascade)', chDb.deleteChallenge(chChallenge.id) && chDb.getChallenge(chChallenge.id) === null && chDb.challengeParticipants(chChallenge.id).length === 0);
+  chDb.close();
+
+  const cardChallenge = { id: 7, guildId: 'g', name: 'Skelce', description: 'Do konca leta.', metric: 'messages' as const, activityName: null, target: 500, startsAt: chNow - 1000, endsAt: chNow + 86_400_000, channelId: 'c', messageId: 'm', rewardRoleId: null, status: 'active' as const, createdBy: 'a', createdAt: chNow, endedAt: null };
+  const cardParticipants = [
+    { challengeId: 7, userId: 'u1', displayName: 'Ana', joinedAt: chNow - 500 },
+    { challengeId: 7, userId: 'u2', displayName: 'Bojan', joinedAt: chNow - 400 },
+    { challengeId: 7, userId: 'u3', displayName: 'Cene', joinedAt: chNow - 300 },
+  ];
+  const chCard = buildChallengeCard({ challenge: cardChallenge, participants: cardParticipants, totals: { u1: 120, u2: 520, u3: 0 }, timeZone: 'UTC', now: chNow });
+  const chCardJson = JSON.stringify(chCard.components.map((c) => c.toJSON()));
+  check(
+    'challenge card: V2 container, medal order, value / target, join counts',
+    chCard.flags === MessageFlags.IsComponentsV2 && chCard.components.length === 1 && chCardJson.includes('🥇 <@u2>') && chCardJson.includes('120 / 500') && chCardJson.includes('3 joined') && !('embeds' in chCard),
+  );
+  check('challenge card: Join and Leave buttons, never pings anyone', chCardJson.includes('challenge:join:7') && chCardJson.includes('challenge:leave:7') && chCard.allowedMentions.parse.length === 0);
+  const chEndedJson = JSON.stringify(buildChallengeCard({ challenge: { ...cardChallenge, status: 'ended', endedAt: chNow }, participants: cardParticipants, totals: { u2: 520 }, timeZone: 'UTC', now: chNow }).components.map((c) => c.toJSON()));
+  check('challenge card: ended shows Ended and hides the buttons', chEndedJson.includes('Ended') && !chEndedJson.includes('challenge:join') && !chEndedJson.includes('challenge:leave'));
+  const chEmptyJson = JSON.stringify(buildChallengeCard({ challenge: cardChallenge, participants: [], totals: {}, timeZone: 'UTC', now: chNow }).components.map((c) => c.toJSON()));
+  check('challenge card: empty leaderboard hint, no target values leak', chEmptyJson.includes('No one has joined yet') && chEmptyJson.length < 4000);
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

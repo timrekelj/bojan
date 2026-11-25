@@ -3,6 +3,7 @@ import type { BotDatabase, Settings } from './db.js';
 import { currentWeekBounds, lastWeekBounds, zonedToUtcMs } from './stats.js';
 import { buildWeeklyStatsMessage } from './weekly.js';
 import { announceLevelUp, awardVoiceXp } from './levels.js';
+import { finalizeChallenge, refreshChallengeCard } from './challenges/actions.js';
 
 const TICK_MS = 30_000;
 
@@ -211,4 +212,49 @@ export function startVoiceXpTicker(client: Client, db: BotDatabase): NodeJS.Time
     }
   };
   return setInterval(() => void tick(), VOICE_XP_TICK_MS);
+}
+
+const CHALLENGE_TICK_MS = 60_000;
+const CHALLENGE_REFRESH_MS = 5 * 60_000;
+
+/**
+ * Once a minute: finalize every active challenge whose deadline passed
+ * (status, reward role, card without buttons), otherwise refresh the card's
+ * leaderboard at most every 5 minutes. One failure never stops the loop.
+ */
+export function startChallengeTicker(client: Client, db: BotDatabase): NodeJS.Timeout {
+  let running = false; // in-flight guard: skip a tick while the previous one is still running
+  const lastRefresh = new Map<number, number>();
+  const tick = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+      const now = Date.now();
+      const active = db.activeChallenges();
+      const liveIds = new Set(active.map((c) => c.id));
+      for (const id of lastRefresh.keys()) if (!liveIds.has(id)) lastRefresh.delete(id);
+      if (active.length === 0) return;
+      for (const guild of client.guilds.cache.values()) {
+        for (const challenge of active) {
+          if (challenge.guildId !== guild.id) continue;
+          try {
+            if (challenge.endsAt <= now) {
+              await finalizeChallenge(client, db, challenge, now);
+              lastRefresh.delete(challenge.id);
+              continue;
+            }
+            if (now - (lastRefresh.get(challenge.id) ?? 0) < CHALLENGE_REFRESH_MS) continue;
+            lastRefresh.set(challenge.id, now);
+            await refreshChallengeCard(client, db, challenge, now);
+          } catch (err) {
+            console.error(`[challenges] guild ${guild.id}: tick failed for challenge #${challenge.id}:`, err);
+          }
+        }
+      }
+    } finally {
+      running = false;
+    }
+  };
+  void tick(); // finalize overdue challenges right after a restart
+  return setInterval(() => void tick(), CHALLENGE_TICK_MS);
 }

@@ -15,9 +15,11 @@ import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from
 import { parseFreeForm } from '../freegames/form.js';
 import { parseBuilderForm } from '../builder/form.js';
 import { sortQueue } from '../builder/queue.js';
-import { OpenCodeAgent, probeAgent } from '../builder/opencode.js';
+import { OpenCodeAgent, probeAgent, type AgentStatus } from '../builder/opencode.js';
 import { fetchTranscript } from '../builder/transcript.js';
 import { buildColorMessage, COLOR_MARKER, sortColorRoles } from '../colors.js';
+import { challengeStatus, challengeWindow, emptyDraft, parseWizardStep, rankProgress, type ChallengeDraft, type ChallengeWizardStep } from '../challenges/form.js';
+import { createAndPostChallenge, finalizeChallenge } from '../challenges/actions.js';
 
 interface Session {
   userId: string;
@@ -519,52 +521,174 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     }
   });
 
+  // Challenges: the last 10 with participant progress for the dashboard section. Flash messages
+  // are read from the redirect query so a POST can bounce back to #challenges.
+  const loadChallenges = (q: { created?: string | undefined; error?: string | undefined; ended?: string | undefined; deleted?: string | undefined }, now = Date.now()): SettingsPageData['challenges'] => {
+    const guild = client.guilds.cache.get(config.guildId);
+    const list: SettingsPageData['challenges']['list'] = db.recentChallenges(config.guildId, 10).map((challenge) => {
+      const participants = db.challengeParticipants(challenge.id);
+      const names = new Map(participants.map((p) => [p.userId, p.displayName]));
+      const totals = db.challengeTotals(challenge.guildId, challenge.metric, challenge.activityName, challenge.startsAt, challenge.endsAt, now);
+      const rows = rankProgress(participants, totals)
+        .slice(0, 10)
+        .map((r) => ({ ...r, name: names.get(r.userId) ?? r.userId }));
+      return { challenge, status: challengeStatus(challenge, now), joined: participants.length, rows };
+    });
+    const flash = q.created
+      ? { kind: 'saved' as const, message: `Challenge "${q.created.slice(0, 100)}" created and posted.` }
+      : q.error
+        ? { kind: 'error' as const, message: q.error.slice(0, 300) }
+        : q.ended && /^\d+$/.test(q.ended)
+          ? { kind: 'saved' as const, message: `Challenge #${q.ended} ended; the top 3 with progress got the reward role.` }
+          : q.deleted && /^\d+$/.test(q.deleted)
+            ? { kind: 'saved' as const, message: `Challenge #${q.deleted} deleted.` }
+            : null;
+    return {
+      wizard: { step: 1, draft: emptyDraft(now), errors: [] },
+      list,
+      channels: listChannels(),
+      roles: listRoles(),
+      activityNames: db.activityNames(config.guildId, '', 100),
+      canManageRoles: guild?.members.me?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false,
+      flash,
+    };
+  };
+
+  // Shared by the settings page and the wizard POSTs (which render the page again on error or
+  // for the next step). POSTs pass agent/deploy null so they never wait on OpenCode or Dokploy.
+  const settingsPageData = (
+    session: Session,
+    q: Record<string, string | undefined>,
+    opts: { agent: AgentStatus | null; deploy: DeployStatus; challenges?: SettingsPageData['challenges'] },
+  ): SettingsPageData => {
+    const colorSettings = db.getColorSettings(config.guildId);
+    const colorRoles = db.getColorRoles(config.guildId);
+    const guild = client.guilds.cache.get(config.guildId);
+    return {
+      settings: db.getSettings(config.guildId),
+      channels: listChannels(),
+      user: { username: session.username, avatar: session.avatar },
+      deploy: opts.deploy,
+      saved: q.saved === '1',
+      weeklyFlash:
+        q.weekly === 'sent'
+          ? { kind: 'sent' }
+          : q.weekly === 'error'
+            ? { kind: 'error', reason: (q.reason ?? '').slice(0, 200) }
+            : null,
+      challenges: opts.challenges ?? loadChallenges(q),
+      free: {
+        settings: db.getFreeSettings(config.guildId),
+        roles: listRoles(),
+        webhookEnabled: !!config.freestuffPublicKey,
+        postedCount: db.countFreePosted(config.guildId),
+        flash: q.freeSaved === '1' ? { kind: 'saved' } : null,
+      },
+      builder: {
+        settings: db.getBuilderSettings(),
+        passwordSet: !!config.opencodePassword,
+        agent: opts.agent,
+        flash: q.builderSaved === '1' ? { kind: 'saved' } : q.builderError ? { kind: 'error', reason: (q.builderError ?? '').slice(0, 200) } : null,
+      },
+      color: {
+        channelId: colorSettings.channelId,
+        roles: listRoles(),
+        selected: colorRoles.map((r) => r.roleId),
+        posted: colorRoles.filter((r) => r.messageId !== null).length,
+        canManage: guild?.members.me?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false,
+        flash:
+          q.colorSaved === '1'
+            ? ({ kind: 'saved' } as const)
+            : q.colorError
+              ? ({ kind: 'error', reason: (q.colorError ?? '').slice(0, 200) } as const)
+              : null,
+      },
+    };
+  };
+
   app.get('/dashboard/settings', requireAdmin, async (c) => {
     const session = c.get('session');
-    const builderFlash: SettingsPageData['builder']['flash'] =
-      c.req.query('builderSaved') === '1' ? { kind: 'saved' } : c.req.query('builderError') ? { kind: 'error', reason: (c.req.query('builderError') ?? '').slice(0, 200) } : null;
     const [agent, deploy] = await Promise.all([config.opencodePassword ? probeAgent(config.opencodeUrl, config.opencodePassword, 3000) : null, deployStatus(DEPLOY_PAGE_WAIT_MS)]);
-    return c.html(
-      settingsPage({
-        settings: db.getSettings(config.guildId),
-        channels: listChannels(),
-        user: { username: session.username, avatar: session.avatar },
-        deploy,
-        saved: c.req.query('saved') === '1',
-        weeklyFlash:
-          c.req.query('weekly') === 'sent'
-            ? { kind: 'sent' }
-            : c.req.query('weekly') === 'error'
-              ? { kind: 'error', reason: (c.req.query('reason') ?? '').slice(0, 200) }
-              : null,
-        free: {
-          settings: db.getFreeSettings(config.guildId),
-          roles: listRoles(),
-          webhookEnabled: !!config.freestuffPublicKey,
-          postedCount: db.countFreePosted(config.guildId),
-          flash: c.req.query('freeSaved') === '1' ? { kind: 'saved' } : null,
-        },
-        builder: { settings: db.getBuilderSettings(), passwordSet: !!config.opencodePassword, agent, flash: builderFlash },
-        color: (() => {
-          const colorSettings = db.getColorSettings(config.guildId);
-          const colorRoles = db.getColorRoles(config.guildId);
-          const guild = client.guilds.cache.get(config.guildId);
-          return {
-            channelId: colorSettings.channelId,
-            roles: listRoles(),
-            selected: colorRoles.map((r) => r.roleId),
-            posted: colorRoles.filter((r) => r.messageId !== null).length,
-            canManage: guild?.members.me?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false,
-            flash:
-              c.req.query('colorSaved') === '1'
-                ? ({ kind: 'saved' } as const)
-                : c.req.query('colorError')
-                  ? ({ kind: 'error', reason: (c.req.query('colorError') ?? '').slice(0, 200) } as const)
-                  : null,
-          };
-        })(),
-      }),
+    return c.html(settingsPage(settingsPageData(session, c.req.query(), { agent, deploy })));
+  });
+
+  const CHALLENGE_FIELDS = ['step', 'name', 'description', 'metric', 'activityName', 'target', 'startDate', 'endDate', 'channelId', 'rewardRoleId'] as const;
+
+  const challengeForm = (form: Record<string, unknown>): Record<string, string | undefined> => {
+    const out: Record<string, string | undefined> = {};
+    for (const key of CHALLENGE_FIELDS) {
+      const value = form[key];
+      if (typeof value === 'string') out[key] = value;
+    }
+    return out;
+  };
+
+  const challengeWizardPage = (c: Context, step: ChallengeWizardStep, draft: ChallengeDraft, errors: string[], status: 200 | 400 = 200) =>
+    c.html(
+      settingsPage(
+        settingsPageData(c.get('session'), {}, {
+          agent: null,
+          deploy: null,
+          challenges: { ...loadChallenges({}), wizard: { step, draft, errors } },
+        }),
+      ),
+      status,
     );
+
+  app.post('/challenge-wizard', requireAdmin, async (c) => {
+    const raw = challengeForm(await c.req.parseBody());
+    const stepNum = Number(raw.step);
+    const step: ChallengeWizardStep = stepNum === 2 ? 2 : stepNum === 3 ? 3 : 1;
+    const parsed = parseWizardStep(raw, step, { channels: new Set(listChannels().map((ch) => ch.id)), roles: new Set(listRoles().map((r) => r.id)) });
+    if (parsed.errors.length > 0) return challengeWizardPage(c, step, parsed.draft, parsed.errors, 400);
+    if (step < 3) return challengeWizardPage(c, (step + 1) as ChallengeWizardStep, parsed.draft, []);
+
+    const window = challengeWindow(parsed.draft.startDate, parsed.draft.endDate);
+    if (!window.ok) return challengeWizardPage(c, 3, parsed.draft, [window.reason], 400);
+    const channel = await sendableChannel(parsed.draft.channelId);
+    if (!channel) return challengeWizardPage(c, 3, parsed.draft, ['The selected channel is missing or the bot cannot post in it.'], 400);
+
+    const result = await createAndPostChallenge(
+      db,
+      {
+        guildId: config.guildId,
+        name: parsed.draft.name,
+        description: parsed.draft.description,
+        metric: parsed.draft.metric,
+        activityName: parsed.draft.metric === 'activity' ? parsed.draft.activityName : null,
+        target: parsed.draft.target,
+        startsAt: window.window.startsAt,
+        endsAt: window.window.endsAt,
+        channelId: parsed.draft.channelId,
+        rewardRoleId: parsed.draft.rewardRoleId || null,
+        createdBy: c.get('session').userId,
+      },
+      channel,
+    );
+    if (!result.ok) return challengeWizardPage(c, 3, parsed.draft, [`Could not post the card: ${result.reason}`], 400);
+    console.log(`[web] challenge #${result.challenge.id} "${result.challenge.name}" created by ${c.get('session').username}`);
+    return c.redirect(`/dashboard/settings?challengeCreated=${encodeURIComponent(parsed.draft.name)}#challenges`);
+  });
+
+  app.post('/challenge-end', requireAdmin, async (c) => {
+    const form = await c.req.parseBody();
+    const id = Number(typeof form.id === 'string' ? form.id : '');
+    const challenge = Number.isSafeInteger(id) ? db.getChallenge(id) : null;
+    if (!challenge || challenge.guildId !== config.guildId) return c.redirect(`/dashboard/settings?challengeError=${encodeURIComponent('Challenge not found.')}#challenges`);
+    if (!(await finalizeChallenge(client, db, challenge))) return c.redirect(`/dashboard/settings?challengeError=${encodeURIComponent('That challenge was already ended.')}#challenges`);
+    console.log(`[web] challenge #${challenge.id} ended by ${c.get('session').username}`);
+    return c.redirect(`/dashboard/settings?challengeEnded=${challenge.id}#challenges`);
+  });
+
+  app.post('/challenge-delete', requireAdmin, async (c) => {
+    const form = await c.req.parseBody();
+    const id = Number(typeof form.id === 'string' ? form.id : '');
+    const challenge = Number.isSafeInteger(id) ? db.getChallenge(id) : null;
+    if (!challenge || challenge.guildId !== config.guildId) return c.redirect(`/dashboard/settings?challengeError=${encodeURIComponent('Challenge not found.')}#challenges`);
+    await deletePickerMessage(challenge.channelId, challenge.messageId);
+    db.deleteChallenge(challenge.id);
+    console.log(`[web] challenge #${challenge.id} deleted by ${c.get('session').username}`);
+    return c.redirect(`/dashboard/settings?challengeDeleted=${challenge.id}#challenges`);
   });
 
   app.get('/dashboard/logs', requireAdmin, async (c) => {
