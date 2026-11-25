@@ -55,6 +55,9 @@ const CSS = `
   html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
   body { margin: 0; background: var(--page); color: var(--text); font: 400 14px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; -webkit-font-smoothing: antialiased; }
   a { color: var(--link); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  /* Plain text links: no underline at rest, a line that grows left to right on hover/focus. Zero specificity (:where) so every styled link keeps its own rules; nav/pills/tabs/buttons are excluded. */
+  :where(a:not([class], .nav a, .secnav a, .seg a, .livestat a, td.url a)), a.row-link { text-decoration: none; background: linear-gradient(currentColor, currentColor) no-repeat 0 100% / 0 1.5px; transition: background-size .2s ease, color .15s ease; }
+  :where(a:not([class], .nav a, .secnav a, .seg a, .livestat a, td.url a)):is(:hover, :focus-visible), a.row-link:is(:hover, :focus-visible), tr[data-href]:hover a.row-link { background-size: 100% 1.5px; color: color-mix(in srgb, var(--link), var(--text) 28%); }
   code { background: var(--card-2); padding: 1px 6px; border-radius: 6px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   h1, h2, h3, p { margin: 0; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
@@ -309,15 +312,20 @@ const CSS = `
   td.url a:hover { text-decoration: underline; }
   td.req { width: 100%; max-width: 0; white-space: normal; }
   tr[data-href] { cursor: pointer; }
-  a.row-link { color: inherit; text-decoration: none; }
-  tr[data-href]:hover a.row-link, a.row-link:focus-visible { text-decoration: underline; }
+  a.row-link { color: inherit; width: fit-content; max-width: 100%; }
+  tr[data-href]:hover a.row-link, a.row-link:is(:hover, :focus-visible) { color: var(--link); }
   .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
   .actions form { margin: 0; }
   .btn.danger { background: transparent; color: var(--err); border-color: var(--err); font-weight: 500; }
   .btn.danger:hover { background: var(--err-soft); filter: none; }
   .req-t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .req-m { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .links { display: inline-flex; align-items: center; gap: 12px; }
+  .links { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+  td .links { flex-wrap: nowrap; }
+  .links a { display: inline-flex; align-items: center; gap: 3px; height: 22px; padding: 0 9px; border: 1px solid var(--line-2); border-radius: 999px; background: none; color: var(--muted); font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap; text-decoration: none; transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
+  .links a[target=_blank]::after { content: '\\2197'; display: inline-block; font-size: 11px; transition: transform .15s ease; }
+  .links a:is(:hover, :focus-visible) { background-color: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--link); }
+  .links a[target=_blank]:is(:hover, :focus-visible)::after { transform: translate(1px, -1px); }
   td.logmsg { white-space: normal; width: 100%; }
   td.logmsg pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-2); }
   tr.lv-error td.logmsg pre { color: var(--text); }
