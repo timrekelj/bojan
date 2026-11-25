@@ -1,4 +1,4 @@
-import type { BuildJob, BuildUsage, BuilderSettings, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
+import type { BuildJob, BuildUsage, BuilderSettings, ChannelRow, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, weekRangeLabel } from '../stats.js';
 import type { WeekBounds } from '../stats.js';
 import { levelProgress, levelTag, steamLevelColors, steamLevelOutline, steamLevelShape } from '../levels.js';
@@ -204,6 +204,13 @@ const CSS = `
   .bar { flex: 1; height: 3px; border-radius: 1px; background: var(--card-2); overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--accent); }
   .pct { color: var(--muted); font-size: 12px; min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+  .chanlb { list-style: none; margin: 0; padding: 0; }
+  .chanlb li { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 5px 10px; padding: 9px 8px; margin: 0 -8px; border-top: 1px solid var(--line); }
+  .chanlb li:first-child { border-top: 0; }
+  .chanlb .name { display: flex; align-items: center; gap: 8px; }
+  .chanlb .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .chanlb li.top .name { font-weight: 600; }
+  .chanlb .share { grid-column: 2 / 4; }
   .emojis { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; padding: 0; list-style: none; }
   .emojis li { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border-radius: 10px; background: var(--card-2); font-size: 19px; line-height: 1; }
   .emojis small { font-size: 13px; font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums; }
@@ -633,6 +640,12 @@ export interface OverviewData {
     last: { bounds: WeekBounds; total: number; rows: UserRow[] };
   };
   allTime: { total: number; rows: UserRow[] };
+  /** Channel message leaderboards; the same `?week=` selection as the user week card. */
+  channelWeek: {
+    current: { bounds: WeekBounds; total: number; rows: ChannelRow[] };
+    last: { bounds: WeekBounds; total: number; rows: ChannelRow[] };
+  };
+  channelAllTime: { total: number; rows: ChannelRow[] };
   reactions: { total: number; top: EmojiRow[] };
   recentEmbeds: EmbedLogRow[];
   embedPage: { page: number; pages: number; total: number; pageSize: number };
@@ -705,12 +718,12 @@ export function medalFor(rank: number): string | null {
 }
 
 /** Week leaderboard tabs; the selected one is plain text with aria-current, the others links. */
-export function weekTabs(selected: 'current' | 'last'): string {
-  const tab = (value: 'current' | 'last', label: string): string =>
+export function weekTabs(selected: 'current' | 'last', hash = 'h-week', label = 'Leaderboard week'): string {
+  const tab = (value: 'current' | 'last', text: string): string =>
     value === selected
-      ? `<span class="tab" aria-current="page">${escapeHtml(label)}</span>`
-      : `<a class="tab" href="/dashboard?week=${value}#h-week">${escapeHtml(label)}</a>`;
-  return `<nav class="tabs" aria-label="Leaderboard week">${tab('current', 'This week')}${tab('last', 'Last week')}</nav>`;
+      ? `<span class="tab" aria-current="page">${escapeHtml(text)}</span>`
+      : `<a class="tab" href="/dashboard?week=${value}#${escapeHtml(hash)}">${escapeHtml(text)}</a>`;
+  return `<nav class="tabs" aria-label="${escapeHtml(label)}">${tab('current', 'This week')}${tab('last', 'Last week')}</nav>`;
 }
 
 function lbRow(rank: number, userId: string, messages: number, total: number, members: Members, opts: { top: boolean; you: boolean; extra: boolean; lvl: string | null }): string {
@@ -743,6 +756,21 @@ export function leaderboard(rows: UserRow[], total: number, members: Members, yo
     items.push(lbRow(you.rank.rank, you.userId, you.rank.messages, total, members, { top: false, you: true, extra: true, lvl: lvl(you.userId) }));
   }
   return `<ol class="lb">${items.join('')}</ol>`;
+}
+
+// Pure: channel message leaderboard. No avatars, "you" row or level tags.
+export function channelLeaderboard(rows: ChannelRow[], total: number, names: Record<string, string>, empty = 'No messages yet.'): string {
+  if (rows.length === 0) return emptyState(empty);
+  const items = rows.map((r, i) => {
+    const name = names[r.channelId] ?? r.channelId;
+    const pct = total > 0 ? Math.min(100, (r.count / total) * 100) : 0;
+    const medal = medalFor(i + 1);
+    const rankCell = medal
+      ? `<span class="rank medal" aria-label="Rank ${i + 1}"><span aria-hidden="true">${medal}</span></span>`
+      : `<span class="rank">${i + 1}</span>`;
+    return `<li${i < 3 ? ' class="top"' : ''}>${rankCell}<span class="name" title="${escapeHtml(name)}"><span class="nm">#${escapeHtml(name)}</span></span><span class="num">${fmt(r.count)}</span><div class="share"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><span class="pct">${total > 0 ? pct.toFixed(1) + '%' : '—'}</span></div></li>`;
+  });
+  return `<ol class="chanlb">${items.join('')}</ol>`;
 }
 
 export interface YouData {
@@ -860,6 +888,7 @@ export function overviewParts(d: OverviewData, now: number = Date.now()): Record
   const wk = d.week.selected === 'current' ? d.week.current : d.week.last;
   const weekSub = `${weekRangeLabel(wk.bounds, d.timezone)}${d.week.selected === 'current' ? ' · in progress' : ''} · ${fmt(wk.total)} messages`;
   const weekYouRank = d.week.selected === 'current' ? d.you.currentWeekRank : d.you.lastWeekRank;
+  const wkChannels = d.week.selected === 'current' ? d.channelWeek.current : d.channelWeek.last;
   return {
     ...chromeParts(d.deploy, now),
     'live-health': healthPills(b, d.deploy, now),
@@ -873,6 +902,8 @@ export function overviewParts(d: OverviewData, now: number = Date.now()): Record
     'live-you': youSection(d.you, { total: d.allTime.total, timezone: d.timezone, channelNames: d.channelNames, username: d.user.username }),
     'live-week': `<section class="card" aria-labelledby="h-week"><div class="card-head"><h2 id="h-week">Week leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected)}${leaderboard(wk.rows, wk.total, d.members, { userId: d.user.id, rank: weekYouRank }, d.xpByUser, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>`,
     'live-all': `<section class="card" aria-labelledby="h-all"><div class="card-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members, { userId: d.user.id, rank: d.you.allRank }, d.xpByUser)}</section>`,
+    'live-chan-week': `<section class="card" aria-labelledby="h-chan-week"><div class="card-head"><h2 id="h-chan-week">Channel leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected, 'h-chan-week', 'Channel leaderboard week')}${channelLeaderboard(wkChannels.rows, wkChannels.total, d.channelNames, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>`,
+    'live-chan-all': `<section class="card" aria-labelledby="h-chan-all"><div class="card-head"><h2 id="h-chan-all">Channels, all time</h2><span class="sub">${fmt(d.channelAllTime.total)} messages</span></div>${channelLeaderboard(d.channelAllTime.rows, d.channelAllTime.total, d.channelNames)}</section>`,
     'live-react': `<section class="card" aria-labelledby="h-react"><div class="card-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}</section>`,
   };
 }
@@ -937,6 +968,7 @@ export function dashboardPage(d: OverviewData, now: number = Date.now()): string
   ${region('live-kpis', parts, 'kpis')}
   ${region('live-you', parts)}
   <div class="cols">${region('live-week', parts)}${region('live-all', parts)}</div>
+  <div class="cols">${region('live-chan-week', parts)}${region('live-chan-all', parts)}</div>
   ${region('live-react', parts)}
   <section class="card" aria-labelledby="h-embeds"><div class="card-head"><h2 id="h-embeds">Embed conversions</h2><span class="sub">${fmt(d.embedPage.total)} converted</span></div>
     ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}

@@ -16,7 +16,7 @@ import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -330,6 +330,17 @@ db.recordReaction({ guildId: G, channelId: 'c2', messageId: 'w2-0', authorId: 'c
 
 const chans = db.topChannels(G, lwk.start, lwk.end, 5);
 check('top channels last week', chans[0]?.channelId === 'c1' && chans[0]?.count === 19 && chans[1]?.channelId === 'c2' && chans[1]?.count === 12, JSON.stringify(chans));
+const chansAll = db.topChannelsAll(G, 1000);
+check(
+  'top channels all time: groups every message, orders by count and respects the limit',
+  chansAll.length > 0 &&
+    chansAll.reduce((s, c) => s + c.count, 0) === db.countMessages(G) &&
+    chansAll.every((c, i) => i === 0 || (chansAll[i - 1]!.count >= c.count)) &&
+    db.topChannelsAll(G, 1).length === 1 &&
+    db.topChannelsAll(G, 1)[0]?.channelId === chansAll[0]?.channelId &&
+    (chansAll.find((c) => c.channelId === 'c1')?.count ?? 0) >= 19,
+  JSON.stringify(chansAll),
+);
 const given = db.topReactionsGiven(G, 3, lwk.start, lwk.end);
 check('top reactions given (week)', given[0]?.userId === 'bob' && given[0]?.count === 2 && given[1]?.userId === 'erin', JSON.stringify(given));
 const received = db.topReactionsReceived(G, 3, lwk.start, lwk.end);
@@ -917,6 +928,30 @@ rmSync(dir, { recursive: true, force: true });
     'weekTabs: last selected flips the highlight',
     tabLast.includes('<span class="tab" aria-current="page">Last week</span>') && tabLast.includes('<a class="tab" href="/dashboard?week=current#h-week">This week</a>'),
   );
+  const tabChan = weekTabs('last', 'h-chan-week', 'Channel leaderboard week');
+  check(
+    'weekTabs: custom hash and label for the channel card',
+    tabChan.includes('<a class="tab" href="/dashboard?week=current#h-chan-week">This week</a>') && tabChan.includes('aria-label="Channel leaderboard week"'),
+  );
+  const chanLb = channelLeaderboard(
+    [{ channelId: 'c1', count: 5 }, { channelId: 'c2', count: 3 }, { channelId: 'c3', count: 2 }, { channelId: 'c4', count: 1 }],
+    10,
+    { c1: 'general', c2: '<b>off topic</b>' },
+  );
+  check(
+    'channelLeaderboard: #name, medals for the top 3, counts, share bars and escaping',
+    chanLb.includes('<ol class="chanlb">') &&
+      chanLb.includes('#general') &&
+      chanLb.includes('<span class="nm">#&lt;b&gt;off topic&lt;/b&gt;</span>') &&
+      !chanLb.includes('<b>off topic</b>') &&
+      (chanLb.match(/class="rank medal"/g) ?? []).length === 3 &&
+      chanLb.includes('<span class="rank">4</span>') &&
+      chanLb.includes('<span class="num">5</span>') &&
+      chanLb.includes('width:50.0%') &&
+      chanLb.includes('>50.0%</span>') &&
+      !chanLb.includes('class="av"'),
+  );
+  check('channelLeaderboard: raw id fallback and empty state', channelLeaderboard([{ channelId: 'c9', count: 1 }], 1, {}).includes('#c9') && channelLeaderboard([], 10, {}, 'Nothing here.').includes('Nothing here.'));
   const emptyYou = youSection(
     { allRank: null, currentWeekRank: null, lastWeekRank: null, xp: null, stats: { userId: 'u9', messages: 0, firstTs: null, lastTs: null }, reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null },
     { total: 10, timezone: 'UTC', channelNames: {}, username: 'Nine' },
@@ -989,6 +1024,8 @@ rmSync(dir, { recursive: true, force: true });
     today: 4,
     week: { selected: 'current', current: { bounds: currentWeekBounds('UTC'), total: 16, rows }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [] } },
     allTime: { total: 16, rows },
+    channelWeek: { current: { bounds: currentWeekBounds('UTC'), total: 16, rows: [{ channelId: 'c1', count: 5 }] }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [] } },
+    channelAllTime: { total: 16, rows: [{ channelId: 'c1', count: 5 }] },
     reactions: { total: 0, top: [] },
     recentEmbeds: [{ id: 1, guildId: G, channelId: 'c1', messageId: 'm', url: 'https://x.test/a?b="c"', provider: 'twitter', ts: T }],
     embedPage: { page: 2, pages: 3, total: 21, pageSize: 10 },
@@ -1021,7 +1058,7 @@ rmSync(dir, { recursive: true, force: true });
   );
   check(
     'dashboardPage: every live region holds exactly what overviewParts renders',
-    Object.keys(ovParts).sort().join() === 'live-all,live-deploy,live-health,live-kpis,live-react,live-week,live-you' && Object.entries(ovParts).every(([id, html]) => new RegExp(`id="${id}"[^>]*>`).test(ovHtml) && ovHtml.includes(`>${html}</div>`)),
+    Object.keys(ovParts).sort().join() === 'live-all,live-chan-all,live-chan-week,live-deploy,live-health,live-kpis,live-react,live-week,live-you' && Object.entries(ovParts).every(([id, html]) => new RegExp(`id="${id}"[^>]*>`).test(ovHtml) && ovHtml.includes(`>${html}</div>`)),
   );
   check(
     'dashboardPage: no settings forms; embed table with data-labels, escaped url and pager links',
