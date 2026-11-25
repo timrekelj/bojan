@@ -1,4 +1,4 @@
-import type { BuildJob, BuildUsage, BuilderSettings, ChannelRow, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow } from '../db.js';
+import type { BuildJob, BuildUsage, BuilderSettings, ChannelRow, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow, Challenge } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, weekRangeLabel } from '../stats.js';
 import type { WeekBounds } from '../stats.js';
 import { levelProgress, levelTag, steamLevelColors, steamLevelOutline, steamLevelShape } from '../levels.js';
@@ -6,6 +6,8 @@ import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 import type { DeployStatus } from '../dokploy.js';
 import type { TranscriptEntry, TranscriptPart } from '../builder/transcript.js';
+import { formatChallengeTarget, formatChallengeValue, type ChallengeStatus, type ChallengeWizardStep, type ChallengeDraft, type ProgressRow } from '../challenges/form.js';
+import { CHALLENGE_METRICS, metricLabel, metricTargetUnit } from '../challenges/types.js';
 import { canCancel, retryAction } from '../builder/queue.js';
 
 export function escapeHtml(s: string): string {
@@ -688,6 +690,7 @@ export interface SettingsPageData {
   deploy?: DeployStatus;
   saved: boolean;
   weeklyFlash: { kind: 'sent' } | { kind: 'error'; reason: string } | null;
+  challenges: ChallengesSectionData;
   free: {
     settings: FreeSettings;
     roles: { id: string; name: string }[];
@@ -715,6 +718,28 @@ export interface BuilderSectionData {
   /** null when OPENCODE_PASSWORD is unset (nothing to probe). */
   agent: AgentStatus | null;
   flash: { kind: 'saved' } | { kind: 'error'; reason: string } | null;
+}
+
+export interface ChallengeProgressRow extends ProgressRow {
+  name: string;
+}
+
+export interface ChallengeListItem {
+  challenge: Challenge;
+  status: ChallengeStatus;
+  joined: number;
+  /** Top 10 by progress, ties by join order. */
+  rows: ChallengeProgressRow[];
+}
+
+export interface ChallengesSectionData {
+  wizard: { step: ChallengeWizardStep; draft: ChallengeDraft; errors: string[] };
+  list: ChallengeListItem[];
+  channels: { id: string; name: string }[];
+  roles: { id: string; name: string }[];
+  activityNames: string[];
+  canManageRoles: boolean;
+  flash: { kind: 'saved' | 'error'; message: string } | null;
 }
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -1114,6 +1139,106 @@ function freeSection(d: SettingsPageData): string {
   </section>`;
 }
 
+/**
+ * Challenges (izzivi): a 3-step server-side wizard (no JS) and the list of
+ * recent challenges with progress, End now / Delete. Own POST endpoints.
+ */
+export function challengeSection(d: Pick<SettingsPageData, 'challenges' | 'settings'>): string {
+  const ch = d.challenges;
+  const w = ch.wizard;
+  const tz = d.settings.timezone;
+  const hidden = (pairs: [string, string][]): string =>
+    pairs.map(([name, value]) => `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`).join('');
+  const detailsPairs = (draft: ChallengeDraft): [string, string][] => [
+    ['name', draft.name],
+    ['description', draft.description],
+    ['metric', draft.metric],
+    ['activityName', draft.activityName],
+  ];
+  const schedulePairs = (draft: ChallengeDraft): [string, string][] => [
+    ['target', String(draft.target)],
+    ['startDate', draft.startDate],
+    ['endDate', draft.endDate],
+    ['channelId', draft.channelId],
+    ['rewardRoleId', draft.rewardRoleId],
+  ];
+  const dateEl = (id: string, name: string, value: string): string =>
+    `<input type="date" id="${escapeHtml(id)}" name="${escapeHtml(name)}" value="${escapeHtml(value)}" aria-describedby="${escapeHtml(id)}-help">`;
+  const textareaEl = (id: string, name: string, value: string, max: number): string =>
+    `<textarea id="${escapeHtml(id)}" name="${escapeHtml(name)}" rows="3" maxlength="${max}" aria-describedby="${escapeHtml(id)}-help">${escapeHtml(value)}</textarea>`;
+  const metricOptions = CHALLENGE_METRICS.map((m) => `<option value="${m}"${w.draft.metric === m ? ' selected' : ''}>${escapeHtml(metricLabel(m))}${m === 'activity' ? ' (name below)' : ''}</option>`).join('');
+  const channelOptions = ch.channels.map((c) => `<option value="${escapeHtml(c.id)}"${w.draft.channelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
+  const roleOptions = ch.roles.map((r) => `<option value="${escapeHtml(r.id)}"${w.draft.rewardRoleId === r.id ? ' selected' : ''}>@${escapeHtml(r.name)}</option>`).join('');
+  const activityList = ch.activityNames.length > 0 ? `<datalist id="challengeActivities">${ch.activityNames.map((n) => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist>` : '';
+  const errors = w.errors.length > 0 ? `<div class="flash" role="alert">${w.errors.map(escapeHtml).join('<br>')}</div>` : '';
+  const flash =
+    ch.flash?.kind === 'saved' ? `<div class="flash" role="status">${escapeHtml(ch.flash.message)}</div>` : ch.flash?.kind === 'error' ? `<div class="flash" role="alert">${escapeHtml(ch.flash.message)}</div>` : '';
+
+  let wizard = '';
+  if (w.step === 1) {
+    wizard = `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="1">
+      <div class="rows">
+        ${row({ id: 'challengeName', label: 'Name', help: '1–100 characters, shown as the card title.', control: textEl('challengeName', 'name', w.draft.name, false) })}
+        ${row({ id: 'challengeDescription', label: 'Description', help: 'Up to 500 characters. Say what counts and how it is measured.', control: textareaEl('challengeDescription', 'description', w.draft.description, 500) })}
+        ${row({ id: 'challengeMetric', label: 'Metric', help: 'Measured from the stats the bot already records.', control: selectEl('challengeMetric', 'metric', metricOptions) })}
+        ${row({ id: 'challengeActivity', label: 'Activity name', help: 'Required for the activity metric, e.g. League of Legends or Counter-Strike 2.', control: `<input type="text" id="challengeActivity" name="activityName" value="${escapeHtml(w.draft.activityName)}" list="challengeActivities" aria-describedby="challengeActivity-help" autocomplete="off">${activityList}` })}
+      </div>
+      <div class="savebar"><span class="muted">Step 1 of 3</span><button type="submit">Next: schedule</button></div>
+    </form>`;
+  } else if (w.step === 2) {
+    wizard = `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="2">${hidden(detailsPairs(w.draft))}
+      <div class="rows">
+        ${row({ id: 'challengeTarget', label: 'Target', help: `Whole number (${metricTargetUnit(w.draft.metric)}); shown as "progress / target".`, control: numberEl('challengeTarget', 'target', w.draft.target, 1, 1_000_000) })}
+        ${row({ id: 'challengeStart', label: 'Start date', help: 'YYYY-MM-DD, empty = starts when created. UTC day.', control: dateEl('challengeStart', 'startDate', w.draft.startDate) })}
+        ${row({ id: 'challengeEnd', label: 'End date', help: 'The whole UTC day counts. Must be in the future.', control: dateEl('challengeEnd', 'endDate', w.draft.endDate) })}
+        ${row({ id: 'challengeChannel', label: 'Channel', help: 'Where the joinable card is posted.', control: selectEl('challengeChannel', 'channelId', `<option value="">— choose —</option>${channelOptions}`) })}
+        ${row({ id: 'challengeRole', label: 'Reward role', help: 'Granted permanently to the top 3 with progress above 0 when the challenge ends.', control: selectEl('challengeRole', 'rewardRoleId', `<option value="">— no reward —</option>${roleOptions}`) })}
+      </div>
+      <div class="savebar"><span class="muted">Step 2 of 3</span><button type="submit">Next: review</button></div>
+    </form>`;
+  } else {
+    const channelName = ch.channels.find((c) => c.id === w.draft.channelId)?.name ?? w.draft.channelId;
+    const roleName = ch.roles.find((r) => r.id === w.draft.rewardRoleId)?.name ?? w.draft.rewardRoleId;
+    const start = w.draft.startDate ? `${w.draft.startDate} (UTC)` : 'when created';
+    wizard = `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="3">${hidden([...detailsPairs(w.draft), ...schedulePairs(w.draft)])}
+      <div class="rows">
+        <div class="row block"><div class="row-l"><span class="lbl">Summary</span><span class="help">Creating posts the card and opens the challenge for joins.</span></div><div class="row-c">
+          <p class="muted"><b>${escapeHtml(w.draft.name)}</b></p>
+          ${w.draft.description ? `<p class="muted">${escapeHtml(w.draft.description)}</p>` : ''}
+          <p class="muted">${escapeHtml(metricLabel(w.draft.metric))}${w.draft.metric === 'activity' ? ` · ${escapeHtml(w.draft.activityName)}` : ''} · target <b>${escapeHtml(formatChallengeTarget(w.draft.metric, w.draft.target))}</b></p>
+          <p class="muted">From ${escapeHtml(start)} until ${escapeHtml(w.draft.endDate)} (UTC) · #${escapeHtml(channelName)}${w.draft.rewardRoleId ? ` · reward @${escapeHtml(roleName)}` : ''}</p>
+        </div></div>
+      </div>
+      <div class="savebar"><span class="muted">Step 3 of 3</span><button type="submit">Create challenge</button></div>
+    </form>`;
+  }
+
+  const listItems = ch.list.map((item) => {
+    const c = item.challenge;
+    const status = item.status === 'active' ? statusPill('ok', 'Active') : item.status === 'upcoming' ? statusPill('warn', 'Upcoming') : statusPill('off', 'Ended');
+    const until = item.status === 'ended' ? `ended ${fmtDate(c.endedAt ?? c.endsAt, tz)}` : `until ${fmtDate(c.endsAt, tz)}`;
+    const top =
+      item.rows.length > 0
+        ? item.rows.map((r) => `<div class="muted">${r.rank === 1 ? '🥇' : r.rank === 2 ? '🥈' : r.rank === 3 ? '🥉' : `${r.rank}.`} ${escapeHtml(r.name)} — <b>${escapeHtml(formatChallengeValue(c.metric, r.value))}</b> / ${escapeHtml(formatChallengeTarget(c.metric, c.target))}</div>`).join('')
+        : '<p class="muted">No participants yet.</p>';
+    const actions =
+      (item.status === 'ended'
+        ? ''
+        : `<form method="post" action="/challenge-end"><input type="hidden" name="id" value="${c.id}"><button type="submit" class="btn ghost" onclick="return confirm('End this challenge now and grant the reward role?')">End now</button></form>`) +
+      `<form method="post" action="/challenge-delete"><input type="hidden" name="id" value="${c.id}"><button type="submit" class="btn ghost" onclick="return confirm('Delete this challenge and its card?')">Delete</button></form>`;
+    return `<div class="row block"><div class="row-l"><span class="lbl">#${c.id} ${escapeHtml(c.name)}</span><span class="help">${escapeHtml(metricLabel(c.metric))}${c.metric === 'activity' && c.activityName ? ` · ${escapeHtml(c.activityName)}` : ''} · ${escapeHtml(until)} · ${escapeHtml(fmt(item.joined))} joined</span></div><div class="row-c">${status}${top}<div class="savebar">${actions}</div></div></div>`;
+  });
+
+  const active = ch.list.filter((i) => i.status === 'active').length;
+  const rolePill = ch.canManageRoles ? statusPill('ok', 'Manage Roles granted') : statusPill('err', 'Missing Manage Roles — rewards cannot be granted');
+  return `<section class="card" id="challenges" aria-labelledby="h-challenges"><div class="card-head"><h2 id="h-challenges">Challenges</h2><span class="sub">${fmt(active)} active</span></div><p class="card-sub">Time-limited goals on the existing stats. Members join on the posted card; progress counts from the challenge start for everyone who joined. When it ends, the top 3 with progress above 0 get the reward role permanently.</p><div class="pills card-pills">${rolePill}</div>
+    ${flash}${errors}
+    ${wizard}
+    <h3 class="group-h">Recent challenges</h3>
+    <div class="rows">${listItems.length > 0 ? listItems.join('') : emptyState('No challenges yet — create one above.')}</div>
+  </section>`;
+}
+
 function limitMeter(label: string, m: { percent: number; limited: boolean; resetsAt: number }, tz: string, threshold: number): string {
   const pct = Math.max(0, Math.min(100, Math.round(m.percent)));
   const cls = m.limited || pct >= threshold ? 'err' : pct >= threshold * 0.8 ? 'warn' : '';
@@ -1165,7 +1290,7 @@ export function builderSection(d: Pick<SettingsPageData, 'builder' | 'settings'>
 
 // Strips the one-shot flash params so a refresh doesn't show the toast again.
 const CLEAR_FLASH_SCRIPT =
-  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('colorSaved');u.searchParams.delete('colorError');u.searchParams.delete('weekly');u.searchParams.delete('reason');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('colorSaved');u.searchParams.delete('colorError');u.searchParams.delete('weekly');u.searchParams.delete('reason');u.searchParams.delete('challengeCreated');u.searchParams.delete('challengeError');u.searchParams.delete('challengeEnded');u.searchParams.delete('challengeDeleted');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
 
 /** Settings page: one card per feature; forms save independently (general, colours, free games, AI assistant). */
 export function settingsPage(d: SettingsPageData, now: number = Date.now()): string {
@@ -1175,9 +1300,9 @@ export function settingsPage(d: SettingsPageData, now: number = Date.now()): str
     d.weeklyFlash?.kind === 'error' ? `<div class="flash" role="alert">Couldn't send weekly stats: ${escapeHtml(d.weeklyFlash.reason || 'unknown error')}</div>` : '',
     d.free.flash?.kind === 'saved' ? '<div class="flash" role="status">Free games settings saved.</div>' : '',
   ].join('');
-  const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['colors', 'Colours'], ['free', 'Free games'], ['builder', 'Assistant']];
+  const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['colors', 'Colours'], ['free', 'Free games'], ['challenges', 'Challenges'], ['builder', 'Assistant']];
   const secnav = `<nav class="secnav" aria-label="Settings sections"><div class="secnav-in">${anchors.map(([id, label]) => `<a href="#${id}">${label}</a>`).join('')}</div></nav>`;
-  const body = `${flashes}${generalForm(d)}${colorSection(d)}${freeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.free.flash || d.builder.flash || d.color.flash ? CLEAR_FLASH_SCRIPT : ''}`;
+  const body = `${flashes}${generalForm(d)}${colorSection(d)}${freeSection(d)}${challengeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.free.flash || d.builder.flash || d.color.flash || d.challenges.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout({ active: 'settings', title: 'Settings', sub: '<p class="hero-sub">Everything the bot does is configured here. Each section saves on its own.</p>', live: 'quiet', between: secnav, body, now }, { user: d.user, deploy: d.deploy });
 }
 
