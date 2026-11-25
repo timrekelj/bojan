@@ -25,7 +25,7 @@ import { OpenCodeAgent, REPO_DIR, type AgentReply } from './opencode.js';
 import { formatBuildNote, type BuildNoteInfo, type PromptImage, MAX_IMAGES } from './chat-parse.js';
 import { normalizeBuildResult, normalizePlanResult, parseAgentReply, parseModelRef, parsePrUrl, prInfoFromJson, type PrInfo, type PrRef } from './parse.js';
 import { BUILDING, DONE, FAILED, PLANNING, addReaction, removeOwnReaction } from './reactions.js';
-import { BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildPrompt, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, formatPlannerMessage, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
+import { BUILD_ERROR_RETRY_PROMPT, PLAN_ERROR_RETRY_PROMPT, MAX_ERROR_RETRIES, isTransientAgentError, BUILD_RESUME_PROMPT, PLAN_RESUME_PROMPT, buildPrompt, buildingActivity, conflictAction, conflictFixPrompt, decideRecovery, followUpPrompt, formatPlannerMessage, freeSlots, shouldHoldPlanReply, reactionChannelFor, guardPlanStatus, pickJobsToStart, planChanged, queuePosition } from './queue.js';
 
 const PLAN_TIMEOUT_MS = 15 * 60_000;
 const BUILD_TIMEOUT_MS = 90 * 60_000;
@@ -317,6 +317,24 @@ export class BuilderRunner {
     }
   }
 
+  /** Re-prompts the session while the reply ended with a transient error; returns the final reply for the normal handling. */
+  private async retryTransient(job: BuildJob, sessionId: string, first: AgentReply, retryPrompt: string, timeoutMs: number, onProgress: () => Promise<void>): Promise<AgentReply> {
+    const status = (this.db.getBuildJob(job.id) ?? job).status;
+    let reply = first;
+    for (let attempt = 1; attempt <= MAX_ERROR_RETRIES && isTransientAgentError(reply.error) && !this.stopped; attempt++) {
+      const cur = this.db.getBuildJob(job.id);
+      if (!cur || cur.status !== status) break;
+      console.warn(`[builder] guild=${job.guildId} job=${job.id} transient agent error (${reply.error}), retry ${attempt}/${MAX_ERROR_RETRIES}`);
+      await new Promise((resolve) => setTimeout(resolve, 5000 * attempt));
+      if (this.stopped) break;
+      const again = this.db.getBuildJob(job.id);
+      if (!again || again.status !== status) break;
+      reply = await this.getAgent().promptAndWait(sessionId, retryPrompt, timeoutMs, undefined, onProgress);
+      await this.saveUsage(job);
+    }
+    return reply;
+  }
+
   /** One planning turn: set up on the first call, then prompt the planner and handle its reply. */
   private async runTurn(jobId: number, prompt: string, latestUserMessageAt: number, triggerId?: string, images: readonly PromptImage[] = [], noApprove = false): Promise<void> {
     let job = this.db.getBuildJob(jobId);
@@ -341,7 +359,8 @@ export class BuilderRunner {
       this.db.setBuildJobStatus(jobId, 'planning');
       if (!job.sessionId) job = await this.setup(job);
       const current = job;
-      const reply = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS, images, () => this.saveUsage(current));
+      const first = await this.getAgent().promptAndWait(job.sessionId as string, prompt, PLAN_TIMEOUT_MS, images, () => this.saveUsage(current));
+      const reply = await this.retryTransient(job, job.sessionId as string, first, PLAN_ERROR_RETRY_PROMPT, PLAN_TIMEOUT_MS, () => this.saveUsage(current));
       await this.saveUsage(job);
       // Directed messages arrived during this turn: its reply is stale, the follow-up turn posts the plan.
       const pending = this.state(jobId).followUps.length;
@@ -518,11 +537,13 @@ export class BuilderRunner {
       const build = job.planSessionId === null ? await this.startBuildSession(job) : job;
       const prompt = buildPrompt({ request: job.request, title: job.title, plan });
       reply = await agent.promptAndWait(build.sessionId as string, prompt, BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(build));
+      reply = await this.retryTransient(job, build.sessionId as string, reply, BUILD_ERROR_RETRY_PROMPT, BUILD_TIMEOUT_MS, () => this.saveUsage(build));
     } else {
       // No plan text to hand over: continue the planner session instead of building blind.
       console.warn(`[builder] guild=${job.guildId} job=${job.id} no plan text stored, building in the planner session`);
       await agent.switchAgent(job.sessionId as string, 'feature-build');
       reply = await agent.promptAndWait(job.sessionId as string, 'The user approved the plan above. Implement it now following your instructions.', BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(job));
+      reply = await this.retryTransient(job, job.sessionId as string, reply, BUILD_ERROR_RETRY_PROMPT, BUILD_TIMEOUT_MS, () => this.saveUsage(job));
     }
     await this.saveUsage(job);
     await this.handleBuildReply(this.db.getBuildJob(job.id) ?? job, reply);
@@ -559,7 +580,8 @@ export class BuilderRunner {
       await this.post(f, buildConflictFixCard(f.title ?? ''), f.planMessageId);
       const agent = this.getAgent();
       if (f.planSessionId === null) await agent.switchAgent(f.sessionId as string, 'feature-build');
-      const reply = await agent.promptAndWait(f.sessionId as string, conflictFixPrompt(f.prUrl as string), BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(f));
+      const first = await agent.promptAndWait(f.sessionId as string, conflictFixPrompt(f.prUrl as string), BUILD_TIMEOUT_MS, undefined, () => this.saveUsage(f));
+      const reply = await this.retryTransient(f, f.sessionId as string, first, BUILD_ERROR_RETRY_PROMPT, BUILD_TIMEOUT_MS, () => this.saveUsage(f));
       await this.saveUsage(f);
       await this.handleFixReply(this.db.getBuildJob(f.id) ?? f, reply);
     }, (reason) => this.failFix(job.id, reason));
