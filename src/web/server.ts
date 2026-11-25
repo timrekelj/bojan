@@ -343,6 +343,11 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
     const curWeekRows = db.topUsers(config.guildId, 10, curWeek.start, curEnd);
     const allRows = db.topUsers(config.guildId, 10);
+    const lastWeekTotal = db.countMessages(config.guildId, week.start, week.end);
+    const curWeekTotal = db.countMessages(config.guildId, curWeek.start, curEnd);
+    const weekChannelRows = db.topChannels(config.guildId, week.start, week.end, 10);
+    const curWeekChannelRows = db.topChannels(config.guildId, curWeek.start, curEnd, 10);
+    const allChannelRows = db.topChannelsAll(config.guildId, 10);
     const embedTotal = db.countEmbeds(config.guildId);
     const embedSize = parsePageSize(opts.embedsSize);
     const embedPages = Math.max(1, Math.ceil(embedTotal / embedSize));
@@ -360,6 +365,10 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     }
     const channelNames: Record<string, string> = {};
     for (const { channelId } of recentEmbeds) {
+      const name = guild?.channels.cache.get(channelId)?.name;
+      if (name) channelNames[channelId] = name;
+    }
+    for (const { channelId } of [...weekChannelRows, ...curWeekChannelRows, ...allChannelRows]) {
       const name = guild?.channels.cache.get(channelId)?.name;
       if (name) channelNames[channelId] = name;
     }
@@ -402,10 +411,15 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       today: db.countMessages(config.guildId, startOfDay(settings.timezone)),
       week: {
         selected: weekSel,
-        current: { bounds: curWeek, total: db.countMessages(config.guildId, curWeek.start, curEnd), rows: curWeekRows },
-        last: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
+        current: { bounds: curWeek, total: curWeekTotal, rows: curWeekRows },
+        last: { bounds: week, total: lastWeekTotal, rows: weekRows },
       },
       allTime: { total, rows: allRows },
+      channelWeek: {
+        current: { bounds: curWeek, total: curWeekTotal, rows: curWeekChannelRows },
+        last: { bounds: week, total: lastWeekTotal, rows: weekChannelRows },
+      },
+      channelAllTime: { total, rows: allChannelRows },
       reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
       recentEmbeds,
       embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: embedSize },
