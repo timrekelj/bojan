@@ -19,7 +19,7 @@ import { challengeButtonId, challengeStatus, challengeWindow, dayEndMs, dayStart
 import { CHALLENGE_METRICS, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, challengeSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, challengeSection, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -37,7 +37,7 @@ import { extractReply, lastConversationIsAssistant } from './builder/opencode.js
 import { addUsage, estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages, parseLimitThreshold } from './builder/form.js';
 import { blockingLimit, formatLimitDenial, LimitGate } from './builder/limits.js';
-import { BUILD_RESUME_PROMPT, buildPrompt, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
+import { BUILD_RESUME_PROMPT, canCancel, retryAction, isTransientAgentError, buildPrompt, CONFLICT_SETTLE_MS, FOLLOW_UP_HEADER, followUpPrompt, formatPlannerMessage, shouldHoldPlanReply, buildingActivity, reactionChannelFor, conflictAction, conflictFixPrompt, decideRecovery, freeSlots, guardPlanStatus, pickJobsToStart, planChanged, queuePosition, sortQueue } from './builder/queue.js';
 import { chatThreadNameFor, chunkMessage, FEATURE_REQUEST_QUESTION, formatChatMessage, featureRequestText, formatDecisionInput, formatInitialPrompt, formatJobStatus, formatThreadContext, sinceLastBotMessage, formatTranscript, isFeatureRequest, languageDirective, parseChatReply, pickReplyTarget, replaceBotMention, shouldRunDecision, formatBuildNote, withLanguageRule, withNotes, selectImages } from './builder/chat-parse.js';
 import { requestsPage } from './web/views.js';
 import { logsHref, pagerHtml, parsePageSize, rangeSummary } from './web/views.js';
@@ -333,6 +333,17 @@ db.recordReaction({ guildId: G, channelId: 'c2', messageId: 'w2-0', authorId: 'c
 
 const chans = db.topChannels(G, lwk.start, lwk.end, 5);
 check('top channels last week', chans[0]?.channelId === 'c1' && chans[0]?.count === 19 && chans[1]?.channelId === 'c2' && chans[1]?.count === 12, JSON.stringify(chans));
+const chansAll = db.topChannelsAll(G, 1000);
+check(
+  'top channels all time: groups every message, orders by count and respects the limit',
+  chansAll.length > 0 &&
+    chansAll.reduce((s, c) => s + c.count, 0) === db.countMessages(G) &&
+    chansAll.every((c, i) => i === 0 || (chansAll[i - 1]!.count >= c.count)) &&
+    db.topChannelsAll(G, 1).length === 1 &&
+    db.topChannelsAll(G, 1)[0]?.channelId === chansAll[0]?.channelId &&
+    (chansAll.find((c) => c.channelId === 'c1')?.count ?? 0) >= 19,
+  JSON.stringify(chansAll),
+);
 const given = db.topReactionsGiven(G, 3, lwk.start, lwk.end);
 check('top reactions given (week)', given[0]?.userId === 'bob' && given[0]?.count === 2 && given[1]?.userId === 'erin', JSON.stringify(given));
 const received = db.topReactionsReceived(G, 3, lwk.start, lwk.end);
@@ -920,6 +931,30 @@ rmSync(dir, { recursive: true, force: true });
     'weekTabs: last selected flips the highlight',
     tabLast.includes('<span class="tab" aria-current="page">Last week</span>') && tabLast.includes('<a class="tab" href="/dashboard?week=current#h-week">This week</a>'),
   );
+  const tabChan = weekTabs('last', 'h-chan-week', 'Channel leaderboard week');
+  check(
+    'weekTabs: custom hash and label for the channel card',
+    tabChan.includes('<a class="tab" href="/dashboard?week=current#h-chan-week">This week</a>') && tabChan.includes('aria-label="Channel leaderboard week"'),
+  );
+  const chanLb = channelLeaderboard(
+    [{ channelId: 'c1', count: 5 }, { channelId: 'c2', count: 3 }, { channelId: 'c3', count: 2 }, { channelId: 'c4', count: 1 }],
+    10,
+    { c1: 'general', c2: '<b>off topic</b>' },
+  );
+  check(
+    'channelLeaderboard: #name, medals for the top 3, counts, share bars and escaping',
+    chanLb.includes('<ol class="chanlb">') &&
+      chanLb.includes('#general') &&
+      chanLb.includes('<span class="nm">#&lt;b&gt;off topic&lt;/b&gt;</span>') &&
+      !chanLb.includes('<b>off topic</b>') &&
+      (chanLb.match(/class="rank medal"/g) ?? []).length === 3 &&
+      chanLb.includes('<span class="rank">4</span>') &&
+      chanLb.includes('<span class="num">5</span>') &&
+      chanLb.includes('width:50.0%') &&
+      chanLb.includes('>50.0%</span>') &&
+      !chanLb.includes('class="av"'),
+  );
+  check('channelLeaderboard: raw id fallback and empty state', channelLeaderboard([{ channelId: 'c9', count: 1 }], 1, {}).includes('#c9') && channelLeaderboard([], 10, {}, 'Nothing here.').includes('Nothing here.'));
   const emptyYou = youSection(
     { allRank: null, currentWeekRank: null, lastWeekRank: null, xp: null, stats: { userId: 'u9', messages: 0, firstTs: null, lastTs: null }, reactions: { given: 0, received: 0 }, voice: { totalMs: 0, sessions: 0 }, activityMs: 0, topActivities: [], topVoice: [], emojiGiven: [], emojiReceived: [], nowPlaying: [], inVoice: null },
     { total: 10, timezone: 'UTC', channelNames: {}, username: 'Nine' },
@@ -992,6 +1027,8 @@ rmSync(dir, { recursive: true, force: true });
     today: 4,
     week: { selected: 'current', current: { bounds: currentWeekBounds('UTC'), total: 16, rows }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [] } },
     allTime: { total: 16, rows },
+    channelWeek: { current: { bounds: currentWeekBounds('UTC'), total: 16, rows: [{ channelId: 'c1', count: 5 }] }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [] } },
+    channelAllTime: { total: 16, rows: [{ channelId: 'c1', count: 5 }] },
     reactions: { total: 0, top: [] },
     recentEmbeds: [{ id: 1, guildId: G, channelId: 'c1', messageId: 'm', url: 'https://x.test/a?b="c"', provider: 'twitter', ts: T }],
     embedPage: { page: 2, pages: 3, total: 21, pageSize: 10 },
@@ -1024,7 +1061,7 @@ rmSync(dir, { recursive: true, force: true });
   );
   check(
     'dashboardPage: every live region holds exactly what overviewParts renders',
-    Object.keys(ovParts).sort().join() === 'live-all,live-deploy,live-health,live-kpis,live-react,live-week,live-you' && Object.entries(ovParts).every(([id, html]) => new RegExp(`id="${id}"[^>]*>`).test(ovHtml) && ovHtml.includes(`>${html}</div>`)),
+    Object.keys(ovParts).sort().join() === 'live-all,live-chan-all,live-chan-week,live-deploy,live-health,live-kpis,live-react,live-week,live-you' && Object.entries(ovParts).every(([id, html]) => new RegExp(`id="${id}"[^>]*>`).test(ovHtml) && ovHtml.includes(`>${html}</div>`)),
   );
   check(
     'dashboardPage: no settings forms; embed table with data-labels, escaped url and pager links',
@@ -1548,6 +1585,8 @@ rmSync(dir, { recursive: true, force: true });
     check('shouldHoldPlanReply', !shouldHoldPlanReply({ pendingFollowUps: 0, error: false, planStatus: 'needs_input' }) && !shouldHoldPlanReply({ pendingFollowUps: 1, error: true, planStatus: null }) && !shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: 'cancelled' }) && shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: 'needs_input' }) && shouldHoldPlanReply({ pendingFollowUps: 2, error: false, planStatus: 'approved' }) && shouldHoldPlanReply({ pendingFollowUps: 1, error: false, planStatus: null }));
     check('follow-up approval downgraded', guardPlanStatus({ status: 'approved', planPostedAt: 2000, latestUserMessageAt: 1000 }) === 'needs_input');
   }
+  check('transient agent errors', isTransientAgentError('aborted: Step interrupted') && isTransientAgentError('APIError: 503 Service Unavailable') && isTransientAgentError('The model run ended with an error.') && isTransientAgentError('fetch failed') && isTransientAgentError('overloaded_error: Overloaded'));
+  check('permanent agent errors', !isTransientAgentError(null) && !isTransientAgentError('ProviderAuthError: invalid api key') && !isTransientAgentError('ContextOverflowError: prompt is too long') && !isTransientAgentError('MessageOutputLengthError: output length exceeded') && !isTransientAgentError('something odd'));
   check('resume / conflict prompts', BUILD_RESUME_PROMPT.includes('gh pr view') && BUILD_RESUME_PROMPT.includes('json block') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('git merge origin/main') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('no force push') && conflictFixPrompt('https://github.com/a/b/pull/1').includes('https://github.com/a/b/pull/1'));
   const ca = (o: Partial<Parameters<typeof conflictAction>[0]>) => conflictAction({ conflict: 'conflict', fixAttempts: 0, notified: false, slotFree: true, sinceUpdateMs: 10 * CONFLICT_SETTLE_MS, ...o });
   check('conflictAction: fix when slot free, wait otherwise, unknown/ok do nothing', ca({}) === 'fix' && ca({ slotFree: false }) === 'wait' && ca({ conflict: 'unknown' }) === 'none' && ca({ conflict: 'ok' }) === 'none');
@@ -1768,7 +1807,7 @@ rmSync(dir, { recursive: true, force: true });
   const timingHtml = sessionParts({ ...sdata, entries: [...tm].reverse() })['live-session']!;
   console.log('sample timing line:', (timingHtml.match(/<div class="toks">waited[^<]*<\/div>/) ?? [''])[0]);
   check('sessionParts: timing line rendered and escaped, idle shown from 5 s', timingHtml.includes('waited 48.2 s for first token · total 1 min 10 s · tools 5.5 s · retry: attempt 2: rate: slow &lt;down&gt;') && !timingHtml.includes('slow <down>') && timingHtml.includes('idle 10.0 s before this step') && !timingHtml.includes('idle 1.0 s'));
-  check('requestsParts: session links for jobs and chats', requestsHtml.includes('href="/dashboard/sessions/ses_job7"') && requestsHtml.includes('href="/dashboard/sessions/ses_chat9"'));
+  check('requestsParts: rows open their session (data-href + title link), no Session/Plan link text', requestsHtml.includes('<tr data-href="/dashboard/sessions/ses_job7">') && requestsHtml.includes('<tr data-href="/dashboard/sessions/ses_chat9">') && requestsHtml.includes('class="req-t row-link" href="/dashboard/sessions/ses_job7"') && requestsHtml.includes('class="row-link" href="/dashboard/sessions/ses_chat9"') && !requestsHtml.includes('>Session<') && !requestsHtml.includes('>Plan<') && requestsHtml.includes('>Thread</a>') && requestsHtml.includes('>PR</a>'));
   check('requestsParts: tokens cell and KPI use cache %', requestsHtml.includes('<td data-label="Tokens">100 / 20 / 5 / 75%</td>') && requestsHtml.includes('Cache hits') && !requestsHtml.includes('Cached tokens'));
   console.log('sample tokens cells:', (requestsHtml.match(/<td data-label="Tokens">[^<]*<\/td>/g) ?? []).join(' | '));
   const ownerDb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-owner-')), 'owner.db'));
@@ -1783,7 +1822,18 @@ rmSync(dir, { recursive: true, force: true });
   const op = ownerDb.findSessionOwner(G, 'ses_plan1');
   check('planSessionId round trip + findSessionOwner by plan and build session id', oj.planSessionId === null && oj2?.planSessionId === 'ses_plan1' && oj2.sessionId === 'ses_build1' && op?.kind === 'job' && op.job.id === oj.id && ownerDb.findSessionOwner(G, 'ses_build1')?.kind === 'job' && ownerDb.findSessionOwner(G, 'ses_own1') === null);
   ownerDb.close();
-  check('requestsParts: Plan link next to Session link', requestsHtml.includes('<a href="/dashboard/sessions/ses_plan7">Plan</a>') && !requestsParts({ jobs: [{ ...job, planSessionId: null }], totals: { jobs: 1, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chatTotals: { threads: 0, oneOffs: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [], page: 1, pages: 1, pageSize: 20, chatPage: 1, chatPages: 1, chatPageSize: 20, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } })['live-reqs']!.includes('>Plan<'));
+  const noSes = requestsParts({ jobs: [{ ...job, sessionId: null }], totals: { jobs: 1, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chatTotals: { threads: 0, oneOffs: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }, chats: [], page: 1, pages: 1, pageSize: 20, chatPage: 1, chatPages: 1, chatPageSize: 20, guildId: G, timezone: 'UTC', members: {}, user: { username: 'x', avatar: null } })['live-reqs']!;
+  check('requestsParts: rows without a session are not clickable', !noSes.includes('data-href') && !noSes.includes('row-link'));
+  check('LIVE_SCRIPT: delegated row click handler skips links/buttons/forms and honours new-tab clicks', LIVE_SCRIPT.includes("tr[data-href]") && LIVE_SCRIPT.includes("a,button,input,select,textarea,form") && LIVE_SCRIPT.includes('auxclick') && LIVE_SCRIPT.includes('metaKey'));
+  const headOf = (j: Record<string, unknown>, sid = 'ses_job7'): string => sessionParts({ ...sdata, sessionId: sid, owner: { kind: 'job', job: { ...job, ...j } as never } })['live-session-head']!;
+  const hb = headOf({ status: 'building' });
+  check('sessionParts: building job shows Cancel (confirm, POST back=session), no Retry', hb.includes('action="/dashboard/requests/7/cancel?back=session"') && hb.includes('>Cancel</button>') && hb.includes('confirm(') && !hb.includes('>Retry<'));
+  const hf = headOf({ status: 'failed', approvedAt: 5, lastPlan: 'plan' });
+  check('sessionParts: failed job with a plan shows Retry, no Cancel', hf.includes('action="/dashboard/requests/7/retry?back=session"') && hf.includes('>Retry</button>') && !hf.includes('>Cancel<'));
+  check('sessionParts: merged job has no action buttons', !headOf({ status: 'merged' }).includes('class="actions"') && !headOf({ status: 'failed', approvedAt: null, lastPlan: null, sessionId: null }).includes('>Retry<'));
+  check('sessionParts: Links point to the job\'s other session', hb.includes('href="/dashboard/sessions/ses_plan7">Plan session</a>') && headOf({}, 'ses_plan7').includes('href="/dashboard/sessions/ses_job7">Build session</a>') && !headOf({ planSessionId: null }).includes('Plan session'));
+  check('canCancel: only planning/awaiting_input/queued/building', (['planning', 'awaiting_input', 'queued', 'building'] as const).every((x) => canCancel(x)) && (['pr_open', 'merged', 'failed', 'cancelled', 'closed'] as const).every((x) => !canCancel(x)));
+  check('retryAction: build with approved plan, plan with session only, none otherwise', retryAction({ status: 'failed', approvedAt: 1, lastPlan: 'p', sessionId: 's' }) === 'build' && retryAction({ status: 'failed', approvedAt: null, lastPlan: 'p', sessionId: 's' }) === 'plan' && retryAction({ status: 'failed', approvedAt: 1, lastPlan: '  ', sessionId: 's' }) === 'plan' && retryAction({ status: 'failed', approvedAt: null, lastPlan: null, sessionId: null }) === 'none' && retryAction({ status: 'building', approvedAt: 1, lastPlan: 'p', sessionId: 's' }) === 'none' && retryAction({ status: 'cancelled', approvedAt: 1, lastPlan: 'p', sessionId: 's' }) === 'none');
   check('sessionParts: header says plan session vs build session', sessionParts({ ...sdata, sessionId: 'ses_plan7' })['live-session-head']!.includes('Plan session') && sp['live-session-head']!.includes('Build session'));
   const bp = buildPrompt({ request: 'add <ping>', title: 'Ping', plan: '- edit a.ts\n- test' });
   check('buildPrompt: request, title, plan, approval', bp.includes('add <ping>') && bp.includes('Title: Ping') && bp.includes('Approved plan:\n- edit a.ts\n- test') && bp.includes('approved') && bp.includes('Implement it now') && !buildPrompt({ request: 'r', title: null, plan: 'p' }).includes('Title:'));

@@ -7,7 +7,7 @@ import { ChannelType, PermissionFlagsBits, type Client } from 'discord.js';
 import type { BotDatabase, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type LogsPageData, type OverviewData, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
+import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
 import { cachedDeployments, dokployEnabled, fetchDeployments, type DeployResult, type DeployStatus, type DokployConfig } from '../dokploy.js';
 import { postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
@@ -15,6 +15,7 @@ import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from
 import { parseFreeForm } from '../freegames/form.js';
 import { parseBuilderForm } from '../builder/form.js';
 import { sortQueue } from '../builder/queue.js';
+import type { BuilderRunner } from '../builder/runner.js';
 import { OpenCodeAgent, probeAgent, type AgentStatus } from '../builder/opencode.js';
 import { fetchTranscript } from '../builder/transcript.js';
 import { buildColorMessage, COLOR_MARKER, sortColorRoles } from '../colors.js';
@@ -169,7 +170,7 @@ async function checkGuildAdmin(accessToken: string): Promise<{ ok: boolean; user
   return { ok: false, user, reason: `member endpoint -> ${memberRes.status}, guilds endpoint -> ${guildsRes.status}` };
 }
 
-export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffPublicKey?: string | null } = {}): Hono {
+export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffPublicKey?: string | null; builder?: Pick<BuilderRunner, 'cancelJob' | 'retryJob'> } = {}): Hono {
   const app = new Hono();
   const freestuffKey = opts.freestuffPublicKey === undefined ? config.freestuffPublicKey : opts.freestuffPublicKey;
   const freestuffReplay = createReplayGuard();
@@ -345,6 +346,11 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
     const curWeekRows = db.topUsers(config.guildId, 10, curWeek.start, curEnd);
     const allRows = db.topUsers(config.guildId, 10);
+    const lastWeekTotal = db.countMessages(config.guildId, week.start, week.end);
+    const curWeekTotal = db.countMessages(config.guildId, curWeek.start, curEnd);
+    const weekChannelRows = db.topChannels(config.guildId, week.start, week.end, 10);
+    const curWeekChannelRows = db.topChannels(config.guildId, curWeek.start, curEnd, 10);
+    const allChannelRows = db.topChannelsAll(config.guildId, 10);
     const embedTotal = db.countEmbeds(config.guildId);
     const embedSize = parsePageSize(opts.embedsSize);
     const embedPages = Math.max(1, Math.ceil(embedTotal / embedSize));
@@ -362,6 +368,10 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     }
     const channelNames: Record<string, string> = {};
     for (const { channelId } of recentEmbeds) {
+      const name = guild?.channels.cache.get(channelId)?.name;
+      if (name) channelNames[channelId] = name;
+    }
+    for (const { channelId } of [...weekChannelRows, ...curWeekChannelRows, ...allChannelRows]) {
       const name = guild?.channels.cache.get(channelId)?.name;
       if (name) channelNames[channelId] = name;
     }
@@ -404,10 +414,15 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       today: db.countMessages(config.guildId, startOfDay(settings.timezone)),
       week: {
         selected: weekSel,
-        current: { bounds: curWeek, total: db.countMessages(config.guildId, curWeek.start, curEnd), rows: curWeekRows },
-        last: { bounds: week, total: db.countMessages(config.guildId, week.start, week.end), rows: weekRows },
+        current: { bounds: curWeek, total: curWeekTotal, rows: curWeekRows },
+        last: { bounds: week, total: lastWeekTotal, rows: weekRows },
       },
       allTime: { total, rows: allRows },
+      channelWeek: {
+        current: { bounds: curWeek, total: curWeekTotal, rows: curWeekChannelRows },
+        last: { bounds: week, total: lastWeekTotal, rows: weekChannelRows },
+      },
+      channelAllTime: { total, rows: allChannelRows },
       reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
       recentEmbeds,
       embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: embedSize },
@@ -695,14 +710,46 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     return c.html(logsPage(loadLogs(c.get('session'), { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page'), size: c.req.query('size') }, await deployStatus(DEPLOY_PAGE_WAIT_MS))));
   });
 
+  // One-shot toast after a cancel/retry redirect: `done` is a fixed code, `error` a short message.
+  const actionFlash = (c: Context): PageFlash | undefined => {
+    const done = c.req.query('done');
+    const error = c.req.query('error');
+    if (error) return { kind: 'error', text: error.slice(0, 200) };
+    if (done === 'cancelled') return { kind: 'ok', text: 'Request cancelled.' };
+    if (done === 'retried') return { kind: 'ok', text: 'Retry started.' };
+    return undefined;
+  };
+
   app.get('/dashboard/requests', requireAdmin, async (c) => {
-    return c.html(requestsPage(loadRequests(c.get('session'), c.req.query('page'), c.req.query('chatPage'), c.req.query('size'), c.req.query('chatSize'), await deployStatus(DEPLOY_PAGE_WAIT_MS))));
+    return c.html(requestsPage({ ...loadRequests(c.get('session'), c.req.query('page'), c.req.query('chatPage'), c.req.query('size'), c.req.query('chatSize'), await deployStatus(DEPLOY_PAGE_WAIT_MS)), flash: actionFlash(c) }));
   });
 
   app.get('/dashboard/sessions/:id', requireAdmin, async (c) => {
     const data = await loadSession(c.get('session'), c.req.param('id') ?? '', c.req.query('cursor'), await deployStatus(DEPLOY_PAGE_WAIT_MS));
-    return data ? c.html(sessionPage(data)) : c.html(errorPage('Session not found.'), 404);
+    return data ? c.html(sessionPage({ ...data, flash: actionFlash(c) })) : c.html(errorPage('Session not found.'), 404);
   });
+
+  // Cancel / retry a feature request. Same auth/CSRF model as the other forms (admin session cookie, SameSite=Lax, POST only).
+  for (const action of ['cancel', 'retry'] as const) {
+    app.post(`/dashboard/requests/:id/${action}`, requireAdmin, async (c) => {
+      const admin = c.get('session').username;
+      const id = Number(c.req.param('id'));
+      const job = Number.isInteger(id) ? db.getBuildJob(id) : null;
+      const back = c.req.query('back') === 'session' && job?.sessionId ? `/dashboard/sessions/${encodeURIComponent(job.sessionId)}` : '/dashboard/requests';
+      const to = (q: string) => c.redirect(`${back}?${q}`);
+      if (!job || job.guildId !== config.guildId) return to(`error=${encodeURIComponent('Request not found.')}`);
+      if (!opts.builder) return to(`error=${encodeURIComponent('The builder is not available.')}`);
+      try {
+        const result = action === 'cancel' ? await opts.builder.cancelJob(id, admin) : await opts.builder.retryJob(id, admin);
+        if (!result.ok) return to(`error=${encodeURIComponent(result.reason)}`);
+      } catch (err) {
+        console.error(`[web] guild=${config.guildId} job=${id} ${action} failed:`, err);
+        return to(`error=${encodeURIComponent(`Could not ${action} the request.`)}`);
+      }
+      console.log(`[web] guild=${config.guildId} job=${id} ${action === 'cancel' ? 'cancelled' : 'retried'} by ${admin}`);
+      return to(`done=${action === 'cancel' ? 'cancelled' : 'retried'}`);
+    });
+  }
 
   app.post('/builder-settings', requireAdmin, async (c) => {
     const form = await c.req.parseBody();
@@ -842,8 +889,8 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   return app;
 }
 
-export function startWebServer(client: Client, db: BotDatabase): void {
-  const app = createWebApp(client, db);
+export function startWebServer(client: Client, db: BotDatabase, builder?: BuilderRunner): void {
+  const app = createWebApp(client, db, { builder });
   serve({ fetch: app.fetch, port: config.dashboardPort, hostname: '0.0.0.0' }, (info) => {
     console.log(`[web] dashboard on http://localhost:${info.port} (register ${config.dashboardUrl}/auth/callback as the OAuth redirect)`);
     console.log(

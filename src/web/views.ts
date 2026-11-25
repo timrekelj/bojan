@@ -1,4 +1,4 @@
-import type { BuildJob, BuildUsage, BuilderSettings, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow, Challenge } from '../db.js';
+import type { BuildJob, BuildUsage, BuilderSettings, ChannelRow, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow, Challenge } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, weekRangeLabel } from '../stats.js';
 import type { WeekBounds } from '../stats.js';
 import { levelProgress, levelTag, steamLevelColors, steamLevelOutline, steamLevelShape } from '../levels.js';
@@ -8,6 +8,7 @@ import type { DeployStatus } from '../dokploy.js';
 import type { TranscriptEntry, TranscriptPart } from '../builder/transcript.js';
 import { formatChallengeTarget, formatChallengeValue, type ChallengeStatus, type ChallengeWizardStep, type ChallengeDraft, type ProgressRow } from '../challenges/form.js';
 import { CHALLENGE_METRICS, metricLabel, metricTargetUnit } from '../challenges/types.js';
+import { canCancel, retryAction } from '../builder/queue.js';
 
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -56,6 +57,9 @@ const CSS = `
   html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
   body { margin: 0; background: var(--page); color: var(--text); font: 400 14px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; -webkit-font-smoothing: antialiased; }
   a { color: var(--link); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  /* Plain text links: no underline at rest, a line that grows left to right on hover/focus. Zero specificity (:where) so every styled link keeps its own rules; nav/pills/tabs/buttons are excluded. */
+  :where(a:not([class], .nav a, .secnav a, .seg a, .livestat a, td.url a)), a.row-link { text-decoration: none; background: linear-gradient(currentColor, currentColor) no-repeat 0 100% / 0 1.5px; transition: background-size .2s ease, color .15s ease; }
+  :where(a:not([class], .nav a, .secnav a, .seg a, .livestat a, td.url a)):is(:hover, :focus-visible), a.row-link:is(:hover, :focus-visible), tr[data-href]:hover a.row-link { background-size: 100% 1.5px; color: color-mix(in srgb, var(--link), var(--text) 28%); }
   code { background: var(--card-2); padding: 1px 6px; border-radius: 6px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   h1, h2, h3, p { margin: 0; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
@@ -206,6 +210,13 @@ const CSS = `
   .bar { flex: 1; height: 3px; border-radius: 1px; background: var(--card-2); overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--accent); }
   .pct { color: var(--muted); font-size: 12px; min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+  .chanlb { list-style: none; margin: 0; padding: 0; }
+  .chanlb li { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 5px 10px; padding: 9px 8px; margin: 0 -8px; border-top: 1px solid var(--line); }
+  .chanlb li:first-child { border-top: 0; }
+  .chanlb .name { display: flex; align-items: center; gap: 8px; }
+  .chanlb .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .chanlb li.top .name { font-weight: 600; }
+  .chanlb .share { grid-column: 2 / 4; }
   .emojis { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; padding: 0; list-style: none; }
   .emojis li { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border-radius: 10px; background: var(--card-2); font-size: 19px; line-height: 1; }
   .emojis small { font-size: 13px; font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums; }
@@ -302,9 +313,21 @@ const CSS = `
   td.url a { display: block; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
   td.url a:hover { text-decoration: underline; }
   td.req { width: 100%; max-width: 0; white-space: normal; }
+  tr[data-href] { cursor: pointer; }
+  a.row-link { color: inherit; width: fit-content; max-width: 100%; }
+  tr[data-href]:hover a.row-link, a.row-link:is(:hover, :focus-visible) { color: var(--link); }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
+  .actions form { margin: 0; }
+  .btn.danger { background: transparent; color: var(--err); border-color: var(--err); font-weight: 500; }
+  .btn.danger:hover { background: var(--err-soft); filter: none; }
   .req-t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .req-m { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .links { display: inline-flex; align-items: center; gap: 12px; }
+  .links { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+  td .links { flex-wrap: nowrap; }
+  .links a { display: inline-flex; align-items: center; gap: 3px; height: 22px; padding: 0 9px; border: 1px solid var(--line-2); border-radius: 999px; background: none; color: var(--muted); font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap; text-decoration: none; transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
+  .links a[target=_blank]::after { content: '\\2197'; display: inline-block; font-size: 11px; transition: transform .15s ease; }
+  .links a:is(:hover, :focus-visible) { background-color: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--link); }
+  .links a[target=_blank]:is(:hover, :focus-visible)::after { transform: translate(1px, -1px); }
   td.logmsg { white-space: normal; width: 100%; }
   td.logmsg pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-2); }
   tr.lv-error td.logmsg pre { color: var(--text); }
@@ -493,6 +516,13 @@ set('ok','Updated '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-d
 }).catch(function(){set('retry','Reconnecting…')}).then(function(){busy=false;if(again){again=false;tick()}})}
 setInterval(tick,15000);
 document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')tick()});
+function rowGo(e){
+var t=e.target;if(!t||!t.closest||e.defaultPrevented||e.button!==(e.type==='auxclick'?1:0))return;
+if(t.closest('a,button,input,select,textarea,form,label,summary'))return;
+var r=t.closest('tr[data-href]'),h=r&&r.getAttribute('data-href');if(!h)return;
+if(e.type==='auxclick'||e.metaKey||e.ctrlKey||e.shiftKey)window.open(h,'_blank','noopener');else location.href=h}
+document.addEventListener('click',rowGo);
+document.addEventListener('auxclick',rowGo);
 document.addEventListener('click',function(e){
 var a=e.target&&e.target.closest?e.target.closest('.live a.tab'):null;
 if(!a||stop||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;
@@ -635,6 +665,12 @@ export interface OverviewData {
     last: { bounds: WeekBounds; total: number; rows: UserRow[] };
   };
   allTime: { total: number; rows: UserRow[] };
+  /** Channel message leaderboards; the same `?week=` selection as the user week card. */
+  channelWeek: {
+    current: { bounds: WeekBounds; total: number; rows: ChannelRow[] };
+    last: { bounds: WeekBounds; total: number; rows: ChannelRow[] };
+  };
+  channelAllTime: { total: number; rows: ChannelRow[] };
   reactions: { total: number; top: EmojiRow[] };
   recentEmbeds: EmbedLogRow[];
   embedPage: { page: number; pages: number; total: number; pageSize: number };
@@ -730,12 +766,12 @@ export function medalFor(rank: number): string | null {
 }
 
 /** Week leaderboard tabs; the selected one is plain text with aria-current, the others links. */
-export function weekTabs(selected: 'current' | 'last'): string {
-  const tab = (value: 'current' | 'last', label: string): string =>
+export function weekTabs(selected: 'current' | 'last', hash = 'h-week', label = 'Leaderboard week'): string {
+  const tab = (value: 'current' | 'last', text: string): string =>
     value === selected
-      ? `<span class="tab" aria-current="page">${escapeHtml(label)}</span>`
-      : `<a class="tab" href="/dashboard?week=${value}#h-week">${escapeHtml(label)}</a>`;
-  return `<nav class="tabs" aria-label="Leaderboard week">${tab('current', 'This week')}${tab('last', 'Last week')}</nav>`;
+      ? `<span class="tab" aria-current="page">${escapeHtml(text)}</span>`
+      : `<a class="tab" href="/dashboard?week=${value}#${escapeHtml(hash)}">${escapeHtml(text)}</a>`;
+  return `<nav class="tabs" aria-label="${escapeHtml(label)}">${tab('current', 'This week')}${tab('last', 'Last week')}</nav>`;
 }
 
 function lbRow(rank: number, userId: string, messages: number, total: number, members: Members, opts: { top: boolean; you: boolean; extra: boolean; lvl: string | null }): string {
@@ -768,6 +804,21 @@ export function leaderboard(rows: UserRow[], total: number, members: Members, yo
     items.push(lbRow(you.rank.rank, you.userId, you.rank.messages, total, members, { top: false, you: true, extra: true, lvl: lvl(you.userId) }));
   }
   return `<ol class="lb">${items.join('')}</ol>`;
+}
+
+// Pure: channel message leaderboard. No avatars, "you" row or level tags.
+export function channelLeaderboard(rows: ChannelRow[], total: number, names: Record<string, string>, empty = 'No messages yet.'): string {
+  if (rows.length === 0) return emptyState(empty);
+  const items = rows.map((r, i) => {
+    const name = names[r.channelId] ?? r.channelId;
+    const pct = total > 0 ? Math.min(100, (r.count / total) * 100) : 0;
+    const medal = medalFor(i + 1);
+    const rankCell = medal
+      ? `<span class="rank medal" aria-label="Rank ${i + 1}"><span aria-hidden="true">${medal}</span></span>`
+      : `<span class="rank">${i + 1}</span>`;
+    return `<li${i < 3 ? ' class="top"' : ''}>${rankCell}<span class="name" title="${escapeHtml(name)}"><span class="nm">#${escapeHtml(name)}</span></span><span class="num">${fmt(r.count)}</span><div class="share"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><span class="pct">${total > 0 ? pct.toFixed(1) + '%' : '—'}</span></div></li>`;
+  });
+  return `<ol class="chanlb">${items.join('')}</ol>`;
 }
 
 export interface YouData {
@@ -885,6 +936,7 @@ export function overviewParts(d: OverviewData, now: number = Date.now()): Record
   const wk = d.week.selected === 'current' ? d.week.current : d.week.last;
   const weekSub = `${weekRangeLabel(wk.bounds, d.timezone)}${d.week.selected === 'current' ? ' · in progress' : ''} · ${fmt(wk.total)} messages`;
   const weekYouRank = d.week.selected === 'current' ? d.you.currentWeekRank : d.you.lastWeekRank;
+  const wkChannels = d.week.selected === 'current' ? d.channelWeek.current : d.channelWeek.last;
   return {
     ...chromeParts(d.deploy, now),
     'live-health': healthPills(b, d.deploy, now),
@@ -898,6 +950,8 @@ export function overviewParts(d: OverviewData, now: number = Date.now()): Record
     'live-you': youSection(d.you, { total: d.allTime.total, timezone: d.timezone, channelNames: d.channelNames, username: d.user.username }),
     'live-week': `<section class="card" aria-labelledby="h-week"><div class="card-head"><h2 id="h-week">Week leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected)}${leaderboard(wk.rows, wk.total, d.members, { userId: d.user.id, rank: weekYouRank }, d.xpByUser, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>`,
     'live-all': `<section class="card" aria-labelledby="h-all"><div class="card-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members, { userId: d.user.id, rank: d.you.allRank }, d.xpByUser)}</section>`,
+    'live-chan-week': `<section class="card" aria-labelledby="h-chan-week"><div class="card-head"><h2 id="h-chan-week">Channel leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected, 'h-chan-week', 'Channel leaderboard week')}${channelLeaderboard(wkChannels.rows, wkChannels.total, d.channelNames, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>`,
+    'live-chan-all': `<section class="card" aria-labelledby="h-chan-all"><div class="card-head"><h2 id="h-chan-all">Channels, all time</h2><span class="sub">${fmt(d.channelAllTime.total)} messages</span></div>${channelLeaderboard(d.channelAllTime.rows, d.channelAllTime.total, d.channelNames)}</section>`,
     'live-react': `<section class="card" aria-labelledby="h-react"><div class="card-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}</section>`,
   };
 }
@@ -962,6 +1016,7 @@ export function dashboardPage(d: OverviewData, now: number = Date.now()): string
   ${region('live-kpis', parts, 'kpis')}
   ${region('live-you', parts)}
   <div class="cols">${region('live-week', parts)}${region('live-all', parts)}</div>
+  <div class="cols">${region('live-chan-week', parts)}${region('live-chan-all', parts)}</div>
   ${region('live-react', parts)}
   <section class="card" aria-labelledby="h-embeds"><div class="card-head"><h2 id="h-embeds">Embed conversions</h2><span class="sub">${fmt(d.embedPage.total)} converted</span></div>
     ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}
@@ -1336,6 +1391,19 @@ export interface RequestsPageData {
   members: Record<string, string>;
   user: { username: string; avatar: string | null };
   deploy?: DeployStatus;
+  /** One-shot toast after a cancel/retry redirect. */
+  flash?: PageFlash;
+}
+
+export interface PageFlash {
+  kind: 'ok' | 'error';
+  text: string;
+}
+
+/** Toast for a cancel/retry redirect, plus a script that strips its query params so a refresh doesn't repeat it. */
+function actionFlashHtml(flash: PageFlash | undefined): string {
+  if (!flash) return '';
+  return `<div class="flash" role="${flash.kind === 'error' ? 'alert' : 'status'}">${escapeHtml(flash.text)}</div><script>(()=>{const u=new URL(location.href);u.searchParams.delete('done');u.searchParams.delete('error');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>`;
 }
 
 /** "$0.0123" */
@@ -1385,12 +1453,14 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
   const rows = d.jobs.map((j) => {
     const title = j.title?.trim() || (j.request.length > 80 ? j.request.slice(0, 80) + '…' : j.request);
     const thread = `https://discord.com/channels/${d.guildId}/${j.threadId}`;
-    const pr = (j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '') + (j.sessionId ? sessionLink(j.sessionId) : '') + (j.planSessionId ? sessionLink(j.planSessionId, 'Plan') : '');
+    const pr = j.prUrl ? `<a href="${escapeHtml(j.prUrl)}" target="_blank" rel="noopener noreferrer">PR</a>` : '';
+    const href = j.sessionId ? sessionHref(j.sessionId) : null;
+    const titleHtml = href ? `<a class="req-t row-link" href="${escapeHtml(href)}" title="${escapeHtml(j.request)}">${escapeHtml(title)}</a>` : `<span class="req-t" title="${escapeHtml(j.request)}">${escapeHtml(title)}</span>`;
     const tokens = tokensCell({ input: j.tokensInput, output: j.tokensOutput, reasoning: j.tokensReasoning, cacheRead: j.tokensCacheRead, cacheWrite: j.tokensCacheWrite });
     const queuePos = j.status === 'queued' ? d.queuePositions?.[j.id] : undefined;
     const statusLabel = queuePos ? `queued #${queuePos}` : j.status;
     const badge = JOB_BADGE[j.status] ?? '';
-    return `<tr><td class="dim" data-label="ID">${j.id}</td><td class="req" data-label="Request"><span class="req-t" title="${escapeHtml(j.request)}">${escapeHtml(title)}</span><span class="req-m">${escapeHtml(d.members[j.requesterId] ?? j.requesterId)} · ${escapeHtml(fmtDate(j.createdAt, d.timezone))}</span></td><td data-label="Status"><span class="badge${badge ? ' ' + badge : ''}">${escapeHtml(statusLabel)}</span></td><td data-label="Links"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${pr}</span></td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(j.costUsd))}</td></tr>`;
+    return `<tr${href ? ` data-href="${escapeHtml(href)}"` : ''}><td class="dim" data-label="ID">${j.id}</td><td class="req" data-label="Request">${titleHtml}<span class="req-m">${escapeHtml(d.members[j.requesterId] ?? j.requesterId)} · ${escapeHtml(fmtDate(j.createdAt, d.timezone))}</span></td><td data-label="Status"><span class="badge${badge ? ' ' + badge : ''}">${escapeHtml(statusLabel)}</span></td><td data-label="Links"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${pr}</span></td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(j.costUsd))}</td></tr>`;
   });
   const table =
     rows.length === 0
@@ -1400,7 +1470,9 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
   const chatRows = d.chats.map((c) => {
     const thread = `https://discord.com/channels/${d.guildId}/${c.threadId.split(':')[0]}`;
     const tokens = tokensCell({ input: c.tokensInput, output: c.tokensOutput, reasoning: c.tokensReasoning, cacheRead: c.tokensCacheRead, cacheWrite: c.tokensCacheWrite });
-    return `<tr><td data-label="Thread"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${c.sessionId ? sessionLink(c.sessionId) : ''}${c.oneOff ? '<span class="badge">one-off</span>' : ''}</span></td><td data-label="Started by">${escapeHtml(d.members[c.startedBy] ?? c.startedBy)}</td><td class="dim" data-label="Last active">${escapeHtml(fmtDate(c.lastActiveAt, d.timezone))}</td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(c.costUsd))}</td></tr>`;
+    const href = c.sessionId ? sessionHref(c.sessionId) : null;
+    const who = escapeHtml(d.members[c.startedBy] ?? c.startedBy);
+    return `<tr${href ? ` data-href="${escapeHtml(href)}"` : ''}><td data-label="Thread"><span class="links"><a href="${escapeHtml(thread)}" target="_blank" rel="noopener noreferrer">Thread</a>${c.oneOff ? '<span class="badge">one-off</span>' : ''}</span></td><td data-label="Started by">${href ? `<a class="row-link" href="${escapeHtml(href)}">${who}</a>` : who}</td><td class="dim" data-label="Last active">${escapeHtml(fmtDate(c.lastActiveAt, d.timezone))}</td><td data-label="Tokens">${escapeHtml(tokens)}</td><td class="r" data-label="Est. cost">${escapeHtml(fmtUsd(c.costUsd))}</td></tr>`;
   });
   const chatTable =
     chatRows.length === 0
@@ -1433,7 +1505,7 @@ export function requestsParts(d: RequestsPageData, now: number = Date.now()): Re
 
 export function requestsPage(d: RequestsPageData, now: number = Date.now()): string {
   const parts = requestsParts(d, now);
-  const body = `
+  const body = `${actionFlashHtml(d.flash)}
   ${region('live-chat-kpis', parts, 'kpis')}
   ${region('live-chats', parts)}
   ${region('live-req-kpis', parts, 'kpis six')}
@@ -1457,6 +1529,8 @@ export interface SessionPageData {
   members: Record<string, string>;
   user: { username: string; avatar: string | null };
   deploy?: DeployStatus;
+  /** One-shot toast after a cancel/retry redirect. */
+  flash?: PageFlash;
 }
 
 const TOOL_BADGE: Record<string, string> = { completed: 'ok', error: 'error', running: 'warn', streaming: 'warn' };
@@ -1519,7 +1593,7 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
   const model = (o.kind === 'job' ? o.job.model : o.thread.model) ?? 'default';
   const threadId = o.kind === 'job' ? o.job.threadId : o.thread.threadId.split(':')[0];
   const link = (href: string, label: string): string => `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  const links = [link(`https://discord.com/channels/${d.guildId}/${threadId}`, 'Thread'), ...(o.kind === 'job' && o.job.prUrl ? [link(o.job.prUrl, 'PR')] : [])].join('');
+  let links = [link(`https://discord.com/channels/${d.guildId}/${threadId}`, 'Thread'), ...(o.kind === 'job' && o.job.prUrl ? [link(o.job.prUrl, 'PR')] : [])].join('');
   const who = (id: string): string => d.members[id] ?? id;
   let heading: string;
   let facts: [string, string][];
@@ -1541,8 +1615,21 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
     ['Tokens (in / out / reasoning / cache %)', tokensCell({ input: usage.tokensInput, output: usage.tokensOutput, reasoning: usage.tokensReasoning, cacheRead: usage.tokensCacheRead, cacheWrite: usage.tokensCacheWrite })],
     ['Est. cost', fmtUsd(usage.costUsd)],
   ];
+  let actions = '';
+  if (o.kind === 'job') {
+    const j = o.job;
+    const other = j.planSessionId === null ? null : j.planSessionId === d.sessionId ? (j.sessionId ? { id: j.sessionId, label: 'Build session' } : null) : { id: j.planSessionId, label: 'Plan session' };
+    if (other) links += sessionLink(other.id, other.label);
+    const form = (verb: 'cancel' | 'retry', label: string, cls: string, ask: string): string =>
+      `<form method="post" action="/dashboard/requests/${j.id}/${verb}?back=session"><button type="submit" class="btn ${cls}" onclick="return confirm('${ask}')">${label}</button></form>`;
+    const buttons = [
+      canCancel(j.status) ? form('cancel', 'Cancel', 'danger', `Cancel request #${j.id}? The running agent is stopped.`) : '',
+      retryAction(j) !== 'none' ? form('retry', 'Retry', 'ghost', `Retry request #${j.id}?`) : '',
+    ].join('');
+    if (buttons) actions = `<div class="actions">${buttons}</div>`;
+  }
   const dl = `<dl class="facts">${rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd></div>`).join('')}<div><dt>Session</dt><dd><code>${escapeHtml(d.sessionId)}</code></dd></div><div><dt>Links</dt><dd><span class="links">${links}</span></dd></div></dl>`;
-  const head = `<section class="card" aria-labelledby="h-session"><div class="card-head">${heading}</div>${dl}</section>`;
+  const head = `<section class="card" aria-labelledby="h-session"><div class="card-head">${heading}</div>${actions}${dl}</section>`;
 
   let timeline: string;
   // Entries arrive newest first; parts inside one assistant message stay chronological.
@@ -1564,7 +1651,7 @@ export function sessionParts(d: SessionPageData, now: number = Date.now()): Reco
 
 export function sessionPage(d: SessionPageData, now: number = Date.now()): string {
   const parts = sessionParts(d, now);
-  const body = `
+  const body = `${actionFlashHtml(d.flash)}
   ${region('live-session-head', parts)}
   ${region('live-session', parts)}`;
   return layout(

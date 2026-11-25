@@ -15,7 +15,7 @@ async function main(): Promise<void> {
   const builder = new BuilderRunner(client, db);
   registerEvents(client, db, builder);
 
-  startWebServer(client, db);
+  startWebServer(client, db, builder);
   startWeeklyScheduler(client, db);
   startVoiceXpTicker(client, db);
   startChallengeTicker(client, db);

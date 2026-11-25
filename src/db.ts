@@ -918,6 +918,13 @@ export class BotDatabase {
       .all(guildId, fromTs, toTs, limit) as unknown as ChannelRow[];
   }
 
+  /** Most used channels across all messages, no time range. */
+  topChannelsAll(guildId: string, limit: number): ChannelRow[] {
+    return this.db
+      .prepare('SELECT channel_id AS channelId, COUNT(*) AS count FROM messages WHERE guild_id = ? GROUP BY channel_id ORDER BY count DESC, channel_id ASC LIMIT ?')
+      .all(guildId, limit) as unknown as ChannelRow[];
+  }
+
   topReactionsGiven(guildId: string, limit: number, fromTs?: number, toTs?: number): ReactionCountRow[] {
     if (fromTs !== undefined && toTs !== undefined) {
       return this.db

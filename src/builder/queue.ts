@@ -23,6 +23,23 @@ export function planChanged(prev: string | null, next: string): boolean {
   return normalizePlanText(prev) !== n;
 }
 
+/** Jobs an admin may cancel from the dashboard: those that have not produced a PR yet. */
+export function canCancel(status: string): boolean {
+  return status === 'planning' || status === 'awaiting_input' || status === 'queued' || status === 'building';
+}
+
+/**
+ * What the dashboard Retry button does for a job: `build` (approved plan exists: queue the build again),
+ * `plan` (a planner session exists but the plan was never approved: re-prompt the planner), or `none`
+ * (only failed jobs can be retried).
+ */
+export function retryAction(job: { status: string; approvedAt: number | null; lastPlan: string | null; sessionId: string | null }): 'build' | 'plan' | 'none' {
+  if (job.status !== 'failed') return 'none';
+  if (job.approvedAt !== null && (job.lastPlan ?? '').trim() !== '') return 'build';
+  if (job.sessionId) return 'plan';
+  return 'none';
+}
+
 export const MAX_RESUMES = 2;
 /** After a conflict fix, GitHub may keep reporting the stale state for a while. */
 export const CONFLICT_SETTLE_MS = 3 * 60_000;
@@ -100,6 +117,26 @@ export const BUILD_RESUME_PROMPT =
   'and continue from where you left off, then finish with the required json block.';
 
 export const PLAN_RESUME_PROMPT = 'The bot restarted before you finished your last reply. Re-read the latest message above, continue, and finish with the required json block.';
+
+/** Re-prompts of the same session after a transient agent error (aborted step, overload, dropped connection). */
+export const MAX_ERROR_RETRIES = 2;
+
+export const BUILD_ERROR_RETRY_PROMPT =
+  'Your previous run was interrupted by an error. Inspect the worktree (git status, git log, whether the branch is pushed and a PR exists via `gh pr view`) ' +
+  'and continue from where you left off, then finish with the required json block.';
+
+export const PLAN_ERROR_RETRY_PROMPT = 'Your last reply was interrupted by an error. Re-read the latest message above, continue, and finish with the required json block.';
+
+const PERMANENT_ERROR = /auth|credential|api[ _-]?key|unauthori[sz]ed|forbidden|\b40[13]\b|context|token limit|too many tokens|prompt is too long|output.?length|max.?output/i;
+const TRANSIENT_ERROR = /abort|interrupt|overload|rate.?limit|too many requests|\b429\b|\b(?:500|502|503|504|529)\b|timeout|timed out|econnreset|socket hang up|fetch failed|network/i;
+
+/** True when an agent error is worth re-prompting for: interruptions, overload, dropped connections. Auth, context and output-length errors are permanent. */
+export function isTransientAgentError(error: string | null): boolean {
+  if (!error) return false;
+  if (error === 'The model run ended with an error.') return true;
+  if (PERMANENT_ERROR.test(error)) return false;
+  return TRANSIENT_ERROR.test(error);
+}
 
 export const FOLLOW_UP_HEADER =
   'Messages sent while you were writing your last reply (your last reply was not shown to them; they can not approve the plan). Revise your plan to account for them and reply with the full plan:';
