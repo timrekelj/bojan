@@ -18,8 +18,8 @@ import { fmtHoursMinutes, currentMonthBounds, isMonthlyDue, lastMonthBounds, mon
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { buildChallengeCard } from './challenges/cards.js';
-import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challengeStatus, challengeWindow, dayEndMs, dayStartMs, defaultEndDate, emptyDraft, formatChallengeTarget, formatChallengeValue, parseChallengeButtonId, parseWizardStep, rankProgress } from './challenges/form.js';
-import { CHALLENGE_METRICS, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
+import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challengeLogId, challengeStatus, challengeWindow, dayEndMs, dayStartMs, defaultEndDate, emptyDraft, formatChallengeTarget, formatChallengeValue, goalRemaining, goalShare, goalTargetValue, MAX_SET_VALUE, overallRankProgress, parseChallengeButtonId, parseChallengeLogId, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry } from './challenges/form.js';
+import { CHALLENGE_METRICS, isManualMetric, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
 import { builderSection, challengeDetailPage, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type OverviewData, type SettingsPageData } from './web/views.js';
@@ -1284,6 +1284,7 @@ rmSync(dir, { recursive: true, force: true });
     ],
     counts: { all: 12, upcoming: 3, active: 8, ended: 1 },
     status: 'all',
+    sort: 'newest',
     page: 1,
     pages: 2,
     pageSize: 10,
@@ -1303,6 +1304,7 @@ rmSync(dir, { recursive: true, force: true });
     chPage.includes('<a href="/dashboard/challenges" aria-current="page">') &&
       chPage.includes('aria-label="Challenge status"') && chPage.includes('<span class="tab" aria-current="page">All <span class="muted">12</span></span>') &&
       chPage.includes('href="/dashboard/challenges?status=upcoming"') && chPage.includes('Upcoming <span class="muted">3</span>') &&
+      chPage.includes('aria-label="Sort challenges"') && chPage.includes('href="/dashboard/challenges?sort=ending"') && chPage.includes('Completed <span class="muted">1</span>') &&
       chPage.includes('id="challenge-new"') && !chPage.includes('id="challenge-new" open') && chPage.includes('<input type="hidden" name="step" value="1">') &&
       ['challengeName', 'challengeDescription', 'challengeMetric', 'challengeActivity'].every((id) => chPage.includes(`id="${id}"`)) && chPage.includes('Goal type') &&
       chPage.includes('href="/dashboard/challenges/7"') && chPage.includes('Skelce &lt;x&gt;') && !chPage.includes('Skelce <x>') &&
@@ -1327,8 +1329,27 @@ rmSync(dir, { recursive: true, force: true });
     status: 'active',
     tab: 'overview',
     joined: 2,
-    rows: [{ userId: 'u1', name: 'Ana <x>', value: 120, rank: 1 }, { userId: 'u2', name: 'Bojan', value: 0, rank: 2 }],
-    progress: { rows: [{ userId: 'u1', name: 'Ana <x>', value: 120, rank: 1 }, { userId: 'u2', name: 'Bojan', value: 0, rank: 2 }], page: 1, pages: 2, pageSize: 10, total: 12 },
+    goals: [
+      {
+        goal: { id: 11, challengeId: 7, metric: 'messages', activityName: null, target: 500, position: 0, createdAt: T },
+        rows: [{ userId: 'u1', name: 'Ana <x>', value: 120, rank: 1 }, { userId: 'u2', name: 'Bojan', value: 0, rank: 2 }],
+      },
+      {
+        goal: { id: 12, challengeId: 7, metric: 'pushups', activityName: null, target: 100, position: 1, createdAt: T },
+        rows: [{ userId: 'u1', name: 'Ana <x>', value: 120, rank: 1 }],
+      },
+    ],
+    progress: { page: 1, pages: 2, pageSize: 10, total: 12 },
+    entries: {
+      rows: [
+        { entry: { id: 9, challengeId: 7, goalId: 12, userId: 'u1', displayName: 'Ana <x>', value: 120, flagged: true, createdAt: T }, goal: { id: 12, challengeId: 7, metric: 'pushups', activityName: null, target: 100, position: 1, createdAt: T } },
+      ],
+      page: 1,
+      pages: 1,
+      pageSize: 10,
+      total: 1,
+      flaggedOnly: false,
+    },
     events: {
       rows: [
         { id: 2, challengeId: 7, ts: T, kind: 'joined', actorId: 'u1', actorName: 'Ana <x>', detail: null },
@@ -1348,18 +1369,28 @@ rmSync(dir, { recursive: true, force: true });
   };
   const chDet = challengeDetailPage(chDetail, T);
   check(
-    'challengeDetailPage: tabs with aria-current, overview data, escaped names, actions, flash script',
+    'challengeDetailPage: tabs with aria-current, per-goal overview, escaped names, actions, flash script',
     chDet.includes('aria-label="Challenge sections"') && chDet.includes('<span class="tab" aria-current="page">Overview</span>') &&
-      chDet.includes('href="/dashboard/challenges/7?tab=progress"') && chDet.includes('href="/dashboard/challenges/7?tab=activity"') &&
-      chDet.includes('Goal type') && chDet.includes('Ana &lt;x&gt;') && chDet.includes('120 / 500') && chDet.includes('admin &lt;a&gt;') && chDet.includes('#general') &&
+      chDet.includes('href="/dashboard/challenges/7?tab=progress"') && chDet.includes('href="/dashboard/challenges/7?tab=entries"') && chDet.includes('href="/dashboard/challenges/7?tab=activity"') &&
+      chDet.includes('Goal standings') && chDet.includes('Messages') && chDet.includes('Push-ups') && chDet.includes('Ana &lt;x&gt;') && chDet.includes('120 / 500') && chDet.includes('120 / 100') &&
+      chDet.includes('action="/challenge-goal-add"') && chDet.includes('id="challengeGoalMetric"') && chDet.includes('admin &lt;a&gt;') && chDet.includes('#general') &&
       chDet.includes('action="/challenge-end"') && chDet.includes('action="/challenge-delete"') && chDet.includes('Challenge #7 ended.') &&
-      chDet.includes("searchParams.delete('challengeEnded')") && !chDet.includes('Ana <x>'),
+      chDet.includes("searchParams.delete('challengeUpdated')") && !chDet.includes('Ana <x>'),
   );
   const chProg = challengeDetailPage({ ...chDetail, tab: 'progress' }, T);
   check(
-    'challengeDetailPage: progress tab table and pager',
+    'challengeDetailPage: progress tab has one table per goal and a pager',
     chProg.includes('<span class="tab" aria-current="page">Progress</span>') && chProg.includes('id="h-progress"') && chProg.includes('Ana &lt;x&gt;') &&
+      (chProg.match(/target 500/g) ?? []).length === 1 && (chProg.match(/target 100/g) ?? []).length === 1 &&
       chProg.includes('120 / 500') && chProg.includes('Page 1 of 2') && chProg.includes('Next'),
+  );
+  const chEntries = challengeDetailPage({ ...chDetail, tab: 'entries' }, T);
+  check(
+    'challengeDetailPage: entries tab shows flagged badge and escaped admin edit/delete form',
+    chEntries.includes('<span class="tab" aria-current="page">Entries</span>') && chEntries.includes('id="h-entries"') && chEntries.includes('All entries') &&
+      chEntries.includes('href="/dashboard/challenges/7?tab=entries&amp;flagged=1"') && chEntries.includes('Flagged') && chEntries.includes('Ana &lt;x&gt;') &&
+      chEntries.includes('action="/challenge-entry"') && chEntries.includes('name="entryId" value="9"') && chEntries.includes('name="value" min="1" max="5000" value="120"') &&
+      chEntries.includes('name="reason" maxlength="300"') && chEntries.includes('value="delete"') && !chEntries.includes('Ana <x>'),
   );
   const chAct = challengeDetailPage({ ...chDetail, tab: 'activity' }, T);
   check(
@@ -1370,8 +1401,8 @@ rmSync(dir, { recursive: true, force: true });
   check(
     'challengeTabs: selected tab is plain text, other tabs are links',
     challengeTabs(7, 'progress').includes('<span class="tab" aria-current="page">Progress</span>') &&
-      challengeTabs(7, 'progress').includes('href="/dashboard/challenges/7"') && challengeTabs(7, 'progress').includes('href="/dashboard/challenges/7?tab=activity"') &&
-      !challengeTabs(7, 'progress').includes('?tab=overview'),
+      challengeTabs(7, 'progress').includes('href="/dashboard/challenges/7"') && challengeTabs(7, 'progress').includes('href="/dashboard/challenges/7?tab=entries"') &&
+      challengeTabs(7, 'progress').includes('href="/dashboard/challenges/7?tab=activity"') && !challengeTabs(7, 'progress').includes('?tab=overview'),
   );
   check('settingsPage: challenges moved to their own page', !setHtmlV.includes('id="challenges"') && !setHtmlV.includes('challenge-wizard') && !setHtmlV.includes("searchParams.delete('challengeCreated')"));
 
@@ -2026,12 +2057,17 @@ rmSync(dir, { recursive: true, force: true });
       challengeStatus({ status: 'ended', startsAt: 0, endsAt: chNow + 10 }, chNow) === 'ended',
   );
   check(
-    'challengeEventText: created/joined/left/ended/reward wording, labels cover every kind',
+    'challengeEventText: created/joined/left/ended/reward and entry wording, labels cover every kind',
     challengeEventText('created', 'admin', null) === 'Created by admin' && challengeEventText('created', null, null) === 'Created' &&
       challengeEventText('started', null, null) === 'Started' && challengeEventText('joined', 'Ana', null) === 'Ana joined' &&
       challengeEventText('left', 'Ana', null) === 'Ana left' && challengeEventText('ended', null, 'rewarded 2 member(s)') === 'Ended · rewarded 2 member(s)' &&
       challengeEventText('reward', 'Ana', 'rank 1') === 'Reward given to Ana (rank 1)' && challengeEventText('other', null, null) === 'other' &&
-      CHALLENGE_EVENT_LABELS.joined === 'Joined' && CHALLENGE_EVENT_LABELS.reward === 'Reward',
+      challengeEventText('entry', 'Ana', '120 push-ups') === 'Ana logged 120 push-ups' &&
+      challengeEventText('entry_flagged', 'Ana', '120 push-ups · flagged for review') === 'Ana logged 120 push-ups · flagged for review' &&
+      challengeEventText('entry_edited', 'Admin', 'Ana: 120 → 100') === 'Entry edited by Admin · Ana: 120 → 100' &&
+      challengeEventText('entry_deleted', 'Admin', 'Ana: 100') === 'Entry deleted by Admin · Ana: 100' &&
+      challengeEventText('goal_added', 'Admin', 'Push-ups · target 100') === 'Goal added by Admin · Push-ups · target 100' &&
+      CHALLENGE_EVENT_LABELS.joined === 'Joined' && CHALLENGE_EVENT_LABELS.entry_flagged === 'Flagged' && CHALLENGE_EVENT_LABELS.entry_edited === 'Entry edited',
   );
   const step1 = parseWizardStep({ step: '1', name: 'Skelce', description: 'Do konca leta.', metric: 'messages', activityName: '', target: '', startDate: '', endDate: '2026-12-31', channelId: '', rewardRoleId: '' }, 1, wctx);
   check('parseWizardStep: step 1 accepts details without the schedule', step1.errors.length === 0 && step1.draft.name === 'Skelce' && step1.draft.metric === 'messages');
@@ -2052,13 +2088,47 @@ rmSync(dir, { recursive: true, force: true });
   const ranked = rankProgress([{ userId: 'a', joinedAt: 2 }, { userId: 'b', joinedAt: 1 }, { userId: 'c', joinedAt: 3 }], { a: 5, b: 5, c: 9 });
   check('rankProgress: value desc, ties by join time, zero progress included', ranked.map((r) => `${r.rank}:${r.userId}`).join() === '1:c,2:b,3:a' && ranked[2]?.value === 5);
   check(
-    'challenge values: counts vs durations, targets in minutes',
+    'challenge values: counts vs durations, targets in minutes, push-up unit',
     formatChallengeValue('messages', 1234) === '1,234' && formatChallengeValue('voice', 3_600_000) === '1h' && formatChallengeTarget('voice', 90) === '1h 30m' &&
-      metricLabel('reactions') === 'Reactions given' && metricTargetUnit('voice') === 'minutes' && isTimeMetric('activity') && CHALLENGE_METRICS.length === 4,
+      metricLabel('reactions') === 'Reactions given' && metricTargetUnit('voice') === 'minutes' && metricTargetUnit('pushups') === 'push-ups' &&
+      isTimeMetric('activity') && isManualMetric('pushups') && !isManualMetric('messages') && CHALLENGE_METRICS.length === 5,
   );
   check(
-    'parseChallengeButtonId: join/leave ids, rejects garbage',
-    parseChallengeButtonId(challengeButtonId('join', 7))?.action === 'join' && parseChallengeButtonId('challenge:leave:12')?.challengeId === 12 && parseChallengeButtonId('challenge:join:0') === null && parseChallengeButtonId('challenge:kick:1') === null,
+    'parseChallengeButtonId: join/leave/my ids, rejects garbage',
+    parseChallengeButtonId(challengeButtonId('join', 7))?.action === 'join' && parseChallengeButtonId('challenge:leave:12')?.challengeId === 12 &&
+      parseChallengeButtonId('challenge:my:9')?.action === 'my' && parseChallengeButtonId('challenge:join:0') === null && parseChallengeButtonId('challenge:kick:1') === null,
+  );
+  check(
+    'parseChallengeLogId: log ids round-trip, reject malformed',
+    parseChallengeLogId(challengeLogId(7, 12))?.challengeId === 7 && parseChallengeLogId('challenge:log:7:12')?.goalId === 12 &&
+      parseChallengeLogId('challenge:log:0:12') === null && parseChallengeLogId('challenge:join:7') === null,
+  );
+  check(
+    'parseEntryValue/shouldFlagEntry: 1..5000 whole numbers, 99 is trusted and 100 flagged',
+    parseEntryValue('100') === 100 && parseEntryValue(' 42 ') === 42 && parseEntryValue('99') === 99 && parseEntryValue('0') === null &&
+      parseEntryValue('5001') === null && parseEntryValue('1.5') === null && parseEntryValue('-3') === null && parseEntryValue('abc') === null &&
+      shouldFlagEntry('pushups', 99) === false && shouldFlagEntry('pushups', 100) === true && shouldFlagEntry('messages', 1000) === false && MAX_SET_VALUE === 5000,
+  );
+  check(
+    'goal progress: target units, capped share, remaining amount',
+    goalTargetValue({ metric: 'pushups', target: 100 }) === 100 && goalTargetValue({ metric: 'voice', target: 90 }) === 5_400_000 &&
+      goalShare({ metric: 'pushups', target: 100 }, 50) === 0.5 && goalShare({ metric: 'pushups', target: 100 }, 500) === 1 &&
+      goalRemaining({ metric: 'pushups', target: 100 }, 120) === 0 && goalRemaining({ metric: 'voice', target: 90 }, 3_600_000) === 1_800_000,
+  );
+  const overall = overallRankProgress(
+    [{ userId: 'a', joinedAt: 2 }, { userId: 'b', joinedAt: 1 }, { userId: 'c', joinedAt: 3 }],
+    [{ id: 1, metric: 'messages', target: 500 }, { id: 2, metric: 'pushups', target: 100 }],
+    { 1: { a: 250, b: 500, c: 0 }, 2: { a: 100, b: 0, c: 50 } },
+  );
+  check(
+    'overallRankProgress: mean goal share, ties by join time, zero progress included',
+    overall.map((r) => `${r.rank}:${r.userId}`).join() === '1:a,2:b,3:c' && overall[0]?.share === 0.75 && overall[1]?.share === 0.5 && overall[2]?.share === 0.25,
+  );
+  check(
+    'parseGoal: metric, activity name and target validation',
+    parseGoal({ metric: 'pushups', target: '100' }).ok && parseGoal({ metric: 'activity', activityName: 'CS2', target: '60' }).ok &&
+      !parseGoal({ metric: 'nope', target: '10' }).ok && !parseGoal({ metric: 'activity', activityName: '', target: '10' }).ok &&
+      !parseGoal({ metric: 'pushups', target: '0' }).ok && !parseGoal({ metric: 'pushups', target: '1.5' }).ok,
   );
 
   const chDb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-challenges-')), 'challenges.db'));
@@ -2108,6 +2178,36 @@ rmSync(dir, { recursive: true, force: true });
       chDb.challengeParticipantCount(chChallenge.id) === 2 && chDb.challengeParticipants(chChallenge.id)[0]?.displayName === 'Ana' &&
       chDb.leaveChallenge(chChallenge.id, 'u2') && !chDb.leaveChallenge(chChallenge.id, 'u2') && chDb.challengeParticipantCount(chChallenge.id) === 1,
   );
+  check(
+    'challenges DB: goals are created with the challenge and can be added in order',
+    chDb.challengeGoals(chChallenge.id).length === 1 && chDb.challengeGoals(chChallenge.id)[0]?.metric === 'messages' && chDb.challengeGoals(chChallenge.id)[0]?.target === 500 && (() => {
+      const push = chDb.addChallengeGoal({ challengeId: chChallenge.id, metric: 'pushups', activityName: null, target: 100, createdAt: chNow });
+      return push.position === 1 && chDb.getChallengeGoal(push.id)?.metric === 'pushups' && chDb.challengeGoals(chChallenge.id).map((g) => g.position).join() === '0,1';
+    })(),
+  );
+  check(
+    'challenges DB: manual entries sum per member, edits never double count, deletes remove them',
+    (() => {
+      const goal = chDb.challengeGoals(chChallenge.id)[1]!;
+      const first = chDb.addChallengeEntry({ challengeId: chChallenge.id, goalId: goal.id, userId: 'u1', displayName: 'Ana', value: 100, flagged: true, createdAt: chNow });
+      chDb.addChallengeEntry({ challengeId: chChallenge.id, goalId: goal.id, userId: 'u1', displayName: 'Ana', value: 120, flagged: true, createdAt: chNow + 1 });
+      chDb.addChallengeEntry({ challengeId: chChallenge.id, goalId: goal.id, userId: 'u2', displayName: 'Bojan', value: 50, createdAt: chNow + 2 });
+      const before = chDb.challengeEntryTotals(goal.id, 0, chNow + 3);
+      const updated = chDb.updateChallengeEntry(first.id, 130, false);
+      const afterEdit = chDb.challengeEntryTotals(goal.id, 0, chNow + 3);
+      const entries = chDb.challengeEntries(chChallenge.id, { goalId: goal.id });
+      const deleted = chDb.deleteChallengeEntry(entries[0]!.id);
+      const afterDelete = chDb.challengeEntryTotals(goal.id, 0, chNow + 4);
+      return before.u1 === 220 && before.u2 === 50 && updated && afterEdit.u1 === 250 && chDb.getChallengeEntry(first.id)?.flagged === false &&
+        entries.length === 3 && entries[0]?.value === 50 && deleted && afterDelete.u1 === 250 && afterDelete.u2 === undefined &&
+        chDb.countChallengeEntries(chChallenge.id, { flaggedOnly: true }) === 1 && chDb.challengeEntries(chChallenge.id, { flaggedOnly: true }).length === 1;
+    })(),
+  );
+  check(
+    'challenges DB: sort by ending and name is whitelisted',
+    chDb.listChallenges(CHG, { sort: 'name', now: chNow }).map((c) => c.name).join() === 'Cancelled,Future,Skelce' &&
+      chDb.listChallenges(CHG, { sort: 'ending', now: chNow }).map((c) => c.id)[0] === chChallenge.id,
+  );
   chDb.setChallengeMessage(chChallenge.id, 'm1');
   check('challenges DB: message id, recent list, pending list', chDb.getChallenge(chChallenge.id)?.messageId === 'm1' && chDb.recentChallenges(CHG).some((c) => c.id === chChallenge.id) && chDb.pendingChallenges().some((c) => c.id === chChallenge.id));
   check('challenges DB: endChallenge is idempotent and keeps the first timestamp', chDb.endChallenge(chChallenge.id, chNow + 5) && !chDb.endChallenge(chChallenge.id, chNow + 6) && chDb.getChallenge(chChallenge.id)?.endedAt === chNow + 5 && !chDb.pendingChallenges().some((c) => c.id === chChallenge.id));
@@ -2140,10 +2240,27 @@ rmSync(dir, { recursive: true, force: true });
   check('challengeTotals: voice clips sessions to the window, open counts to now', voiceTotals.u1 === 3_600_000 && voiceTotals.u2 === TMID - (T0 + 3_600_000), JSON.stringify(voiceTotals));
   check('challengeTotals: activity is filtered by name and clipped', actTotals.u1 === 3_600_000 && actTotals.u2 === undefined, JSON.stringify(actTotals));
   check(
-    'challenges DB: delete removes participants and events (cascade)',
-    chDb.deleteChallenge(chChallenge.id) && chDb.getChallenge(chChallenge.id) === null && chDb.challengeParticipants(chChallenge.id).length === 0 && chDb.countChallengeEvents(chChallenge.id) === 0,
+    'challenges DB: delete removes participants, events, goals and entries (cascade)',
+    chDb.deleteChallenge(chChallenge.id) && chDb.getChallenge(chChallenge.id) === null && chDb.challengeParticipants(chChallenge.id).length === 0 &&
+      chDb.countChallengeEvents(chChallenge.id) === 0 && chDb.challengeGoals(chChallenge.id).length === 0 && chDb.countChallengeEntries(chChallenge.id) === 0,
   );
   chDb.close();
+
+  // Legacy rows (created before challenge_goals) get one goal backfilled at startup.
+  const bfPath = join(mkdtempSync(join(tmpdir(), 'bojan-challenge-backfill-')), 'backfill.db');
+  new BotDatabase(bfPath).close();
+  const bfRaw = new DatabaseSync(bfPath);
+  bfRaw
+    .prepare(
+      `INSERT INTO challenges (guild_id, name, description, metric, activity_name, target, starts_at, ends_at, channel_id, reward_role_id, status, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(CHG, 'Legacy', '', 'messages', null, 250, chNow - 1000, chNow + 1000, 'c1', null, 'active', 'admin', chNow);
+  bfRaw.close();
+  const bfDb = new BotDatabase(bfPath);
+  const bfGoals = bfDb.challengeGoals(1);
+  check('challenges DB: startup backfill gives legacy challenges one goal', bfGoals.length === 1 && bfGoals[0]?.metric === 'messages' && bfGoals[0]?.target === 250 && bfGoals[0]?.position === 0);
+  bfDb.close();
 
   const cardChallenge = { id: 7, guildId: 'g', name: 'Skelce', description: 'Do konca leta.', metric: 'messages' as const, activityName: null, target: 500, startsAt: chNow - 1000, endsAt: chNow + 86_400_000, channelId: 'c', messageId: 'm', rewardRoleId: null, status: 'active' as const, createdBy: 'a', createdAt: chNow, endedAt: null };
   const cardParticipants = [
@@ -2151,17 +2268,27 @@ rmSync(dir, { recursive: true, force: true });
     { challengeId: 7, userId: 'u2', displayName: 'Bojan', joinedAt: chNow - 400 },
     { challengeId: 7, userId: 'u3', displayName: 'Cene', joinedAt: chNow - 300 },
   ];
-  const chCard = buildChallengeCard({ challenge: cardChallenge, participants: cardParticipants, totals: { u1: 120, u2: 520, u3: 0 }, timeZone: 'UTC', now: chNow });
+  const cardGoals = [
+    { id: 11, challengeId: 7, metric: 'messages' as const, activityName: null, target: 500, position: 0, createdAt: chNow },
+    { id: 12, challengeId: 7, metric: 'pushups' as const, activityName: null, target: 100, position: 1, createdAt: chNow },
+  ];
+  const cardTotals = { 11: { u1: 120, u2: 520, u3: 0 }, 12: { u1: 80 } };
+  const chCard = buildChallengeCard({ challenge: cardChallenge, participants: cardParticipants, goals: cardGoals, totalsByGoal: cardTotals, timeZone: 'UTC', now: chNow });
   const chCardJson = JSON.stringify(chCard.components.map((c) => c.toJSON()));
   check(
-    'challenge card: V2 container, medal order, value / target, join counts',
-    chCard.flags === MessageFlags.IsComponentsV2 && chCard.components.length === 1 && chCardJson.includes('🥇 <@u2>') && chCardJson.includes('120 / 500') && chCardJson.includes('3 joined') && !('embeds' in chCard),
+    'challenge card: V2 container, one section per goal, medal order, value / target, join counts',
+    chCard.flags === MessageFlags.IsComponentsV2 && chCard.components.length === 1 && chCardJson.includes('🥇 <@u2>') && chCardJson.includes('120 / 500') &&
+      chCardJson.includes('Push-ups') && chCardJson.includes('80 / 100') && chCardJson.includes('3 joined') && !('embeds' in chCard),
   );
-  check('challenge card: Join and Leave buttons, never pings anyone', chCardJson.includes('challenge:join:7') && chCardJson.includes('challenge:leave:7') && chCard.allowedMentions.parse.length === 0);
-  const chEndedJson = JSON.stringify(buildChallengeCard({ challenge: { ...cardChallenge, status: 'ended', endedAt: chNow }, participants: cardParticipants, totals: { u2: 520 }, timeZone: 'UTC', now: chNow }).components.map((c) => c.toJSON()));
-  check('challenge card: ended shows Ended and hides the buttons', chEndedJson.includes('Ended') && !chEndedJson.includes('challenge:join') && !chEndedJson.includes('challenge:leave'));
-  const chEmptyJson = JSON.stringify(buildChallengeCard({ challenge: cardChallenge, participants: [], totals: {}, timeZone: 'UTC', now: chNow }).components.map((c) => c.toJSON()));
-  check('challenge card: empty leaderboard hint, no target values leak', chEmptyJson.includes('No one has joined yet') && chEmptyJson.length < 4000);
+  check(
+    'challenge card: Join / Leave / My progress plus one Log set per manual goal, never pings anyone',
+    chCardJson.includes('challenge:join:7') && chCardJson.includes('challenge:leave:7') && chCardJson.includes('challenge:my:7') &&
+      chCardJson.includes('challenge:log:7:12') && chCardJson.includes('Log set') && chCard.allowedMentions.parse.length === 0,
+  );
+  const chEndedJson = JSON.stringify(buildChallengeCard({ challenge: { ...cardChallenge, status: 'ended', endedAt: chNow }, participants: cardParticipants, goals: cardGoals, totalsByGoal: cardTotals, timeZone: 'UTC', now: chNow }).components.map((c) => c.toJSON()));
+  check('challenge card: ended shows Ended and hides the buttons', chEndedJson.includes('Ended') && !chEndedJson.includes('challenge:join') && !chEndedJson.includes('challenge:log'));
+  const chEmptyJson = JSON.stringify(buildChallengeCard({ challenge: cardChallenge, participants: [], goals: cardGoals, totalsByGoal: {}, timeZone: 'UTC', now: chNow }).components.map((c) => c.toJSON()));
+  check('challenge card: empty leaderboard hint, budget respected', chEmptyJson.includes('No one has joined yet') && chEmptyJson.length < 4000);
 }
 
 // ---- monthly recap data layer ---------------------------------------------
