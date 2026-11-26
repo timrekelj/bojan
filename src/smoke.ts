@@ -19,7 +19,7 @@ import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { buildChallengeCard } from './challenges/cards.js';
 import { createAndPostChallenge, isForumChannelType } from './challenges/actions.js';
-import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challengeLogId, challengeStatus, challengeWindow, dayEndMs, dayStartMs, defaultEndDate, emptyDraft, formatChallengeTarget, formatChallengeValue, goalRemaining, goalShare, goalTargetValue, MAX_SET_VALUE, overallRankProgress, parseChallengeButtonId, parseChallengeLogId, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry } from './challenges/form.js';
+import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challengeLogId, challengeStatus, challengeWindow, dayEndMs, dayStartMs, defaultEndDate, emptyDraft, formatChallengeTarget, formatChallengeValue, goalRemaining, goalShare, goalTargetValue, MAX_SET_VALUE, overallRankProgress, parseChallengeButtonId, parseChallengeLogId, parseEntryEdits, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry } from './challenges/form.js';
 import { CHALLENGE_METRICS, goalName, isManualMetric, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
@@ -1416,11 +1416,13 @@ rmSync(dir, { recursive: true, force: true });
   );
   const chEntries = challengeDetailPage({ ...chDetail, tab: 'entries' }, T);
   check(
-    'challengeDetailPage: entries tab shows flagged badge and escaped admin edit/delete form',
+    'challengeDetailPage: entries tab is one batch form with a single Save changes button',
     chEntries.includes('<span class="tab" aria-current="page">Entries</span>') && chEntries.includes('id="h-entries"') && chEntries.includes('All entries') &&
       chEntries.includes('href="/dashboard/challenges/7?tab=entries&amp;flagged=1"') && chEntries.includes('Flagged') && chEntries.includes('Ana &lt;x&gt;') &&
-      chEntries.includes('action="/challenge-entry"') && chEntries.includes('name="entryId" value="9"') && chEntries.includes('name="value" min="1" max="5000" value="120"') &&
-      chEntries.includes('name="reason" maxlength="300"') && chEntries.includes('value="delete"') && !chEntries.includes('Ana <x>'),
+      (chEntries.match(/action="\/challenge-entry"/g) ?? []).length === 1 &&
+      chEntries.includes('name="value_9" min="1" max="5000" step="1" inputmode="numeric" value="120"') && chEntries.includes('name="reason_9" maxlength="300"') &&
+      chEntries.includes('name="del_9" value="1" data-entry-remove') && chEntries.includes('name="page" value="1"') && chEntries.includes('name="flagged" value="0"') &&
+      chEntries.includes('Save changes') && !chEntries.includes('value="update"') && !chEntries.includes('value="delete"') && !chEntries.includes('Ana <x>'),
   );
   const chAct = challengeDetailPage({ ...chDetail, tab: 'activity' }, T);
   check(
@@ -2154,6 +2156,29 @@ rmSync(dir, { recursive: true, force: true });
       parseEntryValue('5001') === null && parseEntryValue('1.5') === null && parseEntryValue('-3') === null && parseEntryValue('abc') === null &&
       shouldFlagEntry('pushups', 99) === false && shouldFlagEntry('pushups', 100) === true && shouldFlagEntry('custom', 99) === false && shouldFlagEntry('custom', 100) === true &&
       shouldFlagEntry('messages', 1000) === false && MAX_SET_VALUE === 5000,
+  );
+  const entryEdits = parseEntryEdits({
+    challengeId: '7',
+    page: '2',
+    flagged: '1',
+    value_12: ' 130 ',
+    reason_12: '  typo  ',
+    del_12: '1',
+    value_3: ' 90 ',
+    reason_3: '   ',
+    value_9: '120',
+    reason_9: 'x'.repeat(320),
+    junk_5: 'ignored',
+    value_abc: '5',
+    value_0: '5',
+  });
+  const [e0, e1, e2] = entryEdits;
+  check(
+    'parseEntryEdits: sorted ids, trimmed value/reason, delete flag, junk keys ignored',
+    entryEdits.length === 3 && e0 !== undefined && e0.entryId === 3 && e0.value === '90' && e0.reason === '' && e0.remove === false &&
+      e1 !== undefined && e1.entryId === 9 && e1.value === '120' && e1.reason.length === 300 && e1.remove === false &&
+      e2 !== undefined && e2.entryId === 12 && e2.value === '130' && e2.reason === 'typo' && e2.remove === true &&
+      parseEntryEdits({}).length === 0 && parseEntryEdits({ value_5: 7, del_5: true })[0]?.value === '',
   );
   check(
     'goal progress: target units, capped share, remaining amount',

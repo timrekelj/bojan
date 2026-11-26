@@ -19,7 +19,7 @@ import type { BuilderRunner } from '../builder/runner.js';
 import { OpenCodeAgent, probeAgent, type AgentStatus } from '../builder/opencode.js';
 import { fetchTranscript } from '../builder/transcript.js';
 import { buildColorMessage, COLOR_MARKER, sortColorRoles } from '../colors.js';
-import { challengeStatus, challengeWindow, emptyDraft, formatChallengeTarget, MAX_CHALLENGE_GOALS, MAX_SET_VALUE, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry, type ChallengeDraft, type ChallengeWizardStep } from '../challenges/form.js';
+import { challengeStatus, challengeWindow, emptyDraft, formatChallengeTarget, MAX_CHALLENGE_GOALS, MAX_SET_VALUE, parseEntryEdits, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry, type ChallengeDraft, type ChallengeWizardStep, type EntryEdit } from '../challenges/form.js';
 import { createAndPostChallenge, finalizeChallenge, isForumChannelType, refreshChallengeCard } from '../challenges/actions.js';
 import { goalName, isManualMetric } from '../challenges/types.js';
 
@@ -838,45 +838,83 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   app.post('/challenge-entry', requireAdmin, async (c) => {
     const form = await c.req.parseBody();
     const challengeId = Number(typeof form.challengeId === 'string' ? form.challengeId : '');
-    const entryId = Number(typeof form.entryId === 'string' ? form.entryId : '');
     const challenge = Number.isSafeInteger(challengeId) ? db.getChallenge(challengeId) : null;
-    const entry = Number.isSafeInteger(entryId) ? db.getChallengeEntry(entryId) : null;
-    if (!challenge || challenge.guildId !== config.guildId || !entry || entry.challengeId !== challenge.id) {
-      return c.redirect(`/dashboard/challenges?challengeError=${encodeURIComponent('Entry not found.')}`);
+    if (!challenge || challenge.guildId !== config.guildId) {
+      return c.redirect(`/dashboard/challenges?challengeError=${encodeURIComponent('Challenge not found.')}`);
     }
-    const goal = db.getChallengeGoal(entry.goalId);
-    if (!goal || goal.challengeId !== challenge.id) {
-      return c.redirect(`/dashboard/challenges/${challenge.id}?tab=entries&challengeError=${encodeURIComponent('Entry not found.')}`);
+    const page = Math.max(1, Number.parseInt(typeof form.page === 'string' ? form.page : '', 10) || 1);
+    const flaggedOnly = form.flagged === '1';
+    const redirect = (params: { updated?: string; error?: string }) => {
+      const q = new URLSearchParams({ tab: 'entries' });
+      if (page > 1) q.set('page', String(page));
+      if (flaggedOnly) q.set('flagged', '1');
+      if (params.updated) q.set('challengeUpdated', params.updated);
+      if (params.error) q.set('challengeError', params.error);
+      return c.redirect(`/dashboard/challenges/${challenge.id}?${q.toString()}`);
+    };
+
+    const edits = parseEntryEdits(form);
+    if (edits.length === 0) return redirect({ error: 'No changes to save.' });
+
+    // Only entries of this challenge and its goals may be touched.
+    const rows: { edit: EntryEdit; entry: NonNullable<ReturnType<BotDatabase['getChallengeEntry']>>; goal: NonNullable<ReturnType<BotDatabase['getChallengeGoal']>> }[] = [];
+    for (const edit of edits) {
+      const entry = db.getChallengeEntry(edit.entryId);
+      if (!entry || entry.challengeId !== challenge.id) continue;
+      const goal = db.getChallengeGoal(entry.goalId);
+      if (!goal || goal.challengeId !== challenge.id) continue;
+      rows.push({ edit, entry, goal });
     }
+    if (rows.length === 0) return redirect({ error: 'Entry not found.' });
+
+    // Pass 1: validate every changed value before writing anything.
+    const invalid: string[] = [];
+    const changes: { entry: (typeof rows)[number]['entry']; goal: (typeof rows)[number]['goal']; value: number; reason: string }[] = [];
+    for (const { edit, entry, goal } of rows) {
+      if (edit.remove) continue;
+      const value = parseEntryValue(edit.value);
+      if (value === null) {
+        invalid.push(entry.displayName);
+      } else if (value !== entry.value) {
+        changes.push({ entry, goal, value, reason: edit.reason });
+      }
+    }
+    if (invalid.length > 0) {
+      return redirect({ error: `The value must be a whole number between 1 and ${MAX_SET_VALUE}: ${[...new Set(invalid)].join(', ')}.` });
+    }
+
     const session = c.get('session');
     const now = Date.now();
-    const reason = (typeof form.reason === 'string' ? form.reason : '').trim().slice(0, 300);
-    const reasonText = reason ? ` · reason: ${reason}` : '';
-    const op = typeof form.op === 'string' ? form.op : '';
-    if (op === 'delete') {
-      db.deleteChallengeEntry(entry.id);
-      db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: 'entry_deleted', actorId: session.userId, actorName: session.username, detail: `${entry.displayName}: ${entry.value}${reasonText}` });
+    let saved = 0;
+    let deleted = 0;
+    for (const { edit, entry } of rows) {
+      if (edit.remove) {
+        if (db.deleteChallengeEntry(entry.id)) {
+          deleted += 1;
+          db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: 'entry_deleted', actorId: session.userId, actorName: session.username, detail: `${entry.displayName}: ${entry.value}${edit.reason ? ` · reason: ${edit.reason}` : ''}` });
+        }
+        continue;
+      }
+    }
+    for (const { entry, goal, value, reason } of changes) {
+      const flagged = shouldFlagEntry(goal.metric, value);
+      db.updateChallengeEntry(entry.id, value, flagged);
+      saved += 1;
+      db.addChallengeEvent({
+        challengeId: challenge.id,
+        ts: now,
+        kind: 'entry_edited',
+        actorId: session.userId,
+        actorName: session.username,
+        detail: `${entry.displayName}: ${entry.value} → ${value}${flagged ? ' · flagged for review' : ''}${reason ? ` · reason: ${reason}` : ''}`,
+      });
+    }
+    if (saved + deleted > 0) {
       await refreshChallengeCard(client, db, challenge, now);
-      console.log(`[web] challenge #${challenge.id} entry #${entry.id} deleted by ${session.username}`);
-      return c.redirect(`/dashboard/challenges/${challenge.id}?tab=entries&challengeUpdated=${encodeURIComponent('Entry deleted.')}`);
+      console.log(`[web] challenge #${challenge.id} batch entries: ${saved} saved, ${deleted} deleted by ${session.username}`);
+      return redirect({ updated: `${saved} entries saved, ${deleted} deleted.` });
     }
-    const value = parseEntryValue(typeof form.value === 'string' ? form.value : '');
-    if (value === null) {
-      return c.redirect(`/dashboard/challenges/${challenge.id}?tab=entries&challengeError=${encodeURIComponent(`The value must be a whole number between 1 and ${MAX_SET_VALUE}.`)}`);
-    }
-    const flagged = shouldFlagEntry(goal.metric, value);
-    db.updateChallengeEntry(entry.id, value, flagged);
-    db.addChallengeEvent({
-      challengeId: challenge.id,
-      ts: now,
-      kind: 'entry_edited',
-      actorId: session.userId,
-      actorName: session.username,
-      detail: `${entry.displayName}: ${entry.value} → ${value}${flagged ? ' · flagged for review' : ''}${reasonText}`,
-    });
-    await refreshChallengeCard(client, db, challenge, now);
-    console.log(`[web] challenge #${challenge.id} entry #${entry.id} edited by ${session.username}`);
-    return c.redirect(`/dashboard/challenges/${challenge.id}?tab=entries&challengeUpdated=${encodeURIComponent('Entry updated.')}`);
+    return redirect({ error: 'No changes to save.' });
   });
 
   app.post('/challenge-end', requireAdmin, async (c) => {
