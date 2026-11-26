@@ -17,6 +17,8 @@ export interface NewChallengeInput {
   channelId: string;
   rewardRoleId: string | null;
   createdBy: string;
+  /** Dashboard username of the admin who created it, for the event log. */
+  createdByName: string;
 }
 
 /** Retention: the reward role is granted permanently to the top 3 with progress > 0. */
@@ -47,6 +49,7 @@ export async function createAndPostChallenge(
   try {
     const message = await channel.send(buildChallengeCard(cardData(db, challenge, now)));
     db.setChallengeMessage(challenge.id, message.id);
+    db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: 'created', actorId: input.createdBy, actorName: input.createdByName });
     console.log(`[challenges] guild ${challenge.guildId}: created challenge #${challenge.id} "${challenge.name}" in channel ${challenge.channelId}`);
     return { ok: true, challenge: { ...challenge, messageId: message.id } };
   } catch (err) {
@@ -74,15 +77,26 @@ export async function refreshChallengeCard(client: Client, db: BotDatabase, chal
   }
 }
 
+/** upcoming -> active: log it and refresh the card (whose header switches from Starts to Until). */
+export async function beginChallenge(client: Client, db: BotDatabase, challenge: Challenge, now = Date.now()): Promise<Challenge | null> {
+  if (!db.startChallenge(challenge.id, now)) return null;
+  const started: Challenge = { ...challenge, status: 'active' };
+  db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: 'started' });
+  await refreshChallengeCard(client, db, started, now);
+  console.log(`[challenges] guild ${challenge.guildId}: started challenge #${challenge.id}`);
+  return started;
+}
+
 /**
  * End a challenge: mark it ended, grant the reward role to the top 3 with
  * progress > 0 and refresh the card without buttons. Idempotent (a second
  * call, or a race with the ticker, does nothing). Returns the ended row, or
  * null when it was already ended.
  */
-export async function finalizeChallenge(client: Client, db: BotDatabase, challenge: Challenge, now = Date.now()): Promise<Challenge | null> {
+export async function finalizeChallenge(client: Client, db: BotDatabase, challenge: Challenge, now = Date.now(), actor: { id: string; name: string } | null = null): Promise<Challenge | null> {
   if (!db.endChallenge(challenge.id, now)) return null;
   const ended: Challenge = { ...challenge, status: 'ended', endedAt: challenge.endedAt ?? now };
+  const names = new Map(db.challengeParticipants(challenge.id).map((p) => [p.userId, p.displayName]));
   let rewarded = 0;
   if (challenge.rewardRoleId) {
     const guild = client.guilds.cache.get(challenge.guildId) ?? (await client.guilds.fetch(challenge.guildId).catch(() => null));
@@ -97,6 +111,7 @@ export async function finalizeChallenge(client: Client, db: BotDatabase, challen
         try {
           await member.roles.add(role, `Challenge #${challenge.id} top ${REWARD_POSITIONS}`);
           rewarded++;
+          db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: 'reward', actorId: row.userId, actorName: names.get(row.userId) ?? null, detail: `rank ${row.rank}` });
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           console.warn(`[challenges] guild ${challenge.guildId}: could not give role ${role.id} to ${row.userId}: ${reason}`);
@@ -106,6 +121,14 @@ export async function finalizeChallenge(client: Client, db: BotDatabase, challen
       console.warn(`[challenges] guild ${challenge.guildId}: reward role ${challenge.rewardRoleId} of challenge #${challenge.id} is gone`);
     }
   }
+  db.addChallengeEvent({
+    challengeId: challenge.id,
+    ts: now,
+    kind: 'ended',
+    actorId: actor?.id ?? null,
+    actorName: actor?.name.trim() || null,
+    detail: `rewarded ${rewarded} member(s)`,
+  });
   await refreshChallengeCard(client, db, ended, now);
   console.log(`[challenges] guild ${challenge.guildId}: ended challenge #${challenge.id}; rewarded ${rewarded} member(s)`);
   return ended;
@@ -126,12 +149,16 @@ export async function handleChallengeButton(interaction: ButtonInteraction, clie
   }
   const member = interaction.member;
   const displayName = member && 'displayName' in member && typeof member.displayName === 'string' ? member.displayName : interaction.user.username;
+  const changed = parsed.action === 'join' ? db.joinChallenge(challenge.id, interaction.user.id, displayName, now) : db.leaveChallenge(challenge.id, interaction.user.id);
+  if (changed) {
+    db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: parsed.action === 'join' ? 'joined' : 'left', actorId: interaction.user.id, actorName: displayName });
+  }
   const content =
     parsed.action === 'join'
-      ? db.joinChallenge(challenge.id, interaction.user.id, displayName, now)
+      ? changed
         ? `You joined **${challenge.name}**. Progress counts automatically until the end.`
         : `You are already taking part in **${challenge.name}**.`
-      : db.leaveChallenge(challenge.id, interaction.user.id)
+      : changed
         ? `You left **${challenge.name}**.`
         : `You were not taking part in **${challenge.name}**.`;
   await interaction.reply({ content, ephemeral: true }).catch(() => undefined);

@@ -5,7 +5,7 @@ import { buildWeeklyStatsMessage } from './weekly.js';
 import { buildMonthlyAwardsMessage, buildMonthlyRecapMessage, type MonthlyRecapData } from './monthly.js';
 import { activityHeatmap, CONVO_GAP_MS, conversationStarters, earlyBirds, longestStreaks, nightOwls, novelists, oneWorders, typoKings, voiceBuddies, voiceTotalMs, voiceTotals } from './recap.js';
 import { announceLevelUp, awardVoiceXp } from './levels.js';
-import { finalizeChallenge, refreshChallengeCard } from './challenges/actions.js';
+import { beginChallenge, finalizeChallenge, refreshChallengeCard } from './challenges/actions.js';
 
 const TICK_MS = 30_000;
 
@@ -384,9 +384,10 @@ const CHALLENGE_TICK_MS = 60_000;
 const CHALLENGE_REFRESH_MS = 5 * 60_000;
 
 /**
- * Once a minute: finalize every active challenge whose deadline passed
- * (status, reward role, card without buttons), otherwise refresh the card's
- * leaderboard at most every 5 minutes. One failure never stops the loop.
+ * Once a minute: finalize every pending challenge whose deadline passed
+ * (status, reward role, card without buttons), start upcoming ones whose start
+ * arrived, otherwise refresh the card's leaderboard at most every 5 minutes.
+ * One failure never stops the loop.
  */
 export function startChallengeTicker(client: Client, db: BotDatabase): NodeJS.Timeout {
   let running = false; // in-flight guard: skip a tick while the previous one is still running
@@ -396,17 +397,22 @@ export function startChallengeTicker(client: Client, db: BotDatabase): NodeJS.Ti
     running = true;
     try {
       const now = Date.now();
-      const active = db.activeChallenges();
-      const liveIds = new Set(active.map((c) => c.id));
+      const pending = db.pendingChallenges();
+      const liveIds = new Set(pending.map((c) => c.id));
       for (const id of lastRefresh.keys()) if (!liveIds.has(id)) lastRefresh.delete(id);
-      if (active.length === 0) return;
+      if (pending.length === 0) return;
       for (const guild of client.guilds.cache.values()) {
-        for (const challenge of active) {
+        for (const challenge of pending) {
           if (challenge.guildId !== guild.id) continue;
           try {
             if (challenge.endsAt <= now) {
               await finalizeChallenge(client, db, challenge, now);
               lastRefresh.delete(challenge.id);
+              continue;
+            }
+            if (challenge.status === 'upcoming' && challenge.startsAt <= now) {
+              await beginChallenge(client, db, challenge, now);
+              lastRefresh.set(challenge.id, now);
               continue;
             }
             if (now - (lastRefresh.get(challenge.id) ?? 0) < CHALLENGE_REFRESH_MS) continue;

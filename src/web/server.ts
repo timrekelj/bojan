@@ -4,10 +4,10 @@ import { Hono, type Context, type Next } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { serve } from '@hono/node-server';
 import { ChannelType, PermissionFlagsBits, type Client } from 'discord.js';
-import type { BotDatabase, Settings, WebSessionRow } from '../db.js';
+import type { BotDatabase, ChallengeFilter, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
+import { challengeDetailPage, challengesPage, chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type ChallengeDetailData, type ChallengesPageData, type ChallengeTab, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
 import { cachedDeployments, dokployEnabled, fetchDeployments, type DeployResult, type DeployStatus, type DokployConfig } from '../dokploy.js';
 import { postMonthlyRecap, postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
@@ -530,51 +530,97 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         return data ? c.json({ parts: sessionParts(data) }) : c.json({ error: 'not found' }, 404);
       }
       case 'settings':
+      case 'challenges':
         return c.json({ parts: chromeParts(deploy) }); // forms are never refreshed
       default:
         return c.json({ error: 'unknown view' }, 400);
     }
   });
 
-  // Challenges: the last 10 with participant progress for the dashboard section. Flash messages
-  // are read from the redirect query so a POST can bounce back to #challenges.
-  const loadChallenges = (q: { created?: string | undefined; error?: string | undefined; ended?: string | undefined; deleted?: string | undefined }, now = Date.now()): SettingsPageData['challenges'] => {
+  // Challenges: the list page (status filters + 3-step wizard) and one challenge's
+  // overview / progress / activity tabs. POSTs redirect back here with a query flash.
+  const CHALLENGE_FILTERS = ['all', 'upcoming', 'active', 'ended'] as const;
+  const challengeFilter = (raw: string | undefined): ChallengeFilter =>
+    (CHALLENGE_FILTERS as readonly string[]).includes(raw ?? '') ? (raw as ChallengeFilter) : 'all';
+
+  const challengeFlash = (q: Record<string, string | undefined>): ChallengesPageData['flash'] => {
+    if (q.challengeCreated) return { kind: 'saved', message: `Challenge "${q.challengeCreated.slice(0, 100)}" created and posted.` };
+    if (q.challengeError) return { kind: 'error', message: q.challengeError.slice(0, 300) };
+    if (q.challengeEnded && /^\d+$/.test(q.challengeEnded)) return { kind: 'saved', message: `Challenge #${q.challengeEnded} ended; the top 3 with progress got the reward role.` };
+    if (q.challengeDeleted && /^\d+$/.test(q.challengeDeleted)) return { kind: 'saved', message: `Challenge #${q.challengeDeleted} deleted.` };
+    return null;
+  };
+
+  const challengeNames = (): { channels: { id: string; name: string }[]; roles: { id: string; name: string }[] } => ({ channels: listChannels(), roles: listRoles() });
+
+  const loadChallengesPage = (session: Session, q: Record<string, string | undefined>, deploy: DeployStatus, now = Date.now()): ChallengesPageData => {
+    const status = challengeFilter(q.status);
+    const counts = db.challengeStatusCounts(config.guildId, now);
+    const total = counts[status];
+    const pageSize = parsePageSize(q.size);
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    const page = parsePage(q.page, pages);
+    const list = db
+      .listChallenges(config.guildId, { status, limit: pageSize, offset: (page - 1) * pageSize, now })
+      .map((challenge) => ({ challenge, status: challengeStatus(challenge, now), joined: db.challengeParticipantCount(challenge.id) }));
     const guild = client.guilds.cache.get(config.guildId);
-    const list: SettingsPageData['challenges']['list'] = db.recentChallenges(config.guildId, 10).map((challenge) => {
-      const participants = db.challengeParticipants(challenge.id);
-      const names = new Map(participants.map((p) => [p.userId, p.displayName]));
-      const totals = db.challengeTotals(challenge.guildId, challenge.metric, challenge.activityName, challenge.startsAt, challenge.endsAt, now);
-      const rows = rankProgress(participants, totals)
-        .slice(0, 10)
-        .map((r) => ({ ...r, name: names.get(r.userId) ?? r.userId }));
-      return { challenge, status: challengeStatus(challenge, now), joined: participants.length, rows };
-    });
-    const flash = q.created
-      ? { kind: 'saved' as const, message: `Challenge "${q.created.slice(0, 100)}" created and posted.` }
-      : q.error
-        ? { kind: 'error' as const, message: q.error.slice(0, 300) }
-        : q.ended && /^\d+$/.test(q.ended)
-          ? { kind: 'saved' as const, message: `Challenge #${q.ended} ended; the top 3 with progress got the reward role.` }
-          : q.deleted && /^\d+$/.test(q.deleted)
-            ? { kind: 'saved' as const, message: `Challenge #${q.deleted} deleted.` }
-            : null;
     return {
       wizard: { step: 1, draft: emptyDraft(now), errors: [] },
       list,
-      channels: listChannels(),
-      roles: listRoles(),
+      counts,
+      status,
+      page,
+      pages,
+      pageSize,
+      total,
+      ...challengeNames(),
       activityNames: db.activityNames(config.guildId, '', 100),
       canManageRoles: guild?.members.me?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false,
-      flash,
+      timezone: db.getSettings(config.guildId).timezone,
+      flash: challengeFlash(q),
+      user: { username: session.username, avatar: session.avatar },
+      deploy,
     };
   };
 
+  const loadChallengeDetail = (session: Session, rawId: string, q: Record<string, string | undefined>, deploy: DeployStatus, now = Date.now()): ChallengeDetailData | null => {
+    const id = Number(rawId);
+    const challenge = Number.isSafeInteger(id) && id > 0 ? db.getChallenge(id) : null;
+    if (!challenge || challenge.guildId !== config.guildId) return null;
+    const participants = db.challengeParticipants(challenge.id);
+    const names = new Map(participants.map((p) => [p.userId, p.displayName]));
+    const totals = db.challengeTotals(challenge.guildId, challenge.metric, challenge.activityName, challenge.startsAt, challenge.endsAt, now);
+    const rows = rankProgress(participants, totals).map((r) => ({ ...r, name: names.get(r.userId) ?? r.userId }));
+    const pageSize = parsePageSize(q.size);
+    const progressPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    const progressPage = parsePage(q.page, progressPages);
+    const eventTotal = db.countChallengeEvents(challenge.id);
+    const eventPages = Math.max(1, Math.ceil(eventTotal / pageSize));
+    const eventPage = parsePage(q.page, eventPages);
+    const tab: ChallengeTab = q.tab === 'progress' || q.tab === 'activity' ? q.tab : 'overview';
+    const guild = client.guilds.cache.get(config.guildId);
+    return {
+      challenge,
+      status: challengeStatus(challenge, now),
+      tab,
+      joined: participants.length,
+      rows: rows.slice(0, 10),
+      progress: { rows: rows.slice((progressPage - 1) * pageSize, progressPage * pageSize), page: progressPage, pages: progressPages, pageSize, total: rows.length },
+      events: { rows: db.challengeEvents(challenge.id, pageSize, (eventPage - 1) * pageSize), page: eventPage, pages: eventPages, pageSize, total: eventTotal },
+      timezone: db.getSettings(config.guildId).timezone,
+      channelName: guild?.channels.cache.get(challenge.channelId)?.name ?? challenge.channelId,
+      canManageRoles: guild?.members.me?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false,
+      flash: challengeFlash(q),
+      user: { username: session.username, avatar: session.avatar },
+      deploy,
+    };
+  };
   // Shared by the settings page and the wizard POSTs (which render the page again on error or
   // for the next step). POSTs pass agent/deploy null so they never wait on OpenCode or Dokploy.
   const settingsPageData = (
     session: Session,
     q: Record<string, string | undefined>,
-    opts: { agent: AgentStatus | null; deploy: DeployStatus; challenges?: SettingsPageData['challenges'] },
+    opts: { agent: AgentStatus | null; deploy: DeployStatus },
   ): SettingsPageData => {
     const colorSettings = db.getColorSettings(config.guildId);
     const colorRoles = db.getColorRoles(config.guildId);
@@ -597,7 +643,6 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
           : q.monthly === 'error'
             ? { kind: 'error', reason: (q.reason ?? '').slice(0, 200) }
             : null,
-      challenges: opts.challenges ?? loadChallenges(q),
       free: {
         settings: db.getFreeSettings(config.guildId),
         roles: listRoles(),
@@ -633,6 +678,17 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     return c.html(settingsPage(settingsPageData(session, c.req.query(), { agent, deploy })));
   });
 
+  app.get('/dashboard/challenges', requireAdmin, async (c) => {
+    const deploy = await deployStatus(DEPLOY_PAGE_WAIT_MS);
+    return c.html(challengesPage(loadChallengesPage(c.get('session'), c.req.query(), deploy)));
+  });
+
+  app.get('/dashboard/challenges/:id', requireAdmin, async (c) => {
+    const deploy = await deployStatus(DEPLOY_PAGE_WAIT_MS);
+    const data = loadChallengeDetail(c.get('session'), c.req.param('id') ?? '', c.req.query(), deploy);
+    return data ? c.html(challengeDetailPage(data)) : c.text('Challenge not found.', 404);
+  });
+
   const CHALLENGE_FIELDS = ['step', 'name', 'description', 'metric', 'activityName', 'target', 'startDate', 'endDate', 'channelId', 'rewardRoleId'] as const;
 
   const challengeForm = (form: Record<string, unknown>): Record<string, string | undefined> => {
@@ -646,12 +702,8 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
   const challengeWizardPage = (c: Context, step: ChallengeWizardStep, draft: ChallengeDraft, errors: string[], status: 200 | 400 = 200) =>
     c.html(
-      settingsPage(
-        settingsPageData(c.get('session'), {}, {
-          agent: null,
-          deploy: null,
-          challenges: { ...loadChallenges({}), wizard: { step, draft, errors } },
-        }),
+      challengesPage(
+        { ...loadChallengesPage(c.get('session'), {}, null), wizard: { step, draft, errors } },
       ),
       status,
     );
@@ -664,11 +716,13 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     if (parsed.errors.length > 0) return challengeWizardPage(c, step, parsed.draft, parsed.errors, 400);
     if (step < 3) return challengeWizardPage(c, (step + 1) as ChallengeWizardStep, parsed.draft, []);
 
-    const window = challengeWindow(parsed.draft.startDate, parsed.draft.endDate);
+    const now = Date.now();
+    const window = challengeWindow(parsed.draft.startDate, parsed.draft.endDate, now);
     if (!window.ok) return challengeWizardPage(c, 3, parsed.draft, [window.reason], 400);
     const channel = await sendableChannel(parsed.draft.channelId);
     if (!channel) return challengeWizardPage(c, 3, parsed.draft, ['The selected channel is missing or the bot cannot post in it.'], 400);
 
+    const session = c.get('session');
     const result = await createAndPostChallenge(
       db,
       {
@@ -682,34 +736,39 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         endsAt: window.window.endsAt,
         channelId: parsed.draft.channelId,
         rewardRoleId: parsed.draft.rewardRoleId || null,
-        createdBy: c.get('session').userId,
+        createdBy: session.userId,
+        createdByName: session.username,
       },
       channel,
+      now,
     );
     if (!result.ok) return challengeWizardPage(c, 3, parsed.draft, [`Could not post the card: ${result.reason}`], 400);
-    console.log(`[web] challenge #${result.challenge.id} "${result.challenge.name}" created by ${c.get('session').username}`);
-    return c.redirect(`/dashboard/settings?challengeCreated=${encodeURIComponent(parsed.draft.name)}#challenges`);
+    console.log(`[web] challenge #${result.challenge.id} "${result.challenge.name}" created by ${session.username}`);
+    return c.redirect(`/dashboard/challenges?challengeCreated=${encodeURIComponent(parsed.draft.name)}`);
   });
 
   app.post('/challenge-end', requireAdmin, async (c) => {
     const form = await c.req.parseBody();
     const id = Number(typeof form.id === 'string' ? form.id : '');
     const challenge = Number.isSafeInteger(id) ? db.getChallenge(id) : null;
-    if (!challenge || challenge.guildId !== config.guildId) return c.redirect(`/dashboard/settings?challengeError=${encodeURIComponent('Challenge not found.')}#challenges`);
-    if (!(await finalizeChallenge(client, db, challenge))) return c.redirect(`/dashboard/settings?challengeError=${encodeURIComponent('That challenge was already ended.')}#challenges`);
-    console.log(`[web] challenge #${challenge.id} ended by ${c.get('session').username}`);
-    return c.redirect(`/dashboard/settings?challengeEnded=${challenge.id}#challenges`);
+    if (!challenge || challenge.guildId !== config.guildId) return c.redirect(`/dashboard/challenges?challengeError=${encodeURIComponent('Challenge not found.')}`);
+    const session = c.get('session');
+    if (!(await finalizeChallenge(client, db, challenge, Date.now(), { id: session.userId, name: session.username }))) {
+      return c.redirect(`/dashboard/challenges/${challenge.id}?challengeError=${encodeURIComponent('That challenge was already ended.')}`);
+    }
+    console.log(`[web] challenge #${challenge.id} ended by ${session.username}`);
+    return c.redirect(`/dashboard/challenges/${challenge.id}?challengeEnded=${challenge.id}`);
   });
 
   app.post('/challenge-delete', requireAdmin, async (c) => {
     const form = await c.req.parseBody();
     const id = Number(typeof form.id === 'string' ? form.id : '');
     const challenge = Number.isSafeInteger(id) ? db.getChallenge(id) : null;
-    if (!challenge || challenge.guildId !== config.guildId) return c.redirect(`/dashboard/settings?challengeError=${encodeURIComponent('Challenge not found.')}#challenges`);
+    if (!challenge || challenge.guildId !== config.guildId) return c.redirect(`/dashboard/challenges?challengeError=${encodeURIComponent('Challenge not found.')}`);
     await deletePickerMessage(challenge.channelId, challenge.messageId);
     db.deleteChallenge(challenge.id);
     console.log(`[web] challenge #${challenge.id} deleted by ${c.get('session').username}`);
-    return c.redirect(`/dashboard/settings?challengeDeleted=${challenge.id}#challenges`);
+    return c.redirect(`/dashboard/challenges?challengeDeleted=${challenge.id}`);
   });
 
   app.get('/dashboard/logs', requireAdmin, async (c) => {

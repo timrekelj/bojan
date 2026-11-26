@@ -465,6 +465,17 @@ CREATE TABLE IF NOT EXISTS challenge_participants (
   joined_at INTEGER NOT NULL,
   PRIMARY KEY (challenge_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS challenge_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+  ts INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  actor_id TEXT,
+  actor_name TEXT,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_challenge_events_challenge ON challenge_events (challenge_id, id);
 `;
 
 export type BuildJobStatus = 'planning' | 'awaiting_input' | 'queued' | 'building' | 'pr_open' | 'merged' | 'closed' | 'failed' | 'cancelled';
@@ -588,10 +599,30 @@ export interface Challenge {
   channelId: string;
   messageId: string | null;
   rewardRoleId: string | null;
-  status: 'active' | 'ended';
+  /** Stored status; the ticker moves upcoming -> active -> ended. */
+  status: 'upcoming' | 'active' | 'ended';
   createdBy: string;
   createdAt: number;
   endedAt: number | null;
+}
+
+export interface ChallengeEvent {
+  id: number;
+  challengeId: number;
+  ts: number;
+  kind: string;
+  actorId: string | null;
+  actorName: string | null;
+  detail: string | null;
+}
+
+export type ChallengeFilter = 'all' | 'upcoming' | 'active' | 'ended';
+
+export interface ChallengeStatusCounts {
+  all: number;
+  upcoming: number;
+  active: number;
+  ended: number;
 }
 
 export interface ChallengeParticipant {
@@ -615,11 +646,31 @@ function challengeFromRow(r: Record<string, unknown>): Challenge {
     channelId: r.channel_id as string,
     messageId: (r.message_id as string | null) ?? null,
     rewardRoleId: (r.reward_role_id as string | null) ?? null,
-    status: r.status === 'ended' ? 'ended' : 'active',
+    status: r.status === 'ended' ? 'ended' : r.status === 'upcoming' ? 'upcoming' : 'active',
     createdBy: r.created_by as string,
     createdAt: r.created_at as number,
     endedAt: (r.ended_at as number | null) ?? null,
   };
+}
+
+function challengeEventFromRow(r: Record<string, unknown>): ChallengeEvent {
+  return {
+    id: r.id as number,
+    challengeId: r.challenge_id as number,
+    ts: r.ts as number,
+    kind: r.kind as string,
+    actorId: (r.actor_id as string | null) ?? null,
+    actorName: (r.actor_name as string | null) ?? null,
+    detail: (r.detail as string | null) ?? null,
+  };
+}
+
+/** SQL for the effective status: ended wins over the deadline, then the future start marks upcoming. */
+function challengeStatusClause(status: ChallengeFilter, now: number): { clause: string; params: number[] } {
+  if (status === 'ended') return { clause: ` AND (status = 'ended' OR ends_at <= ?)`, params: [now] };
+  if (status === 'upcoming') return { clause: ` AND status <> 'ended' AND ends_at > ? AND starts_at > ?`, params: [now, now] };
+  if (status === 'active') return { clause: ` AND status <> 'ended' AND ends_at > ? AND starts_at <= ?`, params: [now, now] };
+  return { clause: '', params: [] };
 }
 
 function challengeParticipantFromRow(r: Record<string, unknown>): ChallengeParticipant {
@@ -813,6 +864,16 @@ export class BotDatabase {
     if (!chatCols.some((c) => c.name === 'pending_notes')) {
       this.db.exec(`ALTER TABLE chat_threads ADD COLUMN pending_notes TEXT NOT NULL DEFAULT '[]'`);
     }
+    // Challenges used to be stored active even when their start date was in the future.
+    this.db.prepare(`UPDATE challenges SET status = 'upcoming' WHERE status = 'active' AND starts_at > ?`).run(Date.now());
+    // Event log for challenges created before challenge_events existed.
+    this.db.exec(`INSERT INTO challenge_events (challenge_id, ts, kind, actor_id)
+      SELECT id, created_at, 'created', created_by FROM challenges c
+      WHERE NOT EXISTS (SELECT 1 FROM challenge_events e WHERE e.challenge_id = c.id AND e.kind = 'created')`);
+    this.db.exec(`INSERT INTO challenge_events (challenge_id, ts, kind)
+      SELECT id, COALESCE(ended_at, ends_at), 'ended' FROM challenges c
+      WHERE status = 'ended'
+        AND NOT EXISTS (SELECT 1 FROM challenge_events e WHERE e.challenge_id = c.id AND e.kind = 'ended')`);
     // build_jobs.thread_id used to be UNIQUE; a thread may now hold several jobs over time. SQLite
     // cannot drop a constraint, so rebuild the table (same columns) when the old unique index exists.
     const jobIdx = this.db.prepare('PRAGMA index_list(build_jobs)').all() as { name: string; unique: number }[];
@@ -1928,12 +1989,13 @@ export class BotDatabase {
     },
     now = Date.now(),
   ): Challenge {
+    const status = c.startsAt > now ? 'upcoming' : 'active';
     const res = this.db
       .prepare(
         `INSERT INTO challenges (guild_id, name, description, metric, activity_name, target, starts_at, ends_at, channel_id, reward_role_id, status, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(c.guildId, c.name, c.description, c.metric, c.activityName, c.target, c.startsAt, c.endsAt, c.channelId, c.rewardRoleId, c.createdBy, now);
+      .run(c.guildId, c.name, c.description, c.metric, c.activityName, c.target, c.startsAt, c.endsAt, c.channelId, c.rewardRoleId, status, c.createdBy, now);
     return this.getChallenge(Number(res.lastInsertRowid))!;
   }
 
@@ -1948,20 +2010,71 @@ export class BotDatabase {
     return rows.map(challengeFromRow);
   }
 
-  /** Challenges not yet ended (also those whose deadline just passed; the ticker finalizes them). */
-  activeChallenges(): Challenge[] {
-    const rows = this.db.prepare(`SELECT * FROM challenges WHERE status = 'active' ORDER BY ends_at ASC`).all() as unknown as Record<string, unknown>[];
+  /** Challenges the ticker still watches: upcoming and active (also those whose deadline just passed). */
+  pendingChallenges(): Challenge[] {
+    const rows = this.db.prepare(`SELECT * FROM challenges WHERE status IN ('upcoming', 'active') ORDER BY ends_at ASC`).all() as unknown as Record<string, unknown>[];
     return rows.map(challengeFromRow);
+  }
+
+  /** Newest first, filtered by the effective status (ended past its deadline even before the ticker runs). */
+  listChallenges(guildId: string, opts: { status?: ChallengeFilter; limit?: number; offset?: number; now?: number } = {}): Challenge[] {
+    const now = opts.now ?? Date.now();
+    const { clause, params } = challengeStatusClause(opts.status ?? 'all', now);
+    const rows = this.db
+      .prepare(`SELECT * FROM challenges WHERE guild_id = ?${clause} ORDER BY id DESC LIMIT ? OFFSET ?`)
+      .all(guildId, ...params, opts.limit ?? 10, opts.offset ?? 0) as unknown as Record<string, unknown>[];
+    return rows.map(challengeFromRow);
+  }
+
+  countChallenges(guildId: string, status: ChallengeFilter = 'all', now = Date.now()): number {
+    const { clause, params } = challengeStatusClause(status, now);
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM challenges WHERE guild_id = ?${clause}`).get(guildId, ...params) as { n: number };
+    return row.n;
+  }
+
+  /** Counts for the All / Upcoming / Active / Ended tabs, using the same effective status as the list. */
+  challengeStatusCounts(guildId: string, now = Date.now()): ChallengeStatusCounts {
+    return {
+      all: this.countChallenges(guildId, 'all', now),
+      upcoming: this.countChallenges(guildId, 'upcoming', now),
+      active: this.countChallenges(guildId, 'active', now),
+      ended: this.countChallenges(guildId, 'ended', now),
+    };
   }
 
   setChallengeMessage(id: number, messageId: string | null): void {
     this.db.prepare('UPDATE challenges SET message_id = ? WHERE id = ?').run(messageId, id);
   }
 
-  /** Mark a challenge ended; false when it already was (safe against ticker/manual races). */
-  endChallenge(id: number, now = Date.now()): boolean {
-    const res = this.db.prepare(`UPDATE challenges SET status = 'ended', ended_at = COALESCE(ended_at, ?) WHERE id = ? AND status = 'active'`).run(now, id);
+  /** upcoming -> active; false when it was not upcoming (ticker/manual race). */
+  startChallenge(id: number, _now = Date.now()): boolean {
+    const res = this.db.prepare(`UPDATE challenges SET status = 'active' WHERE id = ? AND status = 'upcoming'`).run(id);
     return Number(res.changes) > 0;
+  }
+
+  /** Mark a challenge ended (upcoming or active); false when it already was (safe against races). */
+  endChallenge(id: number, now = Date.now()): boolean {
+    const res = this.db.prepare(`UPDATE challenges SET status = 'ended', ended_at = COALESCE(ended_at, ?) WHERE id = ? AND status IN ('upcoming', 'active')`).run(now, id);
+    return Number(res.changes) > 0;
+  }
+
+  addChallengeEvent(e: { challengeId: number; ts: number; kind: string; actorId?: string | null; actorName?: string | null; detail?: string | null }): void {
+    this.db
+      .prepare('INSERT INTO challenge_events (challenge_id, ts, kind, actor_id, actor_name, detail) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(e.challengeId, e.ts, e.kind, e.actorId ?? null, e.actorName ?? null, e.detail ?? null);
+  }
+
+  /** Newest first. */
+  challengeEvents(challengeId: number, limit = 20, offset = 0): ChallengeEvent[] {
+    const rows = this.db
+      .prepare('SELECT * FROM challenge_events WHERE challenge_id = ? ORDER BY id DESC LIMIT ? OFFSET ?')
+      .all(challengeId, limit, offset) as unknown as Record<string, unknown>[];
+    return rows.map(challengeEventFromRow);
+  }
+
+  countChallengeEvents(challengeId: number): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM challenge_events WHERE challenge_id = ?').get(challengeId) as { n: number };
+    return row.n;
   }
 
   deleteChallenge(id: number): boolean {

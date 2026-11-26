@@ -1,4 +1,4 @@
-import type { BuildJob, BuildUsage, BuilderSettings, ChannelRow, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow, Challenge } from '../db.js';
+import type { BuildJob, BuildUsage, BuilderSettings, ChannelRow, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow, Challenge, ChallengeEvent } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, weekRangeLabel } from '../stats.js';
 import type { WeekBounds } from '../stats.js';
 import { levelProgress, levelTag, steamLevelColors, steamLevelOutline, steamLevelShape } from '../levels.js';
@@ -6,8 +6,8 @@ import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 import type { DeployStatus } from '../dokploy.js';
 import type { TranscriptEntry, TranscriptPart } from '../builder/transcript.js';
-import { formatChallengeTarget, formatChallengeValue, type ChallengeStatus, type ChallengeWizardStep, type ChallengeDraft, type ProgressRow } from '../challenges/form.js';
-import { CHALLENGE_METRICS, metricLabel, metricTargetUnit } from '../challenges/types.js';
+import { CHALLENGE_EVENT_LABELS, challengeEventText, formatChallengeTarget, formatChallengeValue, type ChallengeStatus, type ChallengeWizardStep, type ChallengeDraft, type ProgressRow } from '../challenges/form.js';
+import { CHALLENGE_METRICS, isTimeMetric, metricLabel, metricTargetUnit } from '../challenges/types.js';
 import { canCancel, retryAction } from '../builder/queue.js';
 
 export function escapeHtml(s: string): string {
@@ -139,6 +139,11 @@ const CSS = `
   .card { --pad: 22px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: var(--pad); min-width: 0; box-shadow: var(--shadow); }
   .card-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 16px; }
   .card-head.tight { margin-bottom: 4px; }
+  details.card > summary { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; cursor: pointer; font-size: 15.5px; font-weight: 600; letter-spacing: -.01em; list-style: none; }
+  details.card > summary::-webkit-details-marker { display: none; }
+  details.card > summary::after { content: '+'; color: var(--muted); font-weight: 500; }
+  details.card[open] > summary { margin-bottom: 16px; }
+  details.card[open] > summary::after { content: '−'; }
   h2 { font-size: 15.5px; line-height: 1.3; font-weight: 600; letter-spacing: -.01em; }
   h3 { font-size: 13px; font-weight: 600; }
   .sub, .muted { color: var(--muted); font-size: 13px; }
@@ -530,7 +535,7 @@ e.preventDefault();var u=new URL(a.href);history.replaceState(null,'',u.pathname
 })()`;
 
 // ---- shell ---------------------------------------------------------------------
-export type PageId = 'overview' | 'settings' | 'requests' | 'logs';
+export type PageId = 'overview' | 'challenges' | 'settings' | 'requests' | 'logs';
 
 export interface ChromeData {
   user: { username: string; avatar: string | null };
@@ -541,6 +546,7 @@ export interface ChromeData {
 const ICON = (path: string): string => `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
 const NAV: { id: PageId; href: string; label: string; icon: string }[] = [
   { id: 'overview', href: '/dashboard', label: 'Overview', icon: ICON('<rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="11" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/>') },
+  { id: 'challenges', href: '/dashboard/challenges', label: 'Challenges', icon: ICON('<path d="M6.5 3.5h7v4a3.5 3.5 0 0 1-7 0z"/><path d="M6.5 5H3.5v1.2A3 3 0 0 0 6.5 9.2M13.5 5h3v1.2a3 3 0 0 1-3 3M10 11v3.5M7 17.5h6"/>') },
   { id: 'settings', href: '/dashboard/settings', label: 'Settings', icon: ICON('<path d="M3 6h7M14 6h3M3 14h3M10 14h7"/><circle cx="12" cy="6" r="2"/><circle cx="8" cy="14" r="2"/>') },
   { id: 'requests', href: '/dashboard/requests', label: 'Requests', icon: ICON('<path d="M4 4.5h12a1.5 1.5 0 0 1 1.5 1.5v6.5A1.5 1.5 0 0 1 16 14h-5.5L7 17v-3H4a1.5 1.5 0 0 1-1.5-1.5V6A1.5 1.5 0 0 1 4 4.5z"/><path d="M6.5 8h7M6.5 10.8h4"/>') },
   { id: 'logs', href: '/dashboard/logs', label: 'Logs', icon: ICON('<rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="m6 8 2.5 2L6 12M10.5 12.5h3.5"/>') },
@@ -691,7 +697,6 @@ export interface SettingsPageData {
   saved: boolean;
   weeklyFlash: { kind: 'sent' } | { kind: 'error'; reason: string } | null;
   monthlyFlash: { kind: 'sent' } | { kind: 'error'; reason: string } | null;
-  challenges: ChallengesSectionData;
   free: {
     settings: FreeSettings;
     roles: { id: string; name: string }[];
@@ -729,18 +734,44 @@ export interface ChallengeListItem {
   challenge: Challenge;
   status: ChallengeStatus;
   joined: number;
-  /** Top 10 by progress, ties by join order. */
-  rows: ChallengeProgressRow[];
 }
 
-export interface ChallengesSectionData {
+export interface ChallengesPageData {
   wizard: { step: ChallengeWizardStep; draft: ChallengeDraft; errors: string[] };
   list: ChallengeListItem[];
+  counts: { all: number; upcoming: number; active: number; ended: number };
+  status: 'all' | ChallengeStatus;
+  page: number;
+  pages: number;
+  pageSize: number;
+  total: number;
   channels: { id: string; name: string }[];
   roles: { id: string; name: string }[];
   activityNames: string[];
   canManageRoles: boolean;
+  timezone: string;
   flash: { kind: 'saved' | 'error'; message: string } | null;
+  user: { username: string; avatar: string | null };
+  deploy?: DeployStatus;
+}
+
+export type ChallengeTab = 'overview' | 'progress' | 'activity';
+
+export interface ChallengeDetailData {
+  challenge: Challenge;
+  status: ChallengeStatus;
+  tab: ChallengeTab;
+  joined: number;
+  /** Top 10 by progress for the overview tab. */
+  rows: ChallengeProgressRow[];
+  progress: { rows: ChallengeProgressRow[]; page: number; pages: number; pageSize: number; total: number };
+  events: { rows: ChallengeEvent[]; page: number; pages: number; pageSize: number; total: number };
+  timezone: string;
+  channelName: string;
+  canManageRoles: boolean;
+  flash: { kind: 'saved' | 'error'; message: string } | null;
+  user: { username: string; avatar: string | null };
+  deploy?: DeployStatus;
 }
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -1143,14 +1174,38 @@ function freeSection(d: SettingsPageData): string {
   </section>`;
 }
 
+/** Link to a challenge detail tab (page 1 and the overview tab are omitted). */
+export function challengeHref(id: number, tab: ChallengeTab = 'overview', page = 1): string {
+  const q = new URLSearchParams();
+  if (tab !== 'overview') q.set('tab', tab);
+  if (page > 1) q.set('page', String(page));
+  const qs = q.toString();
+  return `/dashboard/challenges/${id}${qs ? '?' + qs : ''}`;
+}
+
+/** Overview / Progress / Activity tabs of one challenge; the selected one is plain text with aria-current. */
+export function challengeTabs(id: number, tab: ChallengeTab): string {
+  const labels: [ChallengeTab, string][] = [
+    ['overview', 'Overview'],
+    ['progress', 'Progress'],
+    ['activity', 'Activity'],
+  ];
+  const inner = labels
+    .map(([value, label]) => (value === tab ? `<span class="tab" aria-current="page">${escapeHtml(label)}</span>` : `<a class="tab" href="${escapeHtml(challengeHref(id, value))}">${escapeHtml(label)}</a>`))
+    .join('');
+  return `<nav class="tabs" aria-label="Challenge sections">${inner}</nav>`;
+}
+
+function challengeStatusPill(status: ChallengeStatus): string {
+  return status === 'active' ? statusPill('ok', 'Active') : status === 'upcoming' ? statusPill('warn', 'Upcoming') : statusPill('off', 'Ended');
+}
+
 /**
- * Challenges (izzivi): a 3-step server-side wizard (no JS) and the list of
- * recent challenges with progress, End now / Delete. Own POST endpoints.
+ * The 3-step server-side wizard (no JS), shared by the challenges page and the
+ * POST handlers that render a step again. `details#challenge-new` wraps it.
  */
-export function challengeSection(d: Pick<SettingsPageData, 'challenges' | 'settings'>): string {
-  const ch = d.challenges;
-  const w = ch.wizard;
-  const tz = d.settings.timezone;
+export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels' | 'roles' | 'activityNames'>): string {
+  const w = d.wizard;
   const hidden = (pairs: [string, string][]): string =>
     pairs.map(([name, value]) => `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`).join('');
   const detailsPairs = (draft: ChallengeDraft): [string, string][] => [
@@ -1171,26 +1226,12 @@ export function challengeSection(d: Pick<SettingsPageData, 'challenges' | 'setti
   const textareaEl = (id: string, name: string, value: string, max: number): string =>
     `<textarea id="${escapeHtml(id)}" name="${escapeHtml(name)}" rows="3" maxlength="${max}" aria-describedby="${escapeHtml(id)}-help">${escapeHtml(value)}</textarea>`;
   const metricOptions = CHALLENGE_METRICS.map((m) => `<option value="${m}"${w.draft.metric === m ? ' selected' : ''}>${escapeHtml(metricLabel(m))}${m === 'activity' ? ' (name below)' : ''}</option>`).join('');
-  const channelOptions = ch.channels.map((c) => `<option value="${escapeHtml(c.id)}"${w.draft.channelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
-  const roleOptions = ch.roles.map((r) => `<option value="${escapeHtml(r.id)}"${w.draft.rewardRoleId === r.id ? ' selected' : ''}>@${escapeHtml(r.name)}</option>`).join('');
-  const activityList = ch.activityNames.length > 0 ? `<datalist id="challengeActivities">${ch.activityNames.map((n) => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist>` : '';
-  const errors = w.errors.length > 0 ? `<div class="flash" role="alert">${w.errors.map(escapeHtml).join('<br>')}</div>` : '';
-  const flash =
-    ch.flash?.kind === 'saved' ? `<div class="flash" role="status">${escapeHtml(ch.flash.message)}</div>` : ch.flash?.kind === 'error' ? `<div class="flash" role="alert">${escapeHtml(ch.flash.message)}</div>` : '';
+  const channelOptions = d.channels.map((c) => `<option value="${escapeHtml(c.id)}"${w.draft.channelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
+  const roleOptions = d.roles.map((r) => `<option value="${escapeHtml(r.id)}"${w.draft.rewardRoleId === r.id ? ' selected' : ''}>@${escapeHtml(r.name)}</option>`).join('');
+  const activityList = d.activityNames.length > 0 ? `<datalist id="challengeActivities">${d.activityNames.map((n) => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist>` : '';
 
-  let wizard = '';
-  if (w.step === 1) {
-    wizard = `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="1">
-      <div class="rows">
-        ${row({ id: 'challengeName', label: 'Name', help: '1–100 characters, shown as the card title.', control: textEl('challengeName', 'name', w.draft.name, false) })}
-        ${row({ id: 'challengeDescription', label: 'Description', help: 'Up to 500 characters. Say what counts and how it is measured.', control: textareaEl('challengeDescription', 'description', w.draft.description, 500) })}
-        ${row({ id: 'challengeMetric', label: 'Metric', help: 'Measured from the stats the bot already records.', control: selectEl('challengeMetric', 'metric', metricOptions) })}
-        ${row({ id: 'challengeActivity', label: 'Activity name', help: 'Required for the activity metric, e.g. League of Legends or Counter-Strike 2.', control: `<input type="text" id="challengeActivity" name="activityName" value="${escapeHtml(w.draft.activityName)}" list="challengeActivities" aria-describedby="challengeActivity-help" autocomplete="off">${activityList}` })}
-      </div>
-      <div class="savebar"><span class="muted">Step 1 of 3</span><button type="submit">Next: schedule</button></div>
-    </form>`;
-  } else if (w.step === 2) {
-    wizard = `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="2">${hidden(detailsPairs(w.draft))}
+  if (w.step === 2) {
+    return `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="2">${hidden(detailsPairs(w.draft))}
       <div class="rows">
         ${row({ id: 'challengeTarget', label: 'Target', help: `Whole number (${metricTargetUnit(w.draft.metric)}); shown as "progress / target".`, control: numberEl('challengeTarget', 'target', w.draft.target, 1, 1_000_000) })}
         ${row({ id: 'challengeStart', label: 'Start date', help: 'YYYY-MM-DD, empty = starts when created. UTC day.', control: dateEl('challengeStart', 'startDate', w.draft.startDate) })}
@@ -1200,11 +1241,12 @@ export function challengeSection(d: Pick<SettingsPageData, 'challenges' | 'setti
       </div>
       <div class="savebar"><span class="muted">Step 2 of 3</span><button type="submit">Next: review</button></div>
     </form>`;
-  } else {
-    const channelName = ch.channels.find((c) => c.id === w.draft.channelId)?.name ?? w.draft.channelId;
-    const roleName = ch.roles.find((r) => r.id === w.draft.rewardRoleId)?.name ?? w.draft.rewardRoleId;
+  }
+  if (w.step === 3) {
+    const channelName = d.channels.find((c) => c.id === w.draft.channelId)?.name ?? w.draft.channelId;
+    const roleName = d.roles.find((r) => r.id === w.draft.rewardRoleId)?.name ?? w.draft.rewardRoleId;
     const start = w.draft.startDate ? `${w.draft.startDate} (UTC)` : 'when created';
-    wizard = `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="3">${hidden([...detailsPairs(w.draft), ...schedulePairs(w.draft)])}
+    return `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="3">${hidden([...detailsPairs(w.draft), ...schedulePairs(w.draft)])}
       <div class="rows">
         <div class="row block"><div class="row-l"><span class="lbl">Summary</span><span class="help">Creating posts the card and opens the challenge for joins.</span></div><div class="row-c">
           <p class="muted"><b>${escapeHtml(w.draft.name)}</b></p>
@@ -1216,31 +1258,171 @@ export function challengeSection(d: Pick<SettingsPageData, 'challenges' | 'setti
       <div class="savebar"><span class="muted">Step 3 of 3</span><button type="submit">Create challenge</button></div>
     </form>`;
   }
+  return `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="1">
+      <div class="rows">
+        ${row({ id: 'challengeName', label: 'Name', help: '1–100 characters, shown as the card title.', control: textEl('challengeName', 'name', w.draft.name, false) })}
+        ${row({ id: 'challengeDescription', label: 'Description', help: 'Up to 500 characters. Say what counts and how it is measured.', control: textareaEl('challengeDescription', 'description', w.draft.description, 500) })}
+        ${row({ id: 'challengeMetric', label: 'Goal type', help: 'Measured from the stats the bot already records.', control: selectEl('challengeMetric', 'metric', metricOptions) })}
+        ${row({ id: 'challengeActivity', label: 'Activity name', help: 'Required for the activity goal type, e.g. League of Legends or Counter-Strike 2.', control: `<input type="text" id="challengeActivity" name="activityName" value="${escapeHtml(w.draft.activityName)}" list="challengeActivities" aria-describedby="challengeActivity-help" autocomplete="off">${activityList}` })}
+      </div>
+      <div class="savebar"><span class="muted">Step 1 of 3</span><button type="submit">Next: schedule</button></div>
+    </form>`;
+}
 
-  const listItems = ch.list.map((item) => {
-    const c = item.challenge;
-    const status = item.status === 'active' ? statusPill('ok', 'Active') : item.status === 'upcoming' ? statusPill('warn', 'Upcoming') : statusPill('off', 'Ended');
-    const until = item.status === 'ended' ? `ended ${fmtDate(c.endedAt ?? c.endsAt, tz)}` : `until ${fmtDate(c.endsAt, tz)}`;
-    const top =
-      item.rows.length > 0
-        ? item.rows.map((r) => `<div class="muted">${r.rank === 1 ? '🥇' : r.rank === 2 ? '🥈' : r.rank === 3 ? '🥉' : `${r.rank}.`} ${escapeHtml(r.name)} — <b>${escapeHtml(formatChallengeValue(c.metric, r.value))}</b> / ${escapeHtml(formatChallengeTarget(c.metric, c.target))}</div>`).join('')
-        : '<p class="muted">No participants yet.</p>';
-    const actions =
-      (item.status === 'ended'
-        ? ''
-        : `<form method="post" action="/challenge-end"><input type="hidden" name="id" value="${c.id}"><button type="submit" class="btn ghost" onclick="return confirm('End this challenge now and grant the reward role?')">End now</button></form>`) +
-      `<form method="post" action="/challenge-delete"><input type="hidden" name="id" value="${c.id}"><button type="submit" class="btn ghost" onclick="return confirm('Delete this challenge and its card?')">Delete</button></form>`;
-    return `<div class="row block"><div class="row-l"><span class="lbl">#${c.id} ${escapeHtml(c.name)}</span><span class="help">${escapeHtml(metricLabel(c.metric))}${c.metric === 'activity' && c.activityName ? ` · ${escapeHtml(c.activityName)}` : ''} · ${escapeHtml(until)} · ${escapeHtml(fmt(item.joined))} joined</span></div><div class="row-c">${status}${top}<div class="savebar">${actions}</div></div></div>`;
+/** A challenge row in the list, linking to its detail page. */
+function challengeListItem(item: ChallengeListItem, tz: string): string {
+  const c = item.challenge;
+  const when =
+    item.status === 'ended' ? `ended ${fmtDate(c.endedAt ?? c.endsAt, tz)}` : item.status === 'upcoming' ? `starts ${fmtDate(c.startsAt, tz)}` : `until ${fmtDate(c.endsAt, tz)}`;
+  const metric = `${metricLabel(c.metric)}${c.metric === 'activity' && c.activityName ? ` · ${c.activityName}` : ''}`;
+  return `<div class="row"><div class="row-l"><span class="lbl"><a class="row-link" href="/dashboard/challenges/${c.id}">#${c.id} ${escapeHtml(c.name)}</a></span><span class="help">${escapeHtml(metric)} · ${escapeHtml(when)}</span></div><div class="row-c">${challengeStatusPill(item.status)}<span class="muted">${escapeHtml(fmt(item.joined))} joined</span></div></div>`;
+}
+
+const CLEAR_CHALLENGE_FLASH_SCRIPT =
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('challengeCreated');u.searchParams.delete('challengeError');u.searchParams.delete('challengeEnded');u.searchParams.delete('challengeDeleted');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+
+function challengeFlash(flash: ChallengesPageData['flash']): string {
+  return flash ? `<div class="flash" role="${flash.kind === 'error' ? 'alert' : 'status'}">${escapeHtml(flash.message)}</div>` : '';
+}
+
+/** Challenges page: status filters (with counts), the list, and the wizard in details#challenge-new. */
+export function challengesPage(d: ChallengesPageData, now: number = Date.now()): string {
+  const filters = (['all', 'upcoming', 'active', 'ended'] as const)
+    .map((status) => {
+      const label = status === 'all' ? 'All' : status === 'upcoming' ? 'Upcoming' : status === 'active' ? 'Active' : 'Ended';
+      const href = status === 'all' ? '/dashboard/challenges' : `/dashboard/challenges?status=${status}`;
+      const count = d.counts[status];
+      return status === d.status
+        ? `<span class="tab" aria-current="page">${escapeHtml(label)} <span class="muted">${escapeHtml(fmt(count))}</span></span>`
+        : `<a class="tab" href="${escapeHtml(href)}">${escapeHtml(label)} <span class="muted">${escapeHtml(fmt(count))}</span></a>`;
+    })
+    .join('');
+  const rolePill = d.canManageRoles ? statusPill('ok', 'Manage Roles granted') : statusPill('err', 'Missing Manage Roles — rewards cannot be granted');
+  const open = d.wizard.step !== 1 || d.wizard.errors.length > 0;
+  const errors = d.wizard.errors.length > 0 ? `<div class="flash" role="alert">${d.wizard.errors.map(escapeHtml).join('<br>')}</div>` : '';
+  const listItems = d.list.map((item) => challengeListItem(item, d.timezone));
+  const pager = pagerHtml({
+    page: d.page,
+    pages: d.pages,
+    summary: `Showing ${rangeSummary(d.page, d.pageSize, d.list.length, d.total)}`,
+    href: (p) => `${d.status === 'all' ? '/dashboard/challenges' : `/dashboard/challenges?status=${d.status}`}${d.status === 'all' ? '?' : '&'}page=${p}#h-challenges`,
+    label: 'Challenge pages',
+    showSingle: d.total > 0,
   });
+  const body = `
+    ${challengeFlash(d.flash)}
+    <details class="card chall-new" id="challenge-new"${open ? ' open' : ''}><summary><span>New challenge</span><span class="sub">Details, schedule, review</span></summary>
+      ${errors}
+      ${challengeWizard(d)}
+    </details>
+    <section class="card" aria-labelledby="h-challenges"><div class="card-head"><h2 id="h-challenges">Challenges</h2><span class="sub">${escapeHtml(fmt(d.counts.all))} total</span></div>
+      <p class="card-sub">Time-limited goals on the existing stats. Members join on the posted card; progress counts from the challenge start for everyone who joined. When it ends, the top 3 with progress above 0 get the reward role permanently.</p>
+      <div class="pills card-pills">${rolePill}</div>
+      <div class="filters"><nav class="seg" aria-label="Challenge status">${filters}</nav></div>
+      <div class="rows">${listItems.length > 0 ? listItems.join('') : emptyState(d.status === 'all' ? 'No challenges yet — create one above.' : `No ${d.status} challenges.`)}</div>
+      ${pager}
+    </section>
+    ${d.flash ? CLEAR_CHALLENGE_FLASH_SCRIPT : ''}`;
+  return layout(
+    {
+      active: 'challenges',
+      title: 'Challenges',
+      sub: '<p class="hero-sub">Time-limited goals on messages, reactions, voice and activities. Join/Leave and role rewards stay on the posted card.</p>',
+      live: 'quiet',
+      body,
+      now,
+    },
+    { user: d.user, deploy: d.deploy },
+  );
+}
 
-  const active = ch.list.filter((i) => i.status === 'active').length;
-  const rolePill = ch.canManageRoles ? statusPill('ok', 'Manage Roles granted') : statusPill('err', 'Missing Manage Roles — rewards cannot be granted');
-  return `<section class="card" id="challenges" aria-labelledby="h-challenges"><div class="card-head"><h2 id="h-challenges">Challenges</h2><span class="sub">${fmt(active)} active</span></div><p class="card-sub">Time-limited goals on the existing stats. Members join on the posted card; progress counts from the challenge start for everyone who joined. When it ends, the top 3 with progress above 0 get the reward role permanently.</p><div class="pills card-pills">${rolePill}</div>
-    ${flash}${errors}
-    ${wizard}
-    <h3 class="group-h">Recent challenges</h3>
-    <div class="rows">${listItems.length > 0 ? listItems.join('') : emptyState('No challenges yet — create one above.')}</div>
-  </section>`;
+function progressTable(rows: ChallengeProgressRow[], metric: Challenge['metric'], target: number, empty: string): string {
+  if (rows.length === 0) return emptyState(empty);
+  const targetValue = isTimeMetric(metric) ? target * 60_000 : target;
+  const body = rows
+    .map((r) => {
+      const pct = targetValue > 0 ? Math.max(0, Math.min(100, Math.round((r.value / targetValue) * 100))) : 0;
+      const medal = medalFor(r.rank);
+      return `<tr><td class="dim" data-label="Rank">${medal ? `<span aria-label="Rank ${r.rank}"><span aria-hidden="true">${medal}</span></span>` : r.rank}</td><td data-label="Member" class="name">${escapeHtml(r.name)}</td><td data-label="Progress">${escapeHtml(formatChallengeValue(metric, r.value))} / ${escapeHtml(formatChallengeTarget(metric, target))}</td><td class="r" data-label="Share">${pct}%</td></tr>`;
+    })
+    .join('');
+  return `<div class="tbl"><table><thead><tr><th scope="col">Rank</th><th scope="col">Member</th><th scope="col">Progress</th><th scope="col" class="r">Share</th></tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function challengeMeta(label: string, value: string): string {
+  return `<div class="row"><div class="row-l"><span class="lbl">${escapeHtml(label)}</span></div><div class="row-c">${value}</div></div>`;
+}
+
+/** One challenge: overview, ranked progress and the event log, on ?tab=overview|progress|activity. */
+export function challengeDetailPage(d: ChallengeDetailData, now: number = Date.now()): string {
+  const c = d.challenge;
+  const metric = `${metricLabel(c.metric)}${c.metric === 'activity' && c.activityName ? ` · ${c.activityName}` : ''}`;
+  const current = d.tab === 'progress' ? d.progress.rows : d.rows;
+  const progressPager = pagerHtml({
+    page: d.progress.page,
+    pages: d.progress.pages,
+    summary: `Showing ${rangeSummary(d.progress.page, d.progress.pageSize, d.progress.rows.length, d.progress.total)}`,
+    href: (p) => `${challengeHref(c.id, 'progress', p)}#h-progress`,
+    label: 'Progress pages',
+    showSingle: d.progress.total > 0,
+  });
+  const eventRows = d.events.rows.map((e) => {
+    const label = CHALLENGE_EVENT_LABELS[e.kind] ?? e.kind;
+    return `<tr><td class="dim" data-label="Time">${escapeHtml(fmtDate(e.ts, d.timezone))}</td><td data-label="Kind"><span class="badge">${escapeHtml(label)}</span></td><td data-label="Activity">${escapeHtml(challengeEventText(e.kind, e.actorName, e.detail))}</td></tr>`;
+  });
+  const eventsTable =
+    eventRows.length === 0
+      ? emptyState('No events yet.')
+      : `<div class="tbl"><table><thead><tr><th scope="col">Time</th><th scope="col">Kind</th><th scope="col">Activity</th></tr></thead><tbody>${eventRows.join('')}</tbody></table></div>`;
+  const eventPager = pagerHtml({
+    page: d.events.page,
+    pages: d.events.pages,
+    summary: `Showing ${rangeSummary(d.events.page, d.events.pageSize, d.events.rows.length, d.events.total)}`,
+    href: (p) => `${challengeHref(c.id, 'activity', p)}#h-activity`,
+    label: 'Activity pages',
+    showSingle: d.events.total > 0,
+  });
+  const actions =
+    (d.status === 'ended'
+      ? ''
+      : `<form method="post" action="/challenge-end"><input type="hidden" name="id" value="${c.id}"><button type="submit" class="btn ghost" onclick="return confirm('End this challenge now and grant the reward role?')">End now</button></form>`) +
+    `<form method="post" action="/challenge-delete"><input type="hidden" name="id" value="${c.id}"><button type="submit" class="btn ghost" onclick="return confirm('Delete this challenge and its card?')">Delete</button></form>`;
+  const overview = `<div class="rows">
+      ${challengeMeta('Status', challengeStatusPill(d.status))}
+      ${challengeMeta('Goal type', `<span>${escapeHtml(metric)}</span>`)}
+      ${challengeMeta('Target', `<span>${escapeHtml(formatChallengeTarget(c.metric, c.target))}</span>`)}
+      ${challengeMeta('Participants', `<span>${escapeHtml(fmt(d.joined))} joined</span>`)}
+      ${challengeMeta('Starts', `<span>${escapeHtml(fmtDate(c.startsAt, d.timezone))}</span>`)}
+      ${challengeMeta('Ends', `<span>${escapeHtml(fmtDate(c.endsAt, d.timezone))}${d.status === 'ended' ? ` · ended ${escapeHtml(fmtDate(c.endedAt ?? c.endsAt, d.timezone))}` : ''}</span>`)}
+      ${challengeMeta('Channel', `<span>#${escapeHtml(d.channelName)}</span>`)}
+      ${challengeMeta('Reward role', `<span>${c.rewardRoleId ? escapeHtml(c.rewardRoleId) : 'No reward role'}</span>`)}
+      ${challengeMeta('Created by', `<span>${escapeHtml(c.createdBy)} · ${escapeHtml(fmtDate(c.createdAt, d.timezone))}</span>`)}
+    </div>
+    ${c.description ? `<p class="muted">${escapeHtml(c.description)}</p>` : ''}
+    <h3 class="group-h" id="h-top">Top progress</h3>
+    ${progressTable(d.rows, c.metric, c.target, 'No participants yet.')}
+    <div class="savebar">${actions}</div>`;
+  const progress = `<h2 id="h-progress">Progress</h2>${progressTable(current, c.metric, c.target, 'No participants yet.')}${progressPager}`;
+  const activity = `<h2 id="h-activity">Activity</h2>${eventsTable}${eventPager}`;
+  const body = `<section class="card" aria-labelledby="h-challenge">
+      <div class="card-head"><h2 id="h-challenge">#${c.id} ${escapeHtml(c.name)}</h2><span class="sub">${escapeHtml(metric)}</span></div>
+      <p class="muted"><a href="/dashboard/challenges">← All challenges</a></p>
+      ${challengeTabs(c.id, d.tab)}
+      ${d.flash ? `<div class="flash" role="${d.flash.kind === 'error' ? 'alert' : 'status'}">${escapeHtml(d.flash.message)}</div>` : ''}
+      ${d.tab === 'progress' ? progress : d.tab === 'activity' ? activity : overview}
+    </section>
+    ${d.flash ? CLEAR_CHALLENGE_FLASH_SCRIPT : ''}`;
+  return layout(
+    {
+      active: 'challenges',
+      title: 'Challenges',
+      sub: `<p class="hero-sub">#${c.id} ${escapeHtml(c.name)}</p><div class="pills">${challengeStatusPill(d.status)}</div>`,
+      live: 'quiet',
+      body,
+      now,
+    },
+    { user: d.user, deploy: d.deploy },
+  );
 }
 
 function limitMeter(label: string, m: { percent: number; limited: boolean; resetsAt: number }, tz: string, threshold: number): string {
@@ -1294,7 +1476,7 @@ export function builderSection(d: Pick<SettingsPageData, 'builder' | 'settings'>
 
 // Strips the one-shot flash params so a refresh doesn't show the toast again.
 const CLEAR_FLASH_SCRIPT =
-  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('colorSaved');u.searchParams.delete('colorError');u.searchParams.delete('weekly');u.searchParams.delete('monthly');u.searchParams.delete('reason');u.searchParams.delete('challengeCreated');u.searchParams.delete('challengeError');u.searchParams.delete('challengeEnded');u.searchParams.delete('challengeDeleted');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('colorSaved');u.searchParams.delete('colorError');u.searchParams.delete('weekly');u.searchParams.delete('monthly');u.searchParams.delete('reason');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
 
 /** Settings page: one card per feature; forms save independently (general, colours, free games, AI assistant). */
 export function settingsPage(d: SettingsPageData, now: number = Date.now()): string {
@@ -1306,9 +1488,9 @@ export function settingsPage(d: SettingsPageData, now: number = Date.now()): str
     d.monthlyFlash?.kind === 'error' ? `<div class="flash" role="alert">Couldn't send monthly recap: ${escapeHtml(d.monthlyFlash.reason || 'unknown error')}</div>` : '',
     d.free.flash?.kind === 'saved' ? '<div class="flash" role="status">Free games settings saved.</div>' : '',
   ].join('');
-  const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['colors', 'Colours'], ['free', 'Free games'], ['challenges', 'Challenges'], ['builder', 'Assistant']];
+  const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['colors', 'Colours'], ['free', 'Free games'], ['builder', 'Assistant']];
   const secnav = `<nav class="secnav" aria-label="Settings sections"><div class="secnav-in">${anchors.map(([id, label]) => `<a href="#${id}">${label}</a>`).join('')}</div></nav>`;
-  const body = `${flashes}${generalForm(d)}${colorSection(d)}${freeSection(d)}${challengeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.monthlyFlash || d.free.flash || d.builder.flash || d.color.flash || d.challenges.flash ? CLEAR_FLASH_SCRIPT : ''}`;
+  const body = `${flashes}${generalForm(d)}${colorSection(d)}${freeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.monthlyFlash || d.free.flash || d.builder.flash || d.color.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout({ active: 'settings', title: 'Settings', sub: '<p class="hero-sub">Everything the bot does is configured here. Each section saves on its own.</p>', live: 'quiet', between: secnav, body, now }, { user: d.user, deploy: d.deploy });
 }
 
