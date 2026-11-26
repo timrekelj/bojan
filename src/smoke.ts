@@ -23,7 +23,7 @@ import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challeng
 import { CHALLENGE_METRICS, goalName, isManualMetric, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, challengeDetailPage, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, challengeDetailPage, challengeMetaGrid, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -1313,7 +1313,9 @@ rmSync(dir, { recursive: true, force: true });
       chPage.includes('aria-label="Sort challenges"') && chPage.includes('href="/dashboard/challenges?sort=ending"') && chPage.includes('Completed <span class="muted">1</span>') &&
       chPage.includes('id="challenge-new"') && !chPage.includes('id="challenge-new" open') && chPage.includes('<input type="hidden" name="step" value="1">') &&
       ['challengeName', 'challengeDescription', 'challengeMetric', 'challengeActivity', 'challengeLabel'].every((id) => chPage.includes(`id="${id}"`)) && chPage.includes('Goal type') && chPage.includes('name="label"') && chPage.includes('Goal name') &&
-      chPage.includes('href="/dashboard/challenges/7"') && chPage.includes('Skelce &lt;x&gt;') && !chPage.includes('Skelce <x>') &&
+      chPage.includes('href="/dashboard/challenges/7"') && chPage.includes('data-href="/dashboard/challenges/7"') && chPage.includes('class="row-link"') &&
+      chPage.includes('<table>') && chPage.includes('<th scope="col">Challenge</th>') && chPage.includes('<th scope="col">Goal</th>') && chPage.includes('<th scope="col" class="r">Joined</th>') &&
+      chPage.includes('Skelce &lt;x&gt;') && !chPage.includes('Details, schedule, review') && !chPage.includes('Skelce <x>') &&
       chPage.includes('class="pager"') && chPage.includes('Page 1 of 2') && chPage.includes('Next') && chPage.includes('Manage Roles granted'),
   );
   const chStep2 = challengesPage({ ...chData, wizard: { step: 2, draft: chData.wizard.draft, errors: [] } }, T);
@@ -1390,10 +1392,20 @@ rmSync(dir, { recursive: true, force: true });
     chDet.includes('aria-label="Challenge sections"') && chDet.includes('<span class="tab" aria-current="page">Overview</span>') &&
       chDet.includes('href="/dashboard/challenges/7?tab=progress"') && chDet.includes('href="/dashboard/challenges/7?tab=entries"') && chDet.includes('href="/dashboard/challenges/7?tab=activity"') &&
       chDet.includes('Goal standings') && chDet.includes('Messages') && chDet.includes('Push-ups') && chDet.includes('Ana &lt;x&gt;') && chDet.includes('120 / 500') && chDet.includes('120 / 100') &&
+      chDet.includes('class="ch-meta"') && (chDet.match(/<dt>/g) ?? []).length === 8 &&
       chDet.includes('action="/challenge-goal-add"') && chDet.includes('id="challengeGoalMetric"') && chDet.includes('id="challengeGoalLabel"') && chDet.includes('admin &lt;a&gt;') && chDet.includes('#general') &&
       chDet.includes('Squats · no target') &&
       chDet.includes('action="/challenge-end"') && chDet.includes('action="/challenge-delete"') && chDet.includes('Challenge #7 ended.') &&
       chDet.includes("searchParams.delete('challengeUpdated')") && !chDet.includes('Ana <x>'),
+  );
+  const chMeta = challengeMetaGrid([
+    ['Reward <role>', '<none>'],
+    ['Channel', '#general'],
+  ]);
+  check(
+    'challengeMetaGrid: dl grid, escaped labels and values',
+    chMeta.startsWith('<dl class="ch-meta">') && (chMeta.match(/<dt>/g) ?? []).length === 2 &&
+      chMeta.includes('<dt>Reward &lt;role&gt;</dt><dd>&lt;none&gt;</dd>') && chMeta.includes('<dt>Channel</dt><dd>#general</dd>') && !chMeta.includes('<role>'),
   );
   const chProg = challengeDetailPage({ ...chDetail, tab: 'progress' }, T);
   check(
