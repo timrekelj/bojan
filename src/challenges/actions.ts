@@ -9,7 +9,7 @@ import {
   type SendableChannels,
 } from 'discord.js';
 import type { BotDatabase, Challenge, ChallengeGoal } from '../db.js';
-import { buildChallengeCard, goalProgressLines, goalProgressText } from './cards.js';
+import { buildChallengeCard, goalProgressLines, goalProgressText, manualLogRow } from './cards.js';
 import {
   challengeStatus,
   formatChallengeTarget,
@@ -22,7 +22,7 @@ import {
   parseEntryValue,
   shouldFlagEntry,
 } from './form.js';
-import { isManualMetric, metricLabel, type ChallengeMetric } from './types.js';
+import { goalName, isManualMetric, type ChallengeMetric } from './types.js';
 
 export interface NewChallengeInput {
   guildId: string;
@@ -30,7 +30,9 @@ export interface NewChallengeInput {
   description: string;
   metric: ChallengeMetric;
   activityName: string | null;
-  /** Count for messages/reactions, minutes for voice/activity. */
+  /** Custom goal name; null for the built-in metrics. */
+  label: string | null;
+  /** Count for messages/reactions, minutes for voice/activity; 0 = no target. */
   target: number;
   startsAt: number;
   endsAt: number;
@@ -183,14 +185,16 @@ function windowState(challenge: Challenge, now: number): 'upcoming' | 'active' |
 }
 
 function openLogModal(interaction: ButtonInteraction, challenge: Challenge, goal: ChallengeGoal): Promise<void> {
+  const name = goalName(goal);
+  const suffix = ` (1–${MAX_SET_VALUE})`;
   const modal = new ModalBuilder()
     .setCustomId(`challenge:log:${challenge.id}:${goal.id}`)
-    .setTitle(`Log ${metricLabel(goal.metric).toLowerCase()}`)
+    .setTitle(`Log ${name}`.slice(0, 45))
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId('value')
-          .setLabel(`${metricLabel(goal.metric)} in this set (1–${MAX_SET_VALUE})`)
+          .setLabel(`${name.slice(0, 45 - suffix.length)}${suffix}`)
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setMinLength(1)
@@ -240,7 +244,10 @@ export async function handleChallengeButton(interaction: ButtonInteraction, clie
 
   if (parsed.action === 'my') {
     const { goals, totalsByGoal } = challengeGoalTotals(db, challenge, now);
-    await interaction.reply({ content: goalProgressLines(challenge, goals, totalsByGoal, interaction.user.id), ephemeral: true }).catch(() => undefined);
+    const rows = status === 'active' ? manualLogRow(challenge.id, goals) : [];
+    await interaction
+      .reply({ content: goalProgressLines(challenge, goals, totalsByGoal, interaction.user.id), ephemeral: true, ...(rows.length > 0 ? { components: rows } : {}) })
+      .catch(() => undefined);
     return;
   }
 
@@ -292,7 +299,7 @@ export async function handleChallengeLogSubmit(interaction: ModalSubmitInteracti
   const displayName = displayNameOf(interaction);
   const flagged = shouldFlagEntry(goal.metric, value);
   db.addChallengeEntry({ challengeId: challenge.id, goalId: goal.id, userId: interaction.user.id, displayName, value, flagged, createdAt: now });
-  const label = `${value} ${metricLabel(goal.metric).toLowerCase()}`;
+  const label = `${value} ${goalName(goal).toLowerCase()}`;
   db.addChallengeEvent({
     challengeId: challenge.id,
     ts: now,
@@ -305,12 +312,10 @@ export async function handleChallengeLogSubmit(interaction: ModalSubmitInteracti
   const totals = db.challengeEntryTotals(goal.id, challenge.startsAt, challenge.endsAt);
   const total = totals[interaction.user.id] ?? 0;
   const remaining = goalRemaining(goal, total);
-  const lines = [
-    `Logged **${label}** for **${challenge.name}**.`,
-    goalProgressText(goal, total, remaining),
-    `Goal **${formatChallengeTarget(goal.metric, goal.target)}** · still ${formatChallengeValue(goal.metric, remaining)} to go.`,
-  ];
-  if (flagged) lines.push('⚠️ This set is above 99 and was flagged for admin review.');
-  await interaction.reply({ content: lines.join('\n'), ephemeral: true }).catch(() => undefined);
+  const lines = [`Logged **${label}** for **${challenge.name}**.`, goalProgressText(goal, total, remaining)];
+  if (goal.target > 0) lines.push(`Goal **${formatChallengeTarget(goal.metric, goal.target)}** · still ${formatChallengeValue(goal.metric, remaining)} to go.`);
+  if (flagged) lines.push(`⚠️ This set is above 99 and was flagged for admin review.`);
+  const rows = manualLogRow(challenge.id, db.challengeGoals(challenge.id));
+  await interaction.reply({ content: lines.join('\n'), ephemeral: true, ...(rows.length > 0 ? { components: rows } : {}) }).catch(() => undefined);
   await refreshChallengeCard(client, db, challenge, now);
 }

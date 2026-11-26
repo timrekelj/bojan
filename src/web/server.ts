@@ -19,9 +19,9 @@ import type { BuilderRunner } from '../builder/runner.js';
 import { OpenCodeAgent, probeAgent, type AgentStatus } from '../builder/opencode.js';
 import { fetchTranscript } from '../builder/transcript.js';
 import { buildColorMessage, COLOR_MARKER, sortColorRoles } from '../colors.js';
-import { challengeStatus, challengeWindow, emptyDraft, MAX_CHALLENGE_GOALS, MAX_SET_VALUE, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry, type ChallengeDraft, type ChallengeWizardStep } from '../challenges/form.js';
+import { challengeStatus, challengeWindow, emptyDraft, formatChallengeTarget, MAX_CHALLENGE_GOALS, MAX_SET_VALUE, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry, type ChallengeDraft, type ChallengeWizardStep } from '../challenges/form.js';
 import { createAndPostChallenge, finalizeChallenge, refreshChallengeCard } from '../challenges/actions.js';
-import { isManualMetric, metricLabel } from '../challenges/types.js';
+import { goalName, isManualMetric } from '../challenges/types.js';
 
 interface Session {
   userId: string;
@@ -712,7 +712,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     return data ? c.html(challengeDetailPage(data)) : c.text('Challenge not found.', 404);
   });
 
-  const CHALLENGE_FIELDS = ['step', 'name', 'description', 'metric', 'activityName', 'target', 'startDate', 'endDate', 'channelId', 'rewardRoleId'] as const;
+  const CHALLENGE_FIELDS = ['step', 'name', 'description', 'metric', 'activityName', 'label', 'target', 'startDate', 'endDate', 'channelId', 'rewardRoleId', 'nav'] as const;
 
   const challengeForm = (form: Record<string, unknown>): Record<string, string | undefined> => {
     const out: Record<string, string | undefined> = {};
@@ -735,7 +735,12 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const raw = challengeForm(await c.req.parseBody());
     const stepNum = Number(raw.step);
     const step: ChallengeWizardStep = stepNum === 2 ? 2 : stepNum === 3 ? 3 : 1;
-    const parsed = parseWizardStep(raw, step, { channels: new Set(listChannels().map((ch) => ch.id)), roles: new Set(listRoles().map((r) => r.id)) });
+    const ctx = { channels: new Set(listChannels().map((ch) => ch.id)), roles: new Set(listRoles().map((r) => r.id)) };
+    if (raw.nav === 'back') {
+      const prev = (step > 1 ? step - 1 : 1) as ChallengeWizardStep;
+      return challengeWizardPage(c, prev, parseWizardStep(raw, prev, ctx).draft, []);
+    }
+    const parsed = parseWizardStep(raw, step, ctx);
     if (parsed.errors.length > 0) return challengeWizardPage(c, step, parsed.draft, parsed.errors, 400);
     if (step < 3) return challengeWizardPage(c, (step + 1) as ChallengeWizardStep, parsed.draft, []);
 
@@ -754,6 +759,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         description: parsed.draft.description,
         metric: parsed.draft.metric,
         activityName: parsed.draft.metric === 'activity' ? parsed.draft.activityName : null,
+        label: parsed.draft.label || null,
         target: parsed.draft.target,
         startsAt: window.window.startsAt,
         endsAt: window.window.endsAt,
@@ -780,12 +786,13 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     if (db.challengeGoals(challenge.id).length >= MAX_CHALLENGE_GOALS) {
       return c.redirect(`/dashboard/challenges/${challenge.id}?challengeError=${encodeURIComponent(`A challenge can have at most ${MAX_CHALLENGE_GOALS} goals.`)}`);
     }
-    const parsed = parseGoal({ metric: typeof form.metric === 'string' ? form.metric : undefined, activityName: typeof form.activityName === 'string' ? form.activityName : undefined, target: typeof form.target === 'string' ? form.target : undefined });
+    const parsed = parseGoal({ metric: typeof form.metric === 'string' ? form.metric : undefined, activityName: typeof form.activityName === 'string' ? form.activityName : undefined, label: typeof form.label === 'string' ? form.label : undefined, target: typeof form.target === 'string' ? form.target : undefined });
     if (!parsed.ok) return c.redirect(`/dashboard/challenges/${challenge.id}?challengeError=${encodeURIComponent(parsed.reason)}`);
     const goal = db.addChallengeGoal({
       challengeId: challenge.id,
       metric: parsed.goal.metric,
       activityName: parsed.goal.metric === 'activity' ? parsed.goal.activityName : null,
+      label: parsed.goal.label || null,
       target: parsed.goal.target,
       createdAt: now,
     });
@@ -796,7 +803,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       kind: 'goal_added',
       actorId: session.userId,
       actorName: session.username,
-      detail: `${metricLabel(goal.metric)}${goal.activityName ? ` · ${goal.activityName}` : ''} · target ${goal.target}`,
+      detail: `${goalName(goal)} · ${goal.target > 0 ? `target ${formatChallengeTarget(goal.metric, goal.target)}` : 'no target'}`,
     });
     await refreshChallengeCard(client, db, challenge, now);
     console.log(`[web] challenge #${challenge.id} goal #${goal.id} (${goal.metric}) added by ${session.username}`);

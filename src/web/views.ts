@@ -7,7 +7,7 @@ import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.
 import type { DeployStatus } from '../dokploy.js';
 import type { TranscriptEntry, TranscriptPart } from '../builder/transcript.js';
 import { CHALLENGE_EVENT_LABELS, challengeEventText, formatChallengeTarget, formatChallengeValue, MAX_CHALLENGE_GOALS, type ChallengeStatus, type ChallengeWizardStep, type ChallengeDraft, type ProgressRow } from '../challenges/form.js';
-import { CHALLENGE_METRICS, isTimeMetric, metricLabel, metricTargetUnit, type ChallengeMetric } from '../challenges/types.js';
+import { CHALLENGE_METRICS, goalName, isTimeMetric, metricLabel, metricTargetUnit, type ChallengeMetric } from '../challenges/types.js';
 import { canCancel, retryAction } from '../builder/queue.js';
 
 export function escapeHtml(s: string): string {
@@ -144,6 +144,10 @@ const CSS = `
   details.card > summary::after { content: '+'; color: var(--muted); font-weight: 500; }
   details.card[open] > summary { margin-bottom: 16px; }
   details.card[open] > summary::after { content: '−'; }
+  details.card.chall-new > summary { background: var(--accent-solid); color: #fff; border-radius: 12px; padding: 0 16px; min-height: 52px; align-items: center; margin: 0 -6px; }
+  details.card.chall-new > summary .sub { color: rgba(255,255,255,.82); }
+  details.card.chall-new > summary::after { color: #fff; }
+  details.card.chall-new[open] > summary { margin-bottom: 16px; }
   h2 { font-size: 15.5px; line-height: 1.3; font-weight: 600; letter-spacing: -.01em; }
   h3 { font-size: 13px; font-weight: 600; }
   .sub, .muted { color: var(--muted); font-size: 13px; }
@@ -1228,6 +1232,7 @@ export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels
     ['description', draft.description],
     ['metric', draft.metric],
     ['activityName', draft.activityName],
+    ['label', draft.label],
   ];
   const schedulePairs = (draft: ChallengeDraft): [string, string][] => [
     ['target', String(draft.target)],
@@ -1244,40 +1249,45 @@ export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels
   const channelOptions = d.channels.map((c) => `<option value="${escapeHtml(c.id)}"${w.draft.channelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
   const roleOptions = d.roles.map((r) => `<option value="${escapeHtml(r.id)}"${w.draft.rewardRoleId === r.id ? ' selected' : ''}>@${escapeHtml(r.name)}</option>`).join('');
   const activityList = d.activityNames.length > 0 ? `<datalist id="challengeActivities">${d.activityNames.map((n) => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist>` : '';
+  const targetEl = (id: string, value: number): string =>
+    `<input type="number" id="${escapeHtml(id)}" name="target" min="0" max="1000000" step="1" inputmode="numeric" value="${value > 0 ? value : ''}" placeholder="no target" aria-describedby="${escapeHtml(id)}-help">`;
+  const backButton = `<button type="submit" class="btn ghost" name="nav" value="back" formnovalidate>Back</button>`;
 
   if (w.step === 2) {
     return `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="2">${hidden(detailsPairs(w.draft))}
       <div class="rows">
-        ${row({ id: 'challengeTarget', label: 'Target', help: `Whole number (${metricTargetUnit(w.draft.metric)}); shown as "progress / target".`, control: numberEl('challengeTarget', 'target', w.draft.target, 1, 1_000_000) })}
+        ${row({ id: 'challengeTarget', label: 'Target (optional)', help: `Whole number (${metricTargetUnit(w.draft.metric)}); leave empty or 0 for no target.`, control: targetEl('challengeTarget', w.draft.target) })}
         ${row({ id: 'challengeStart', label: 'Start date', help: 'YYYY-MM-DD, empty = starts when created. UTC day.', control: dateEl('challengeStart', 'startDate', w.draft.startDate) })}
         ${row({ id: 'challengeEnd', label: 'End date', help: 'The whole UTC day counts. Must be in the future.', control: dateEl('challengeEnd', 'endDate', w.draft.endDate) })}
         ${row({ id: 'challengeChannel', label: 'Channel', help: 'Where the joinable card is posted.', control: selectEl('challengeChannel', 'channelId', `<option value="">— choose —</option>${channelOptions}`) })}
         ${row({ id: 'challengeRole', label: 'Reward role', help: 'Granted permanently to the top 3 with progress above 0 when the challenge ends.', control: selectEl('challengeRole', 'rewardRoleId', `<option value="">— no reward —</option>${roleOptions}`) })}
       </div>
-      <div class="savebar"><span class="muted">Step 2 of 3</span><button type="submit">Next: review</button></div>
+      <div class="savebar"><span class="muted">Step 2 of 3</span>${backButton}<button type="submit">Next: review</button></div>
     </form>`;
   }
   if (w.step === 3) {
     const channelName = d.channels.find((c) => c.id === w.draft.channelId)?.name ?? w.draft.channelId;
     const roleName = d.roles.find((r) => r.id === w.draft.rewardRoleId)?.name ?? w.draft.rewardRoleId;
     const start = w.draft.startDate ? `${w.draft.startDate} (UTC)` : 'when created';
+    const targetText = w.draft.target > 0 ? `target <b>${escapeHtml(formatChallengeTarget(w.draft.metric, w.draft.target))}</b>` : '<b>no target</b>';
     return `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="3">${hidden([...detailsPairs(w.draft), ...schedulePairs(w.draft)])}
       <div class="rows">
         <div class="row block"><div class="row-l"><span class="lbl">Summary</span><span class="help">Creating posts the card and opens the challenge for joins.</span></div><div class="row-c">
           <p class="muted"><b>${escapeHtml(w.draft.name)}</b></p>
           ${w.draft.description ? `<p class="muted">${escapeHtml(w.draft.description)}</p>` : ''}
-          <p class="muted">${escapeHtml(metricLabel(w.draft.metric))}${w.draft.metric === 'activity' ? ` · ${escapeHtml(w.draft.activityName)}` : ''} · target <b>${escapeHtml(formatChallengeTarget(w.draft.metric, w.draft.target))}</b></p>
+          <p class="muted">${escapeHtml(goalName({ metric: w.draft.metric, label: w.draft.label, activityName: w.draft.activityName }))} · ${targetText}</p>
           <p class="muted">From ${escapeHtml(start)} until ${escapeHtml(w.draft.endDate)} (UTC) · #${escapeHtml(channelName)}${w.draft.rewardRoleId ? ` · reward @${escapeHtml(roleName)}` : ''}</p>
         </div></div>
       </div>
-      <div class="savebar"><span class="muted">Step 3 of 3</span><button type="submit">Create challenge</button></div>
+      <div class="savebar"><span class="muted">Step 3 of 3</span>${backButton}<button type="submit">Create challenge</button></div>
     </form>`;
   }
   return `<form method="post" action="/challenge-wizard"><input type="hidden" name="step" value="1">
       <div class="rows">
         ${row({ id: 'challengeName', label: 'Name', help: '1–100 characters, shown as the card title.', control: textEl('challengeName', 'name', w.draft.name, false) })}
         ${row({ id: 'challengeDescription', label: 'Description', help: 'Up to 500 characters. Say what counts and how it is measured.', control: textareaEl('challengeDescription', 'description', w.draft.description, 500) })}
-        ${row({ id: 'challengeMetric', label: 'Goal type', help: 'Measured from the stats the bot already records.', control: selectEl('challengeMetric', 'metric', metricOptions) })}
+        ${row({ id: 'challengeMetric', label: 'Goal type', help: 'Measured from the stats the bot already records, or logged by hand (push-ups, custom).', control: selectEl('challengeMetric', 'metric', metricOptions) })}
+        ${row({ id: 'challengeLabel', label: 'Goal name', help: 'For the custom goal type only: what is counted, e.g. Squats or Steps. The name is also the unit.', control: textEl('challengeLabel', 'label', w.draft.label, false) })}
         ${row({ id: 'challengeActivity', label: 'Activity name', help: 'Required for the activity goal type, e.g. League of Legends or Counter-Strike 2.', control: `<input type="text" id="challengeActivity" name="activityName" value="${escapeHtml(w.draft.activityName)}" list="challengeActivities" aria-describedby="challengeActivity-help" autocomplete="off">${activityList}` })}
       </div>
       <div class="savebar"><span class="muted">Step 1 of 3</span><button type="submit">Next: schedule</button></div>
@@ -1289,7 +1299,7 @@ function challengeListItem(item: ChallengeListItem, tz: string): string {
   const c = item.challenge;
   const when =
     item.status === 'ended' ? `ended ${fmtDate(c.endedAt ?? c.endsAt, tz)}` : item.status === 'upcoming' ? `starts ${fmtDate(c.startsAt, tz)}` : `until ${fmtDate(c.endsAt, tz)}`;
-  const metric = `${metricLabel(c.metric)}${c.metric === 'activity' && c.activityName ? ` · ${c.activityName}` : ''}`;
+  const metric = goalName({ metric: c.metric, label: c.label, activityName: c.activityName });
   return `<div class="row"><div class="row-l"><span class="lbl"><a class="row-link" href="/dashboard/challenges/${c.id}">#${c.id} ${escapeHtml(c.name)}</a></span><span class="help">${escapeHtml(metric)} · ${escapeHtml(when)}</span></div><div class="row-c">${challengeStatusPill(item.status)}<span class="muted">${escapeHtml(fmt(item.joined))} joined</span></div></div>`;
 }
 
@@ -1353,7 +1363,7 @@ export function challengesPage(d: ChallengesPageData, now: number = Date.now()):
       ${challengeWizard(d)}
     </details>
     <section class="card" aria-labelledby="h-challenges"><div class="card-head"><h2 id="h-challenges">Challenges</h2><span class="sub">${escapeHtml(fmt(d.counts.all))} total</span></div>
-      <p class="card-sub">Time-limited goals on the existing stats, plus manually logged push-up sets. Members join on the posted card; progress counts from the challenge start for everyone who joined. When it ends, the top 3 by overall goal share get the reward role permanently.</p>
+      <p class="card-sub">Time-limited goals on the existing stats, plus manually logged push-ups and custom goals (squats, steps, anything). Members join on the posted card; progress counts from the challenge start for everyone who joined. When it ends, the top 3 by overall goal share get the reward role permanently.</p>
       <div class="pills card-pills">${rolePill}</div>
       <div class="filters"><nav class="seg" aria-label="Challenge status">${filters}</nav></div>
       <div class="filters"><nav class="seg" aria-label="Sort challenges">${sorts}</nav></div>
@@ -1365,7 +1375,7 @@ export function challengesPage(d: ChallengesPageData, now: number = Date.now()):
     {
       active: 'challenges',
       title: 'Challenges',
-      sub: '<p class="hero-sub">Time-limited goals on messages, reactions, voice, activities and logged push-up sets. Join/Leave and role rewards stay on the posted card.</p>',
+      sub: '<p class="hero-sub">Time-limited goals on messages, reactions, voice, activities, logged push-ups and custom goals. Join/Leave and role rewards stay on the posted card.</p>',
       live: 'quiet',
       body,
       now,
@@ -1376,23 +1386,27 @@ export function challengesPage(d: ChallengesPageData, now: number = Date.now()):
 
 function progressTable(rows: ChallengeProgressRow[], metric: ChallengeMetric, target: number, empty: string): string {
   if (rows.length === 0) return emptyState(empty);
+  const hasTarget = target > 0;
   const targetValue = isTimeMetric(metric) ? target * 60_000 : target;
   const body = rows
     .map((r) => {
       const pct = targetValue > 0 ? Math.max(0, Math.min(100, Math.round((r.value / targetValue) * 100))) : 0;
       const medal = medalFor(r.rank);
-      return `<tr><td class="dim" data-label="Rank">${medal ? `<span aria-label="Rank ${r.rank}"><span aria-hidden="true">${medal}</span></span>` : r.rank}</td><td data-label="Member" class="name">${escapeHtml(r.name)}</td><td data-label="Progress">${escapeHtml(formatChallengeValue(metric, r.value))} / ${escapeHtml(formatChallengeTarget(metric, target))}</td><td class="r" data-label="Share">${pct}%</td></tr>`;
+      const progress = hasTarget ? `${escapeHtml(formatChallengeValue(metric, r.value))} / ${escapeHtml(formatChallengeTarget(metric, target))}` : escapeHtml(formatChallengeValue(metric, r.value));
+      const share = hasTarget ? `<td class="r" data-label="Share">${pct}%</td>` : '';
+      return `<tr><td class="dim" data-label="Rank">${medal ? `<span aria-label="Rank ${r.rank}"><span aria-hidden="true">${medal}</span></span>` : r.rank}</td><td data-label="Member" class="name">${escapeHtml(r.name)}</td><td data-label="Progress">${progress}</td>${share}</tr>`;
     })
     .join('');
-  return `<div class="tbl"><table><thead><tr><th scope="col">Rank</th><th scope="col">Member</th><th scope="col">Progress</th><th scope="col" class="r">Share</th></tr></thead><tbody>${body}</tbody></table></div>`;
+  const shareHead = hasTarget ? '<th scope="col" class="r">Share</th>' : '';
+  return `<div class="tbl"><table><thead><tr><th scope="col">Rank</th><th scope="col">Member</th><th scope="col">Progress</th>${shareHead}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function challengeMeta(label: string, value: string): string {
   return `<div class="row"><div class="row-l"><span class="lbl">${escapeHtml(label)}</span></div><div class="row-c">${value}</div></div>`;
 }
 
-function goalLabel(goal: ChallengeGoal): string {
-  return `${metricLabel(goal.metric)}${goal.metric === 'activity' && goal.activityName ? ` · ${goal.activityName}` : ''}`;
+function goalHeading(goal: ChallengeGoal): string {
+  return `${goalName(goal)}${goal.target > 0 ? ` · target ${formatChallengeTarget(goal.metric, goal.target)}` : ' · no target'}`;
 }
 
 /** Add-goal form on the overview tab (1–MAX_CHALLENGE_GOALS goals). */
@@ -1401,9 +1415,10 @@ function addGoalForm(c: Challenge, goalCount: number): string {
   return `<details class="card" id="challenge-add-goal"><summary><span>Add goal</span><span class="sub">${goalCount} of ${MAX_CHALLENGE_GOALS}</span></summary>
     <form method="post" action="/challenge-goal-add"><input type="hidden" name="challengeId" value="${c.id}">
       <div class="rows">
-        ${row({ id: 'challengeGoalMetric', label: 'Goal type', help: 'Manual push-ups get a Log set button on the card; the others read the stats the bot already records.', control: selectEl('challengeGoalMetric', 'metric', metricOptions) })}
+        ${row({ id: 'challengeGoalMetric', label: 'Goal type', help: 'Manual push-ups and custom goals get a Log button on the card; the others read the stats the bot already records.', control: selectEl('challengeGoalMetric', 'metric', metricOptions) })}
+        ${row({ id: 'challengeGoalLabel', label: 'Goal name', help: 'For the custom goal type: what is counted, e.g. Squats or Steps. The name is also the unit.', control: `<input type="text" id="challengeGoalLabel" name="label" maxlength="50" aria-describedby="challengeGoalLabel-help" autocomplete="off">` })}
         ${row({ id: 'challengeGoalActivity', label: 'Activity name', help: 'Only for the activity goal type.', control: `<input type="text" id="challengeGoalActivity" name="activityName" maxlength="100" aria-describedby="challengeGoalActivity-help" autocomplete="off">` })}
-        ${row({ id: 'challengeGoalTarget', label: 'Target', help: 'Count for messages/reactions/push-ups, minutes for voice/activity.', control: numberEl('challengeGoalTarget', 'target', 100, 1, 1_000_000) })}
+        ${row({ id: 'challengeGoalTarget', label: 'Target (optional)', help: 'Leave empty for no target; counts, minutes for voice/activity.', control: `<input type="number" id="challengeGoalTarget" name="target" min="0" max="1000000" step="1" inputmode="numeric" placeholder="no target" aria-describedby="challengeGoalTarget-help">` })}
       </div>
       <div class="savebar"><button type="submit">Add goal</button></div>
     </form>
@@ -1466,7 +1481,7 @@ export function challengeDetailPage(d: ChallengeDetailData, now: number = Date.n
     `<form method="post" action="/challenge-delete"><input type="hidden" name="id" value="${c.id}"><button type="submit" class="btn ghost" onclick="return confirm('Delete this challenge and its card?')">Delete</button></form>`;
 
   const goalCards = d.goals
-    .map(({ goal, rows }) => `<h3 class="group-h" id="h-goal-${goal.id}">${escapeHtml(goalLabel(goal))} · target ${escapeHtml(formatChallengeTarget(goal.metric, goal.target))}</h3>${progressTable(rows.slice(0, 3), goal.metric, goal.target, 'No participants yet.')}`)
+    .map(({ goal, rows }) => `<h3 class="group-h" id="h-goal-${goal.id}">${escapeHtml(goalHeading(goal))}</h3>${progressTable(rows.slice(0, 3), goal.metric, goal.target, 'No participants yet.')}`)
     .join('');
   const overview = `<div class="rows">
       ${challengeMeta('Status', challengeStatusPill(d.status))}
@@ -1487,7 +1502,7 @@ export function challengeDetailPage(d: ChallengeDetailData, now: number = Date.n
   const progressGoals = d.goals
     .map(({ goal, rows }) => {
       const pageRows = rows.slice((d.progress.page - 1) * d.progress.pageSize, d.progress.page * d.progress.pageSize);
-      return `<h3 class="group-h">${escapeHtml(goalLabel(goal))} · target ${escapeHtml(formatChallengeTarget(goal.metric, goal.target))}</h3>${progressTable(pageRows, goal.metric, goal.target, 'No participants yet.')}`;
+      return `<h3 class="group-h">${escapeHtml(goalHeading(goal))}</h3>${progressTable(pageRows, goal.metric, goal.target, 'No participants yet.')}`;
     })
     .join('');
   const progress = `<h2 id="h-progress">Progress</h2>${progressGoals || emptyState('No goals yet.')}${progressPager}`;
@@ -1495,7 +1510,7 @@ export function challengeDetailPage(d: ChallengeDetailData, now: number = Date.n
   const entryRows = d.entries.rows
     .map(
       ({ entry, goal }) =>
-        `<tr><td class="dim" data-label="Time">${escapeHtml(fmtDate(entry.createdAt, d.timezone))}</td><td data-label="Member" class="name">${escapeHtml(entry.displayName)}</td><td data-label="Goal">${escapeHtml(goalLabel(goal))}</td><td data-label="Value">${escapeHtml(formatChallengeValue(goal.metric, entry.value))}</td><td data-label="Review">${entry.flagged ? '<span class="badge error">Flagged</span>' : '<span class="badge">OK</span>'}</td><td data-label="Admin">${entryForm(d, { entry, goal })}</td></tr>`,
+        `<tr><td class="dim" data-label="Time">${escapeHtml(fmtDate(entry.createdAt, d.timezone))}</td><td data-label="Member" class="name">${escapeHtml(entry.displayName)}</td><td data-label="Goal">${escapeHtml(goalName(goal))}</td><td data-label="Value">${escapeHtml(formatChallengeValue(goal.metric, entry.value))}</td><td data-label="Review">${entry.flagged ? '<span class="badge error">Flagged</span>' : '<span class="badge">OK</span>'}</td><td data-label="Admin">${entryForm(d, { entry, goal })}</td></tr>`,
     )
     .join('');
   const entriesTable =
@@ -1511,7 +1526,7 @@ export function challengeDetailPage(d: ChallengeDetailData, now: number = Date.n
     })
     .join('');
   const entries = `<h2 id="h-entries">Entries</h2>
-    <p class="card-sub">Sets logged by members. Sets above 99 push-ups are flagged for review; admins can correct or delete any entry, and every change is recorded in the Activity log with the admin and reason.</p>
+    <p class="card-sub">Sets logged by members. Sets above 99 in any manual goal are flagged for review; admins can correct or delete any entry, and every change is recorded in the Activity log with the admin and reason.</p>
     <div class="filters"><nav class="seg" aria-label="Entry review">${entryFilters}</nav></div>
     ${entriesTable}${entriesPager}`;
 

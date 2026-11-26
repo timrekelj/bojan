@@ -20,7 +20,7 @@ import {
   MAX_CHALLENGE_DESCRIPTION,
   rankProgress,
 } from './form.js';
-import { isManualMetric, metricLabel } from './types.js';
+import { isManualMetric, goalName } from './types.js';
 
 // Components V2 allows 4000 chars of text across all TextDisplays; keep headroom.
 const TEXT_BUDGET = 3800;
@@ -42,8 +42,25 @@ function medal(rank: number): string {
   return MEDALS[rank - 1] ?? `${rank}.`;
 }
 
-function goalLabel(goal: Pick<ChallengeGoal, 'metric' | 'activityName'>): string {
-  return metricLabel(goal.metric) + (goal.metric === 'activity' && goal.activityName ? ` · ${goal.activityName}` : '');
+/** Heading of one goal on the card: custom name plus target or "no target". */
+function goalHeading(goal: Pick<ChallengeGoal, 'metric' | 'target' | 'label' | 'activityName'>): string {
+  return `### ${goalName(goal)} · ${goal.target > 0 ? `target **${formatChallengeTarget(goal.metric, goal.target)}**` : '**no target**'}`;
+}
+
+/** Up to five "Log <goal>" buttons per row for every manual goal (push-ups and custom). */
+export function manualLogRow(challengeId: number, goals: readonly ChallengeGoal[]): ActionRowBuilder<ButtonBuilder>[] {
+  const manual = goals.filter((g) => isManualMetric(g.metric));
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+  for (let i = 0; i < manual.length; i += 5) {
+    const buttons = manual.slice(i, i + 5).map((g) =>
+      new ButtonBuilder()
+        .setCustomId(challengeLogId(challengeId, g.id))
+        .setStyle(ButtonStyle.Success)
+        .setLabel(`Log ${goalName(g)}`.slice(0, 80)),
+    );
+    rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(buttons));
+  }
+  return rows;
 }
 
 /** Pure builder: the joinable challenge card posted in the configured channel. */
@@ -64,9 +81,9 @@ export function buildChallengeCard(data: ChallengeCardData) {
     const sections = ranked.map(({ goal, rows }, i) => {
       const top = rows.slice(0, limits[i] ?? 0);
       return [
-        `### ${goalLabel(goal)} · target **${formatChallengeTarget(goal.metric, goal.target)}**`,
+        goalHeading(goal),
         top.length > 0
-          ? top.map((r) => `${medal(r.rank)} <@${r.userId}> — **${formatChallengeValue(goal.metric, r.value)} / ${formatChallengeTarget(goal.metric, goal.target)}**`).join('\n')
+          ? top.map((r) => `${medal(r.rank)} <@${r.userId}> — **${formatChallengeValue(goal.metric, r.value)}**`).join('\n')
           : participants.length === 0
             ? 'No one has joined yet — be the first!'
             : 'No progress yet.',
@@ -99,16 +116,7 @@ export function buildChallengeCard(data: ChallengeCardData) {
         new ButtonBuilder().setCustomId(challengeButtonId('my', challenge.id)).setStyle(ButtonStyle.Secondary).setLabel('My progress'),
       ),
     );
-    const manual = goals.filter((g) => isManualMetric(g.metric));
-    for (let i = 0; i < manual.length; i += 5) {
-      const buttons = manual.slice(i, i + 5).map((g, j) =>
-        new ButtonBuilder()
-          .setCustomId(challengeLogId(challenge.id, g.id))
-          .setStyle(ButtonStyle.Success)
-          .setLabel(manual.length === 1 ? 'Log set' : `Log set ${i + j + 1}`),
-      );
-      container.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(buttons));
-    }
+    for (const row of manualLogRow(challenge.id, goals)) container.addActionRowComponents(row);
   }
 
   return {
@@ -119,8 +127,10 @@ export function buildChallengeCard(data: ChallengeCardData) {
 }
 
 /** Progress summary line of one goal (used by the ephemeral progress replies). */
-export function goalProgressText(goal: Pick<ChallengeGoal, 'metric' | 'target'>, value: number, remaining: number): string {
-  return `**${metricLabel(goal.metric)}**: ${formatChallengeValue(goal.metric, value)} / ${formatChallengeTarget(goal.metric, goal.target)} · ${formatChallengeValue(goal.metric, remaining)} remaining`;
+export function goalProgressText(goal: Pick<ChallengeGoal, 'metric' | 'target' | 'label' | 'activityName'>, value: number, remaining: number): string {
+  const target = formatChallengeTarget(goal.metric, goal.target);
+  const head = `**${goalName(goal)}**: ${formatChallengeValue(goal.metric, value)}${goal.target > 0 ? ` / ${target}` : ` · ${target}`}`;
+  return goal.target > 0 ? `${head} · ${formatChallengeValue(goal.metric, remaining)} remaining` : head;
 }
 
 /** Compact per-goal progress for the My progress button. */
