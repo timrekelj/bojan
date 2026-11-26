@@ -1,10 +1,12 @@
 import {
   ActionRowBuilder,
+  ChannelType,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
   type ButtonInteraction,
   type Client,
+  type ForumChannel,
   type ModalSubmitInteraction,
   type SendableChannels,
 } from 'discord.js';
@@ -70,6 +72,11 @@ function cardData(db: BotDatabase, challenge: Challenge, now: number) {
   };
 }
 
+/** Forum-style channels get one post (thread) per challenge instead of a plain message. */
+export function isForumChannelType(type: ChannelType): boolean {
+  return type === ChannelType.GuildForum || type === ChannelType.GuildMedia;
+}
+
 /**
  * Insert the challenge, post its card and remember the message id. A send
  * failure removes the row again so the dashboard never shows a challenge
@@ -78,16 +85,30 @@ function cardData(db: BotDatabase, challenge: Challenge, now: number) {
 export async function createAndPostChallenge(
   db: BotDatabase,
   input: NewChallengeInput,
-  channel: SendableChannels,
+  channel: SendableChannels | ForumChannel,
   now = Date.now(),
 ): Promise<{ ok: true; challenge: Challenge } | { ok: false; reason: string }> {
   const challenge = db.createChallenge(input, now);
   try {
-    const message = await channel.send(buildChallengeCard(cardData(db, challenge, now)));
-    db.setChallengeMessage(challenge.id, message.id);
+    const card = buildChallengeCard(cardData(db, challenge, now));
+    let messageId: string;
+    let threadId: string | null = null;
+    if (isForumChannelType(channel.type)) {
+      // For a forum post the starter message id and the thread id are the same.
+      const thread = await (channel as ForumChannel).threads.create({
+        name: input.name.slice(0, 100),
+        message: card,
+      });
+      messageId = thread.id;
+      threadId = thread.id;
+    } else {
+      const message = await (channel as SendableChannels).send(card);
+      messageId = message.id;
+    }
+    db.setChallengeMessage(challenge.id, messageId, threadId);
     db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: 'created', actorId: input.createdBy, actorName: input.createdByName });
-    console.log(`[challenges] guild ${challenge.guildId}: created challenge #${challenge.id} "${challenge.name}" in channel ${challenge.channelId}`);
-    return { ok: true, challenge: { ...challenge, messageId: message.id } };
+    console.log(`[challenges] guild ${challenge.guildId}: created challenge #${challenge.id} "${challenge.name}" in ${threadId ? `forum thread ${threadId}` : `channel ${challenge.channelId}`}`);
+    return { ok: true, challenge: { ...challenge, messageId, threadId } };
   } catch (err) {
     db.deleteChallenge(challenge.id);
     const reason = err instanceof Error ? err.message : String(err);
@@ -100,7 +121,7 @@ export async function createAndPostChallenge(
 export async function refreshChallengeCard(client: Client, db: BotDatabase, challenge: Challenge, now = Date.now()): Promise<boolean> {
   if (!challenge.messageId) return false;
   try {
-    const channel = await client.channels.fetch(challenge.channelId).catch(() => null);
+    const channel = await client.channels.fetch(challenge.threadId ?? challenge.channelId).catch(() => null);
     if (!channel || !channel.isSendable()) return false;
     const message = await channel.messages.fetch(challenge.messageId).catch(() => null);
     if (!message) return false;

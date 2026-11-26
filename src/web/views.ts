@@ -696,6 +696,8 @@ export type DashboardData = OverviewData;
 export interface SettingsPageData {
   settings: Settings;
   channels: { id: string; name: string }[];
+  /** Text/announcement and forum/media channels where challenges can be posted. */
+  challengeChannels: { id: string; name: string }[];
   user: { username: string; avatar: string | null };
   deploy?: DeployStatus;
   saved: boolean;
@@ -753,6 +755,7 @@ export interface ChallengesPageData {
   channels: { id: string; name: string }[];
   roles: { id: string; name: string }[];
   activityNames: string[];
+  challengeChannelId: string | null;
   canManageRoles: boolean;
   timezone: string;
   flash: { kind: 'saved' | 'error'; message: string } | null;
@@ -1107,6 +1110,7 @@ const numberEl = (id: string, name: string, value: number, min: number, max: num
 function generalForm(d: SettingsPageData): string {
   const s = d.settings;
   const chanOpts = (selected: string | null): string => d.channels.map((c) => `<option value="${escapeHtml(c.id)}"${selected === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
+  const challengeChanOpts = d.challengeChannels.map((c) => `<option value="${escapeHtml(c.id)}"${s.challengeChannelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
   const dayOptions = DAYS.map((name, i) => `<option value="${i}"${s.weeklyDay === i ? ' selected' : ''}>${name}</option>`).join('');
   const hourOptions = Array.from({ length: 24 }, (_, h) => `<option value="${h}"${s.weeklyHour === h ? ' selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
   const embedChips = d.channels.map((c) => chip('embedChannels', c.id, s.embedChannels.includes(c.id), `#${c.name}`)).join('');
@@ -1134,7 +1138,12 @@ function generalForm(d: SettingsPageData): string {
         ${row({ id: 'levelupChannel', label: 'Level-up announcements', help: 'Where level-ups are posted (e.g. #bot-testing). Silent = track XP without announcing.', control: selectEl('levelupChannel', 'levelupChannel', `<option value="">— silent —</option>${chanOpts(s.levelupChannelId)}`) })}
       </div>
     </section>
-    <div class="savebar"><span class="muted">Saves weekly &amp; monthly stats, link embeds and leveling together.</span><button type="submit">Save settings</button></div>
+    <section class="card" id="challenge-posting" aria-labelledby="h-challenge-posting"><div class="card-head"><h2 id="h-challenge-posting">Challenge posts</h2></div><p class="card-sub">Every new challenge is posted here: a forum channel gets one post per challenge, a text channel one message per challenge.</p>
+      <div class="rows">
+        ${row({ id: 'challengeChannel', label: 'Channel', help: 'Used by every new challenge; existing ones stay where they were posted.', control: selectEl('challengeChannel', 'challengeChannel', `<option value="">— not set —</option>${challengeChanOpts}`) })}
+      </div>
+    </section>
+    <div class="savebar"><span class="muted">Saves weekly &amp; monthly stats, link embeds, leveling and challenge posts together.</span><button type="submit">Save settings</button></div>
   </form><form id="send-now-form" method="post" action="/weekly/send-now"></form><form id="monthly-send-now-form" method="post" action="/monthly/send-now"></form></div>`;
 }
 
@@ -1223,7 +1232,7 @@ function challengeStatusPill(status: ChallengeStatus): string {
  * The 3-step server-side wizard (no JS), shared by the challenges page and the
  * POST handlers that render a step again. `details#challenge-new` wraps it.
  */
-export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels' | 'roles' | 'activityNames'>): string {
+export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels' | 'challengeChannelId' | 'roles' | 'activityNames'>): string {
   const w = d.wizard;
   const hidden = (pairs: [string, string][]): string =>
     pairs.map(([name, value]) => `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`).join('');
@@ -1238,7 +1247,6 @@ export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels
     ['target', String(draft.target)],
     ['startDate', draft.startDate],
     ['endDate', draft.endDate],
-    ['channelId', draft.channelId],
     ['rewardRoleId', draft.rewardRoleId],
   ];
   const dateEl = (id: string, name: string, value: string): string =>
@@ -1246,7 +1254,6 @@ export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels
   const textareaEl = (id: string, name: string, value: string, max: number): string =>
     `<textarea id="${escapeHtml(id)}" name="${escapeHtml(name)}" rows="3" maxlength="${max}" aria-describedby="${escapeHtml(id)}-help">${escapeHtml(value)}</textarea>`;
   const metricOptions = CHALLENGE_METRICS.map((m) => `<option value="${m}"${w.draft.metric === m ? ' selected' : ''}>${escapeHtml(metricLabel(m))}${m === 'activity' ? ' (name below)' : ''}</option>`).join('');
-  const channelOptions = d.channels.map((c) => `<option value="${escapeHtml(c.id)}"${w.draft.channelId === c.id ? ' selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
   const roleOptions = d.roles.map((r) => `<option value="${escapeHtml(r.id)}"${w.draft.rewardRoleId === r.id ? ' selected' : ''}>@${escapeHtml(r.name)}</option>`).join('');
   const activityList = d.activityNames.length > 0 ? `<datalist id="challengeActivities">${d.activityNames.map((n) => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist>` : '';
   const targetEl = (id: string, value: number): string =>
@@ -1259,14 +1266,14 @@ export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels
         ${row({ id: 'challengeTarget', label: 'Target (optional)', help: `Whole number (${metricTargetUnit(w.draft.metric)}); leave empty or 0 for no target.`, control: targetEl('challengeTarget', w.draft.target) })}
         ${row({ id: 'challengeStart', label: 'Start date', help: 'YYYY-MM-DD, empty = starts when created. UTC day.', control: dateEl('challengeStart', 'startDate', w.draft.startDate) })}
         ${row({ id: 'challengeEnd', label: 'End date', help: 'The whole UTC day counts. Must be in the future.', control: dateEl('challengeEnd', 'endDate', w.draft.endDate) })}
-        ${row({ id: 'challengeChannel', label: 'Channel', help: 'Where the joinable card is posted.', control: selectEl('challengeChannel', 'channelId', `<option value="">— choose —</option>${channelOptions}`) })}
+        <div class="row block"><div class="row-l"><span class="lbl">Posting</span><span class="help">Posted in the challenge channel from Settings.</span></div></div>
         ${row({ id: 'challengeRole', label: 'Reward role', help: 'Granted permanently to the top 3 with progress above 0 when the challenge ends.', control: selectEl('challengeRole', 'rewardRoleId', `<option value="">— no reward —</option>${roleOptions}`) })}
       </div>
       <div class="savebar"><span class="muted">Step 2 of 3</span>${backButton}<button type="submit">Next: review</button></div>
     </form>`;
   }
   if (w.step === 3) {
-    const channelName = d.channels.find((c) => c.id === w.draft.channelId)?.name ?? w.draft.channelId;
+    const channelName = d.challengeChannelId ? d.channels.find((c) => c.id === d.challengeChannelId)?.name ?? d.challengeChannelId : null;
     const roleName = d.roles.find((r) => r.id === w.draft.rewardRoleId)?.name ?? w.draft.rewardRoleId;
     const start = w.draft.startDate ? `${w.draft.startDate} (UTC)` : 'when created';
     const targetText = w.draft.target > 0 ? `target <b>${escapeHtml(formatChallengeTarget(w.draft.metric, w.draft.target))}</b>` : '<b>no target</b>';
@@ -1276,7 +1283,7 @@ export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels
           <p class="muted"><b>${escapeHtml(w.draft.name)}</b></p>
           ${w.draft.description ? `<p class="muted">${escapeHtml(w.draft.description)}</p>` : ''}
           <p class="muted">${escapeHtml(goalName({ metric: w.draft.metric, label: w.draft.label, activityName: w.draft.activityName }))} · ${targetText}</p>
-          <p class="muted">From ${escapeHtml(start)} until ${escapeHtml(w.draft.endDate)} (UTC) · #${escapeHtml(channelName)}${w.draft.rewardRoleId ? ` · reward @${escapeHtml(roleName)}` : ''}</p>
+          <p class="muted">From ${escapeHtml(start)} until ${escapeHtml(w.draft.endDate)} (UTC) · ${channelName ? `#${escapeHtml(channelName)}` : 'not set'}${w.draft.rewardRoleId ? ` · reward @${escapeHtml(roleName)}` : ''}</p>
         </div></div>
       </div>
       <div class="savebar"><span class="muted">Step 3 of 3</span>${backButton}<button type="submit">Create challenge</button></div>
@@ -1615,7 +1622,7 @@ export function settingsPage(d: SettingsPageData, now: number = Date.now()): str
     d.monthlyFlash?.kind === 'error' ? `<div class="flash" role="alert">Couldn't send monthly recap: ${escapeHtml(d.monthlyFlash.reason || 'unknown error')}</div>` : '',
     d.free.flash?.kind === 'saved' ? '<div class="flash" role="status">Free games settings saved.</div>' : '',
   ].join('');
-  const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['colors', 'Colours'], ['free', 'Free games'], ['builder', 'Assistant']];
+  const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['challenge-posting', 'Challenge posts'], ['colors', 'Colours'], ['free', 'Free games'], ['builder', 'Assistant']];
   const secnav = `<nav class="secnav" aria-label="Settings sections"><div class="secnav-in">${anchors.map(([id, label]) => `<a href="#${id}">${label}</a>`).join('')}</div></nav>`;
   const body = `${flashes}${generalForm(d)}${colorSection(d)}${freeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.monthlyFlash || d.free.flash || d.builder.flash || d.color.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout({ active: 'settings', title: 'Settings', sub: '<p class="hero-sub">Everything the bot does is configured here. Each section saves on its own.</p>', live: 'quiet', between: secnav, body, now }, { user: d.user, deploy: d.deploy });

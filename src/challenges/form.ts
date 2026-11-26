@@ -31,7 +31,6 @@ export interface ChallengeDraft {
   startDate: string;
   /** YYYY-MM-DD, the whole day counts (ends at the following UTC midnight). */
   endDate: string;
-  channelId: string;
   rewardRoleId: string;
 }
 
@@ -52,7 +51,7 @@ export function defaultEndDate(now = Date.now()): string {
 }
 
 export function emptyDraft(now = Date.now()): ChallengeDraft {
-  return { name: '', description: '', metric: 'messages', activityName: '', label: '', target: 0, startDate: '', endDate: defaultEndDate(now), channelId: '', rewardRoleId: '' };
+  return { name: '', description: '', metric: 'messages', activityName: '', label: '', target: 0, startDate: '', endDate: defaultEndDate(now), rewardRoleId: '' };
 }
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -297,7 +296,6 @@ export function parseGoal(raw: Record<string, string | undefined>): { ok: true; 
 }
 
 export interface ChallengeWizardContext {
-  channels: ReadonlySet<string>;
   roles: ReadonlySet<string>;
   now?: number;
 }
@@ -329,7 +327,6 @@ export function parseWizardStep(raw: Record<string, string | undefined>, step: C
     target: targetRaw !== '' && Number.isFinite(targetNum) ? Math.trunc(targetNum) : 0,
     startDate: text('startDate'),
     endDate: endDate || (step === 1 ? defaultEndDate(now) : ''),
-    channelId: text('channelId'),
     rewardRoleId: text('rewardRoleId'),
   };
 
@@ -355,8 +352,6 @@ export function parseWizardStep(raw: Record<string, string | undefined>, step: C
     if (draft.startDate && dayStartMs(draft.startDate) !== null && dayEndMs(draft.endDate) !== null && dayStartMs(draft.startDate)! >= dayEndMs(draft.endDate)!) {
       errors.push('The start date must be before the end date.');
     }
-    if (!draft.channelId) errors.push('Choose a channel.');
-    else if (!ctx.channels.has(draft.channelId)) errors.push('The selected channel no longer exists.');
     if (draft.rewardRoleId && !ctx.roles.has(draft.rewardRoleId)) errors.push('The selected reward role no longer exists.');
   }
 
