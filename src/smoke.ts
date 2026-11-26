@@ -1,17 +1,20 @@
 // Offline smoke test: exercises the DB layer, stats math and provider
 // detection without needing a Discord token. Run with: npm run smoke
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { activityHeatmap, conversationStarters, earlyBirds, heatmapPeaks, longestStreaks, nightOwls, novelists, oneWorders, typoKings, voiceBuddies, voiceTotalMs, voiceTotals } from './recap.js';
 import { MessageFlags } from 'discord.js';
-import { renderDailyChart } from './chart.js';
-import { buildWeeklyStatsMessage } from './weekly.js';
-import { isWeeklyDue } from './scheduler.js';
+import { renderDailyChart, renderDailyChartSvg, renderHeatmap, renderHeatmapSvg } from './chart.js';
+import { awardsText, buildWeeklyStatsMessage } from './weekly.js';
+import { gatherMonthlyData, isWeeklyDue, monthlyAction } from './scheduler.js';
+import { buildMonthlyAwardsMessage, buildMonthlyRecapMessage, peakHoursText, type MonthlyRecapData } from './monthly.js';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { BotDatabase, clampLimitThreshold, type ActivityInput, type WebSessionRow } from './db.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { awardMessageXp, awardReactionXp, awardVoiceXp, buildLevelUpMessage, levelFromXp, levelProgress, levelTag, STEAM_LEVEL_OUTLINES, STEAM_LEVEL_SHAPES, steamLevelColors, steamLevelOutline, steamLevelShape, levelUpText, reactXpAmount, REACT_XP_CHANCE, rollXp, totalXpForLevel, voiceXpBlocks, VOICE_XP_BLOCK_MS, XP_BACKFILL_PER_MESSAGE, XP_COOLDOWN_MS } from './levels.js';
-import { daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
+import { consumeBotDeleted, markBotDeleted, unmarkBotDeleted } from './botdeletes.js';
+import { fmtHoursMinutes, currentMonthBounds, isMonthlyDue, lastMonthBounds, monthDaySeries, monthLabel, countWords, crowdPleasers, silentSpectators, daySeries, currentWeekBounds, lastWeekBounds, leaderboardLines, startOfDay, weekKey, weekRangeLabel, zonedToUtcMs } from './stats.js';
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { buildChallengeCard } from './challenges/cards.js';
@@ -385,6 +388,91 @@ const weeklyLvl = buildWeeklyStatsMessage({
   topChannels: [], topGiven: [], topReceived: [], perDay: [],
 });
 check('weekly shows level tags', JSON.stringify(weeklyLvl.components.map((c) => c.toJSON())).includes('lvl 3 · 50/400'));
+
+// Weekly awards
+{
+  const AG = 'awards-guild';
+  const t0 = 1_000_000;
+  const rx = (messageId: string, authorId: string, reactorId: string, ts: number, emoji = '👍'): void =>
+    db.recordReaction({ guildId: AG, channelId: 'c1', messageId, authorId, reactorId, emojiKey: emoji, emojiLabel: emoji, ts });
+  const give = (who: string, n: number): void => {
+    for (let i = 0; i < n; i++) rx(`${who}-${i}`, 'tgt', who, t0 + 20);
+  };
+  for (let i = 0; i < 5; i++) db.recordMessage(AG, 'c1', 'pop', t0 + i, `pop${i}`);
+  for (let i = 0; i < 10; i++) db.recordMessage(AG, 'c1', 'chat', t0 + i, `chat${i}`);
+  db.recordMessage(AG, 'c1', 'old', t0 - 500, 'old0'); // out of range
+  for (let i = 0; i < 2; i++) db.recordMessage(AG, 'c1', 'lurker', t0 + i, `lurker-m${i}`);
+  db.recordMessage(AG, 'c1', 'tieA', t0, 'tieA-m');
+  db.recordMessage(AG, 'c1', 'tieB', t0, 'tieB-m');
+  for (let i = 0; i < 3; i++) db.recordMessage(AG, 'c1', 'tieC', t0 + i, `tieC-m${i}`);
+  for (let i = 0; i < 12; i++) rx('pop0', 'pop', `r${i}`, t0 + 10);
+  rx('pop0', 'pop', 'pop', t0 + 10, '😀'); // self-reaction ignored
+  for (let i = 0; i < 5; i++) rx('chat0', 'chat', `r${i}`, t0 + 10);
+  for (let i = 0; i < 4; i++) rx('old0', 'old', `r${i}`, t0 - 100); // out of range
+  give('lurker', 100);
+  give('mute', 5);
+  give('tieA', 10);
+  give('tieB', 10);
+  give('tieC', 20);
+  give('short', 4); // below the reaction threshold
+  rx('self-x', 'selfer', 'selfer', t0 + 10); // self-reaction only: no stats at all
+  const rows = db.reactionMessageStats(AG, t0, t0 + 100);
+  const row = (id: string) => rows.find((r) => r.userId === id);
+  check(
+    'reactionMessageStats counts messages, received and given',
+    row('pop')?.messages === 5 && row('pop')?.received === 12 && row('pop')?.given === 0 &&
+      row('chat')?.messages === 10 && row('chat')?.received === 5 &&
+      row('r0')?.given === 2 && row('r0')?.messages === 0 && row('r11')?.given === 1 &&
+      row('lurker')?.messages === 2 && row('lurker')?.given === 100 &&
+      row('mute')?.messages === 0 && row('mute')?.given === 5 && row('mute')?.received === 0 &&
+      row('tgt')?.received === 149,
+    JSON.stringify(rows),
+  );
+  check(
+    'reactionMessageStats excludes self-reactions and out-of-range rows',
+    row('selfer') === undefined && row('old') === undefined && db.reactionMessageStats('other-guild', t0, t0 + 100).length === 0,
+    JSON.stringify(rows),
+  );
+  const crowd = crowdPleasers(rows, 3);
+  check(
+    'crowdPleasers ranks by ratio and needs min messages',
+    crowd.length === 2 && crowd[0]?.userId === 'pop' && Math.abs((crowd[0]?.ratio ?? 0) - 2.4) < 1e-9 && crowd[1]?.userId === 'chat' && !crowd.some((r) => r.userId === 'tgt'),
+    JSON.stringify(crowd),
+  );
+  const tie = crowdPleasers(
+    [{ userId: 'b', messages: 5, received: 10, given: 0 }, { userId: 'a', messages: 10, received: 20, given: 0 }, { userId: 'c', messages: 5, received: 10, given: 0 }],
+    2,
+  );
+  check('crowdPleasers tie-breaks by received then userId, honours limit', tie.map((r) => r.userId).join() === 'a,b', JSON.stringify(tie));
+  check(
+    'crowdPleasers: 4 messages out, 5 in',
+    crowdPleasers([{ userId: 'x', messages: 5, received: 1, given: 0 }], 3).length === 1 && crowdPleasers([{ userId: 'x', messages: 4, received: 1, given: 0 }], 3).length === 0,
+  );
+  const spec = silentSpectators(rows, 10);
+  check(
+    'silentSpectators: threshold, ranking and tie-breaks',
+    spec.map((r) => r.userId).join() === 'lurker,tieC,tieA,tieB,mute' && !spec.some((r) => r.userId === 'short') && silentSpectators(rows, 3).length === 3,
+    JSON.stringify(spec),
+  );
+  const plusOne = silentSpectators([{ userId: 'zero', messages: 0, received: 0, given: 5 }, { userId: 'lots', messages: 2, received: 0, given: 100 }], 2);
+  check('silentSpectators: 2 msgs/100 given beats 0 msgs/5 given', plusOne.map((r) => r.userId).join() === 'lots,zero', JSON.stringify(plusOne));
+  const aw = buildWeeklyStatsMessage({
+    week: lwk, timeZone: 'UTC', weekTotal: 0, weekReactions: 0, activeMembers: 0, total: 0,
+    topMessagers: [], topChannels: [], topGiven: [], topReceived: [], perDay: [],
+    crowdPleasers: crowd, silentSpectators: silentSpectators(rows, 3),
+  });
+  const awJson = JSON.stringify(aw.components.map((c) => c.toJSON()));
+  const awText = awardsText(crowd, [...silentSpectators(rows, 3), { userId: 'one', messages: 0, received: 0, given: 1 }]);
+  console.log(`Awards content:\n${awText}`);
+  check(
+    'weekly message has Awards section',
+    awJson.includes('### 🏅 Awards') && awJson.includes('Crowd pleaser') && awJson.includes('Silent spectator') &&
+      awJson.includes('<@pop> — **2.4** per msg') && !awJson.includes('Quiet legend') &&
+      awJson.includes('<@lurker> — **100** reactions') && awText.includes('<@one> — **1** reaction') && !awText.includes('1 reactions'),
+  );
+  const awEmpty = JSON.stringify(weeklyEmpty.components.map((c) => c.toJSON()));
+  check('weekly awards empty renders dashes', awEmpty.includes('### 🏅 Awards') && awEmpty.includes('most reactions per message\\n—\\n\\n**👀'));
+}
 
 // Leaderboard + activity cards (Components V2)
 function textLength(json: unknown): number {
@@ -835,9 +923,12 @@ rmSync(dir, { recursive: true, force: true });
     const reqRes = await get('/dashboard/requests');
     check('route: logs + requests pages render', logsRes.status === 200 && (await logsRes.text()).includes('id="live-logs"') && reqRes.status === 200 && (await reqRes.text()).includes('id="live-reqs"'));
 
-    const p1 = await postForm('/settings', 'weeklyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana&embedChannels=c1&embedChannels=c2&levelingEnabled=1&levelupChannel=');
+    const p1 = await postForm('/settings', 'weeklyEnabled=1&monthlyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana&embedChannels=c1&embedChannels=c2&levelingEnabled=1&levelupChannel=');
     const saved = wdb.getSettings(cfg.guildId);
     check('route: POST /settings saves and redirects to the settings page', p1.status === 302 && p1.headers.get('location') === '/dashboard/settings?saved=1' && saved.weeklyDay === 3 && saved.weeklyHour === 18 && saved.statsChannelId === 'c1' && saved.embedChannels.join() === 'c1,c2' && saved.levelingEnabled && saved.levelupChannelId === null);
+    check('route: POST /settings stores monthlyEnabled', saved.monthlyEnabled === true && saved.weeklyEnabled === true);
+    await postForm('/settings', 'weeklyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana');
+    check('route: unchecked monthly toggle saves false', wdb.getSettings(cfg.guildId).monthlyEnabled === false && wdb.getSettings(cfg.guildId).weeklyEnabled === true);
     const p2 = await postForm('/free-settings', 'channel=&pingRole=&stores=steam&includeBeta=1');
     check('route: POST /free-settings redirects to #free', p2.status === 302 && p2.headers.get('location') === '/dashboard/settings?freeSaved=1#free' && wdb.getFreeSettings(cfg.guildId).includeBeta === true && wdb.getFreeSettings(cfg.guildId).stores.join() === 'steam');
     const p3 = await postForm('/builder-settings', 'chatEnabled=1&chatModel=opencode-go%2Fa&chatDecisionModel=opencode-go%2Fb&chatLanguages=English&model=opencode-go%2Fc&maxParallelBuilds=2&limitThreshold=90');
@@ -846,6 +937,12 @@ rmSync(dir, { recursive: true, force: true });
     check('route: POST /builder-settings error flag keeps the anchor', p4.status === 302 && /^\/dashboard\/settings\?builderError=.+#builder$/.test(p4.headers.get('location') ?? ''), p4.headers.get('location') ?? '');
     const p5 = await postForm('/weekly/send-now', '');
     check('route: POST /weekly/send-now redirects to the settings page', p5.status === 302 && (p5.headers.get('location') ?? '').startsWith('/dashboard/settings?weekly=error&reason='), p5.headers.get('location') ?? '');
+    const p6 = await postForm('/monthly/send-now', '');
+    check('route: POST /monthly/send-now redirects to the settings page', p6.status === 302 && (p6.headers.get('location') ?? '').startsWith('/dashboard/settings?monthly=error&reason='), p6.headers.get('location') ?? '');
+    const p6Anon = await dash.request('/monthly/send-now', { method: 'POST', body: '', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    check('route: POST /monthly/send-now needs an admin session', p6Anon.status !== 200 && !(p6Anon.headers.get('location') ?? '').startsWith('/dashboard/settings?monthly='), `status=${p6Anon.status} loc=${p6Anon.headers.get('location')}`);
+    const flashPage = await (await get('/dashboard/settings?monthly=error&reason=boom%20%3Cb%3E')).text();
+    check('route: ?monthly=error becomes a flash on the settings page, escaped', flashPage.includes("Couldn't send monthly recap: boom &lt;b&gt;") && !flashPage.includes('boom <b>') && (await (await get('/dashboard/settings?monthly=sent')).text()).includes('Monthly recap sent.'));
     wdb.deleteWebSessionsForUser('uview');
   }
 
@@ -1090,12 +1187,13 @@ rmSync(dir, { recursive: true, force: true });
   check('chromeParts: deploy chip only when configured', Object.keys(chromeParts(null, T)).length === 0 && chromeParts({ ok: false, error: 'x' }, T)['live-deploy']!.includes('Deploy status unavailable') && !dashboardPage({ ...ovData, deploy: null }, T).includes('id="live-deploy"'));
 
   const setData: SettingsPageData = {
-    settings: { guildId: G, statsChannelId: 'c2', weeklyEnabled: true, weeklyDay: 3, weeklyHour: 18, timezone: 'Europe/Ljubljana', embedChannels: ['c1'], levelingEnabled: false, levelupChannelId: null },
+    settings: { guildId: G, statsChannelId: 'c2', weeklyEnabled: true, weeklyDay: 3, weeklyHour: 18, timezone: 'Europe/Ljubljana', embedChannels: ['c1'], levelingEnabled: false, levelupChannelId: null, monthlyEnabled: true },
     channels: [{ id: 'c1', name: 'general' }, { id: 'c2', name: 'bots <b>' }],
     user: { username: 'Two', avatar: null },
     deploy: null,
     saved: true,
     weeklyFlash: null,
+    monthlyFlash: null,
     free: { settings: { guildId: G, channelId: 'c1', pingRoleId: 'r1', stores: ['steam'], includeDlc: false, includeBeta: true, includeMobile: false }, roles: [{ id: 'r1', name: 'Gamers' }], webhookEnabled: false, postedCount: 3, flash: null },
     challenges: {
       wizard: { step: 1, draft: { name: 'Skelce', description: 'Do konca leta.', metric: 'messages', activityName: '', target: 500, startDate: '', endDate: '2026-12-31', channelId: 'c1', rewardRoleId: 'r1' }, errors: [] },
@@ -1131,9 +1229,17 @@ rmSync(dir, { recursive: true, force: true });
       general.includes('<input type="checkbox" name="embedChannels" value="c2"><span>#bots &lt;b&gt;</span>') &&
       general.includes('name="levelingEnabled" value="1">') &&
       general.includes('<select id="levelupChannel" name="levelupChannel"') && general.includes('<option value="">— silent —</option>') &&
-      (general.match(/type="submit"/g) ?? []).length === 2 &&
+      (general.match(/type="submit"/g) ?? []).length === 3 &&
       general.includes('form="send-now-form"') && general.includes('confirm(') &&
       setHtmlV.includes('<form id="send-now-form" method="post" action="/weekly/send-now"></form>') &&
+      general.includes('name="monthlyEnabled" value="1" checked') && general.includes('Send monthly recap automatically') &&
+      general.includes('Weekly &amp; monthly stats') &&
+      general.includes('form="monthly-send-now-form"') && general.includes('Send monthly recap now') &&
+      setHtmlV.includes('<form id="monthly-send-now-form" method="post" action="/monthly/send-now"></form>') &&
+      !formOf('/settings').includes('<form id="monthly-send-now-form"') &&
+      !settingsPage({ ...setData, settings: { ...setData.settings, monthlyEnabled: false } }, T).includes('name="monthlyEnabled" value="1" checked') &&
+      settingsPage({ ...setData, monthlyFlash: { kind: 'sent' } }, T).includes('Monthly recap sent.') &&
+      settingsPage({ ...setData, monthlyFlash: { kind: 'error', reason: 'x <b>' } }, T).includes("Couldn't send monthly recap: x &lt;b&gt;") &&
       !general.includes('name="stores"') && !general.includes('name="chatModel"'),
   );
   check(
@@ -1959,6 +2065,553 @@ rmSync(dir, { recursive: true, force: true });
   check('challenge card: ended shows Ended and hides the buttons', chEndedJson.includes('Ended') && !chEndedJson.includes('challenge:join') && !chEndedJson.includes('challenge:leave'));
   const chEmptyJson = JSON.stringify(buildChallengeCard({ challenge: cardChallenge, participants: [], totals: {}, timeZone: 'UTC', now: chNow }).components.map((c) => c.toJSON()));
   check('challenge card: empty leaderboard hint, no target values leak', chEmptyJson.includes('No one has joined yet') && chEmptyJson.length < 4000);
+}
+
+// ---- monthly recap data layer ---------------------------------------------
+{
+  const MG = 'monthly-guild';
+  const mdir = mkdtempSync(join(tmpdir(), 'bojan-monthly-'));
+  const mdb = new BotDatabase(join(mdir, 'monthly.db'));
+  const M0 = 1_000_000;
+  const M1 = M0 + 10_000;
+
+  check('countWords: empty and whitespace-only are 0', countWords('') === 0 && countWords('   \n\t ') === 0);
+  check('countWords: words, extra spaces and multi-line', countWords('hello world') === 2 && countWords('  a   b\nc\n\nd ') === 4);
+  check('countWords: emoji and links count as words', countWords('😀 😀 https://x.y/z') === 3 && countWords('😀') === 1);
+
+  mdb.recordMessage(MG, 'c1', 'a', M0, 'w1', 5);
+  mdb.recordMessage(MG, 'c1', 'a', M0 + 1, 'w2', 0);
+  mdb.recordMessage(MG, 'c2', 'b', M0 + 1, 'w3'); // old-style call: words NULL
+  mdb.recordMessagesBatch([
+    { guildId: MG, channelId: 'c2', userId: 'b', ts: M0 + 5, messageId: 'w4', words: 7 },
+    { guildId: MG, channelId: 'c2', userId: 'c', ts: M0 + 6, messageId: 'w5' },
+    { guildId: MG, channelId: 'c2', userId: 'c', ts: M1, messageId: 'w6', words: 1 }, // exclusive end
+    { guildId: MG, channelId: 'c2', userId: 'd', ts: M0 - 1, messageId: 'w7', words: 1 }, // before range
+  ]);
+  mdb.recordMessage('other-monthly-guild', 'c1', 'z', M0, 'wz', 3);
+  const act = mdb.messageActivity(MG, M0, M1);
+  check(
+    'messageActivity: range [from, to), ordered by ts then id, words stored and NULL for old-style calls',
+    act.length === 5 && act.map((r) => r.words).join(',') === '5,0,,7,' && act[0]!.userId === 'a' && act[0]!.channelId === 'c1' && act[1]!.ts === M0 + 1 && act[2]!.userId === 'b' && act[4]!.ts === M0 + 6,
+    JSON.stringify(act),
+  );
+  check('messageActivity: NULL words come back as null', act[2]!.words === null && act[4]!.words === null && act[1]!.words === 0);
+  check('countActiveMembers: distinct authors, exclusive end, guild scoped', mdb.countActiveMembers(MG, M0, M1) === 3 && mdb.countActiveMembers(MG, M0 - 1, M1 + 1) === 4 && mdb.countActiveMembers(MG, M0, M0 + 3) === 2 && mdb.countActiveMembers('nobody', M0, M1) === 0);
+
+  // voice: closed inside, closed overlapping start, open, closed outside, closed ending exactly at from
+  mdb.recordVoiceState(MG, 'v1', 'vc1', M0 + 100);
+  mdb.recordVoiceState(MG, 'v1', null, M0 + 200);
+  mdb.recordVoiceState(MG, 'v2', 'vc1', M0 - 500);
+  mdb.recordVoiceState(MG, 'v2', null, M0 + 50);
+  mdb.recordVoiceState(MG, 'v3', 'vc2', M0 + 300); // open
+  mdb.recordVoiceState(MG, 'v4', 'vc1', M0 - 500);
+  mdb.recordVoiceState(MG, 'v4', null, M0); // ends exactly at from: no overlap
+  mdb.recordVoiceState(MG, 'v5', 'vc1', M1); // starts exactly at to: no overlap
+  const vs = mdb.voiceSessionsInRange(MG, M0, M1, M0 + 900);
+  const vsBy = (u: string) => vs.find((r) => r.userId === u);
+  check(
+    'voiceSessionsInRange: overlapping sessions, unclipped, open ends at now, edges excluded',
+    vs.length === 3 && vsBy('v1')?.start === M0 + 100 && vsBy('v1')?.end === M0 + 200 && vsBy('v2')?.start === M0 - 500 && vsBy('v2')?.end === M0 + 50 &&
+      vsBy('v3')?.end === M0 + 900 && vsBy('v3')?.channelId === 'vc2' && vsBy('v4') === undefined && vsBy('v5') === undefined,
+    JSON.stringify(vs),
+  );
+
+  // stale voice sessions: left while the bot was offline
+  {
+    const SG = 'stale-voice-guild';
+    const S0 = 1_000_000;
+    mdb.recordVoiceState(SG, 'A', 'vc1', S0); // not live
+    mdb.recordVoiceState(SG, 'B', 'vc1', S0); // live, same channel
+    mdb.recordVoiceState(SG, 'C', 'vc1', S0); // live, other channel
+    mdb.recordVoiceState(SG, 'D', 'vc1', S0 + 5000); // not live, heartbeat earlier than start
+    const live = new Map([['B', 'vc1'], ['C', 'vc2']]);
+    const n = mdb.closeStaleVoiceSessions(SG, live, S0 + 1000);
+    const ends = (u: string) => (mdb.voiceSessionsInRange(SG, 0, S0 * 10, S0 * 5).find((r) => r.userId === u && r.channelId === 'vc1') as { end: number } | undefined)?.end;
+    check('closeStaleVoiceSessions: closes non-live and moved members at heartbeat, keeps live', n === 3 && ends('A') === S0 + 1000 && ends('C') === S0 + 1000 && ends('B') === S0 * 5 && ends('D') === S0 + 5000, `${n} ${ends('A')} ${ends('B')} ${ends('C')} ${ends('D')}`);
+    check('closeStaleVoiceSessions: idempotent', mdb.closeStaleVoiceSessions(SG, live, S0 + 1000) === 0);
+
+    const NG = 'stale-voice-guild-2';
+    mdb.recordVoiceState(NG, 'A', 'vc1', S0);
+    mdb.recordVoiceState(NG, 'A', 'vc1', S0 + 2000); // touches last_seen_at
+    const n2 = mdb.closeStaleVoiceSessions(NG, new Map(), null);
+    const e2 = mdb.voiceSessionsInRange(NG, 0, S0 * 10, S0 * 5)[0];
+    check('closeStaleVoiceSessions: null heartbeat closes at last_seen_at', n2 === 1 && e2?.end === S0 + 2000, JSON.stringify(e2));
+  }
+
+  const mr = (msg: string, author: string, reactor: string, ts: number, emoji = 'x', ch = 'c1') =>
+    mdb.recordReaction({ guildId: MG, channelId: ch, messageId: msg, authorId: author, reactorId: reactor, emojiKey: emoji, emojiLabel: emoji, ts });
+  for (const r of ['r1', 'r2', 'r3']) mr('m-top', 'a', r, M0 + 10);
+  mr('m-top', 'a', 'a', M0 + 10, 'self'); // self-reaction
+  mr('m-two-b', 'b', 'r1', M0 + 10, 'x', 'c2');
+  mr('m-two-b', 'b', 'r2', M0 + 10, 'x', 'c2');
+  mr('m-two-a', 'a', 'r1', M0 + 10);
+  mr('m-two-a', 'a', 'r2', M0 + 10);
+  mr('m-late', 'b', 'r1', M1); // exclusive end
+  mr('m-early', 'b', 'r1', M0 - 1);
+  mr('m-self', 'c', 'c', M0 + 10);
+  const tr = mdb.topReactedMessages(MG, M0, M1, 10);
+  check(
+    'topReactedMessages: count DESC then message_id ASC, self and out-of-range excluded, shape',
+    tr.length === 3 && tr[0]!.messageId === 'm-top' && tr[0]!.count === 3 && tr[0]!.authorId === 'a' && tr[0]!.channelId === 'c1' &&
+      tr[1]!.messageId === 'm-two-a' && tr[2]!.messageId === 'm-two-b' && tr[2]!.channelId === 'c2' && mdb.topReactedMessages(MG, M0, M1, 2).length === 2,
+    JSON.stringify(tr),
+  );
+  const pairs = mdb.topReactionPairs(MG, M0, M1, 10);
+  check(
+    'topReactionPairs: count DESC then reactor, author; self and out-of-range excluded',
+    JSON.stringify(pairs) === JSON.stringify([
+      { reactorId: 'r1', authorId: 'a', count: 2 },
+      { reactorId: 'r2', authorId: 'a', count: 2 },
+      { reactorId: 'r1', authorId: 'b', count: 1 },
+      { reactorId: 'r2', authorId: 'b', count: 1 },
+      { reactorId: 'r3', authorId: 'a', count: 1 },
+    ]) && mdb.topReactionPairs(MG, M0, M1, 1).length === 1,
+    JSON.stringify(pairs),
+  );
+
+  mdb.recordMessageEdit(MG, 'c1', 'w1', 'a', 'edit', M0 + 20);
+  mdb.recordMessageEdit(MG, 'c1', 'w1', 'a', 'edit', M0 + 20); // same editedTimestamp: deduped
+  mdb.recordMessageEdit(MG, 'c1', 'w1', 'a', 'edit', M0 + 30); // a later edit counts
+  mdb.recordMessageEdit(MG, 'c2', 'w4', 'b', 'delete', M0 + 40);
+  mdb.recordMessageEdit(MG, 'c2', 'w4', 'b', 'delete', M0 + 50); // second delete event for the same message: deduped
+  mdb.recordMessageEdit(MG, 'c1', 'w2', 'a', 'delete', M1); // exclusive end
+  mdb.recordMessageEdit(MG, 'c1', 'w2', 'a', 'edit', M0 - 1); // before range
+  const ed = mdb.editDeleteCounts(MG, M0, M1);
+  check(
+    'message_edits: dedupes repeated events; editDeleteCounts per user in [from, to)',
+    JSON.stringify(ed) === JSON.stringify([{ userId: 'a', edits: 2, deletes: 0 }, { userId: 'b', edits: 0, deletes: 1 }]),
+    JSON.stringify(ed),
+  );
+  check('messageAuthor: tracked message found, unknown is null', mdb.messageAuthor(MG, 'w4') === 'b' && mdb.messageAuthor(MG, 'nope') === null && mdb.messageAuthor('other-guild', 'w4') === null);
+
+  const ms = mdb.getSettings(MG);
+  mdb.saveSettings({ ...ms, monthlyEnabled: false });
+  const off = mdb.getSettings(MG).monthlyEnabled;
+  mdb.saveSettings({ ...mdb.getSettings(MG), monthlyEnabled: true });
+  check('settings: monthlyEnabled defaults to true and round-trips', ms.monthlyEnabled === true && off === false && mdb.getSettings(MG).monthlyEnabled === true);
+  mdb.close();
+
+  // Migration: a DB created before words / message_edits / monthly_enabled existed.
+  const oldPath = join(mdir, 'old.db');
+  const old = new DatabaseSync(oldPath);
+  old.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, user_id TEXT NOT NULL, ts INTEGER NOT NULL, message_id TEXT);
+            CREATE TABLE settings (guild_id TEXT PRIMARY KEY, stats_channel_id TEXT, weekly_enabled INTEGER NOT NULL DEFAULT 1, weekly_day INTEGER NOT NULL DEFAULT 1, weekly_hour INTEGER NOT NULL DEFAULT 9, timezone TEXT NOT NULL DEFAULT 'UTC', embed_channels TEXT NOT NULL DEFAULT '[]', leveling_enabled INTEGER NOT NULL DEFAULT 1, levelup_channel_id TEXT);
+            INSERT INTO messages (guild_id, channel_id, user_id, ts, message_id) VALUES ('g', 'c', 'u', 5, 'm1');
+            INSERT INTO settings (guild_id) VALUES ('g');`);
+  old.close();
+  const mig = new BotDatabase(oldPath);
+  mig.close();
+  const chk = new DatabaseSync(oldPath);
+  const cols = (t: string) => (chk.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+  const oldRow = chk.prepare('SELECT words FROM messages WHERE message_id = ?').get('m1') as { words: number | null };
+  const oldSettings = chk.prepare('SELECT monthly_enabled FROM settings WHERE guild_id = ?').get('g') as { monthly_enabled: number };
+  check(
+    'migration: old DB gains words, monthly_enabled and message_edits; old rows keep NULL / default 1',
+    cols('messages').includes('words') && cols('settings').includes('monthly_enabled') && ['guild_id', 'channel_id', 'message_id', 'user_id', 'kind', 'ts'].every((c) => cols('message_edits').includes(c)) &&
+      oldRow.words === null && oldSettings.monthly_enabled === 1,
+  );
+  chk.close();
+  const fresh = new DatabaseSync(join(mdir, 'monthly.db'));
+  check('fresh DB: schema has the same columns', (fresh.prepare('PRAGMA table_info(messages)').all() as { name: string }[]).some((c) => c.name === 'words') && (fresh.prepare('PRAGMA table_info(settings)').all() as { name: string }[]).some((c) => c.name === 'monthly_enabled'));
+  fresh.close();
+
+  markBotDeleted('bd1');
+  markBotDeleted('bd2');
+  unmarkBotDeleted('bd2');
+  check('botdeletes: consumed once, unmark removes', consumeBotDeleted('bd1') && !consumeBotDeleted('bd1') && !consumeBotDeleted('bd2') && !consumeBotDeleted('never'));
+}
+
+// ---- monthly recap: month math, pure rankings, charts ----
+{
+  const LJ = 'Europe/Ljubljana';
+  const HR = 3_600_000;
+  const MIN = 60_000;
+  const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  // month bounds
+  const mar = lastMonthBounds(LJ, new Date('2026-04-10T12:00:00Z'));
+  check('lastMonthBounds March (DST starts) is 743h', mar.key === '2026-03' && mar.end - mar.start === 743 * HR && mar.start === Date.UTC(2026, 1, 28, 23), JSON.stringify(mar));
+  const oct = lastMonthBounds(LJ, new Date('2026-11-05T12:00:00Z'));
+  check('lastMonthBounds October (DST ends) is 745h', oct.key === '2026-10' && oct.end - oct.start === 745 * HR, JSON.stringify(oct));
+  const decLast = lastMonthBounds(LJ, new Date('2027-01-15T12:00:00Z'));
+  check('lastMonthBounds rolls January back to December', decLast.key === '2026-12' && decLast.start === Date.UTC(2026, 10, 30, 23) && decLast.end === Date.UTC(2026, 11, 31, 23), JSON.stringify(decLast));
+  const decCur = currentMonthBounds(LJ, new Date('2026-12-15T12:00:00Z'));
+  check('currentMonthBounds December is contiguous with the next month', decCur.key === '2026-12' && decCur.end === currentMonthBounds(LJ, new Date('2027-01-02T12:00:00Z')).start);
+  // local month edge: 23:30Z on Oct 31 is already Nov 1 in Ljubljana (UTC+1)
+  check('currentMonthBounds uses local time at the month edge', currentMonthBounds(LJ, new Date('2026-10-31T23:30:00Z')).key === '2026-11');
+  check('monthLabel', monthLabel(currentMonthBounds(LJ, new Date('2026-11-15T12:00:00Z')), LJ) === 'November 2026' && monthLabel(decLast, LJ) === 'December 2026');
+  const lens = ['2026-02', '2028-02', '2026-04', '2026-01'].map((k) => {
+    const [yy, mm] = k.split('-').map(Number) as [number, number];
+    const b = currentMonthBounds(LJ, new Date(Date.UTC(yy, mm - 1, 15, 12)));
+    return monthDaySeries(b, LJ).length;
+  });
+  check('monthDaySeries lengths 28/29/30/31', lens.join() === '28,29,30,31', lens.join());
+  const series = monthDaySeries(currentMonthBounds(LJ, new Date('2026-11-15T12:00:00Z')), LJ);
+  check('monthDaySeries keys/labels', series[0]?.key === '2026-11-01' && series[0]?.label === '1' && series[29]?.key === '2026-11-30' && series[29]?.label === '30');
+
+  // isMonthlyDue (Nov 1 2026 09:00 local = 08:00Z, UTC+1)
+  check('isMonthlyDue false before the hour on day 1', !isMonthlyDue(LJ, 9, new Date('2026-11-01T07:59:00Z'), '2026-10'));
+  check('isMonthlyDue true at the hour on day 1', isMonthlyDue(LJ, 9, new Date('2026-11-01T08:00:00Z'), '2026-10'));
+  check('isMonthlyDue false when this month already sent', !isMonthlyDue(LJ, 9, new Date('2026-11-01T12:00:00Z'), '2026-11'));
+  check('isMonthlyDue catches up later in the month', isMonthlyDue(LJ, 9, new Date('2026-11-20T12:00:00Z'), '2026-10'));
+  check('isMonthlyDue with null last key', isMonthlyDue(LJ, 9, new Date('2026-11-20T12:00:00Z'), null));
+
+  const msg = (userId: string, channelId: string, ts: number, words: number | null = 3) => ({ userId, channelId, ts, words });
+
+  // night owls / early birds (Ljubljana is UTC+1 in January)
+  const loc = (day: number, h: number, mi = 0) => Date.UTC(2026, 0, day, h - 1, mi); // local wall clock
+  const hrRows = [
+    msg('n1', 'c', loc(10, 0, 0)), msg('n1', 'c', loc(10, 4, 59)),
+    msg('e1', 'c', loc(10, 5, 0)), msg('e1', 'c', loc(10, 7, 59)),
+    msg('x', 'c', loc(10, 8, 0)), msg('x', 'c', loc(10, 23, 59)), msg('x', 'c', loc(10, 12, 0)),
+  ];
+  const owls = nightOwls(hrRows, LJ, 5);
+  const birds = earlyBirds(hrRows, LJ, 5);
+  check('nightOwls hour edges [0,5) in local tz', owls.length === 1 && owls[0]?.userId === 'n1' && owls[0]?.count === 2, JSON.stringify(owls));
+  check('earlyBirds hour edges [5,8) in local tz', birds.length === 1 && birds[0]?.userId === 'e1' && birds[0]?.count === 2, JSON.stringify(birds));
+  check('nightOwls in UTC sees different hours', nightOwls(hrRows, 'UTC', 5).map((r) => `${r.userId}:${r.count}`).join() === 'e1:1,n1:1', JSON.stringify(nightOwls(hrRows, 'UTC', 5)));
+  const tied = nightOwls([msg('zed', 'c', loc(10, 1)), msg('amy', 'c', loc(10, 2)), msg('bob', 'c', loc(10, 3)), msg('bob', 'c', loc(10, 3, 5))], LJ, 2);
+  check('nightOwls ranks desc, tie by userId, honours limit', tied.length === 2 && tied[0]?.userId === 'bob' && tied[1]?.userId === 'amy', JSON.stringify(tied));
+
+  // conversation starters
+  const T = 100 * HR;
+  const convo = [
+    msg('x', 'c1', T - 30 * MIN), msg('w', 'c2', T + 5 * MIN), msg('y', 'c1', T + 10 * MIN),
+    msg('z', 'c1', T + 70 * MIN), msg('x', 'c1', T + 3 * HR), msg('q', 'c1', T + 10 * HR),
+  ];
+  const starters = conversationStarters(convo, T, T + 10 * HR, 10);
+  check('conversationStarters: lookback suppresses, channels independent, exact gap counts, toTs exclusive',
+    starters.map((s) => `${s.userId}:${s.count}`).join() === 'w:1,x:1,z:1', JSON.stringify(starters));
+  check('conversationStarters: limit and no-previous', conversationStarters(convo, T, T + 10 * HR, 1).length === 1 && conversationStarters([msg('a', 'c', T)], T, T + HR, 5)[0]?.userId === 'a');
+
+  // streaks
+  const dayTs = (iso: string) => new Date(iso).getTime();
+  const streakRows = [
+    ...['2026-01-01', '2026-01-02', '2026-01-03', '2026-01-05', '2026-01-06'].map((d) => msg('u', 'c', dayTs(`${d}T12:00:00Z`))),
+    msg('v', 'c', dayTs('2026-01-01T12:00:00Z')), msg('v', 'c', dayTs('2026-01-03T12:00:00Z')),
+    msg('t', 'c', dayTs('2026-01-01T23:30:00Z')), msg('t', 'c', dayTs('2026-01-02T22:30:00Z')),
+    msg('s', 'c', dayTs('2025-12-31T12:00:00Z')), msg('s', 'c', dayTs('2026-01-01T12:00:00Z')),
+  ];
+  const streaks = longestStreaks(streakRows, LJ, 10);
+  check('longestStreaks: gap breaks run, year rollover, local-day boundaries, min 2 days',
+    streaks.map((s) => `${s.userId}:${s.days}`).join() === 'u:3,s:2', JSON.stringify(streaks));
+  check('longestStreaks: same rows in UTC count t as 2 days', longestStreaks(streakRows, 'UTC', 10).some((s) => s.userId === 't' && s.days === 2));
+
+  // heatmap (2026-01-05 is a Monday)
+  const hmRows = [
+    ...[0, 1, 2].map((i) => msg('a', 'c', Date.UTC(2026, 0, 5, 10, i))),
+    msg('a', 'c', Date.UTC(2026, 0, 6, 10, 0)),
+    ...[0, 1].map((i) => msg('a', 'c', Date.UTC(2026, 0, 11, 23, i))),
+  ];
+  const grid = activityHeatmap(hmRows, 'UTC');
+  check('activityHeatmap shape and totals', grid.length === 7 && grid.every((r) => r.length === 24) && grid.flat().reduce((s, v) => s + v, 0) === hmRows.length && grid[0]![10] === 3 && grid[1]![10] === 1 && grid[6]![23] === 2, JSON.stringify(grid));
+  const peaks = heatmapPeaks(grid);
+  check('heatmapPeaks', peaks?.peak.day === 0 && peaks.peak.hour === 10 && peaks.peak.count === 3 && peaks.busiestDay === 0 && peaks.busiestDayCount === 3 && peaks.busiestHour === 10 && peaks.busiestHourCount === 4, JSON.stringify(peaks));
+  check('heatmapPeaks: empty grid is null', heatmapPeaks(activityHeatmap([], 'UTC')) === null);
+  check('activityHeatmap respects tz', activityHeatmap([msg('a', 'c', Date.UTC(2026, 0, 5, 23, 30))], LJ)[1]![0] === 1);
+
+  // voice
+  const vs = (userId: string, channelId: string, start: number, end: number) => ({ userId, channelId, start, end });
+  const sessions = [
+    vs('a', 'ch1', -5 * HR, 2 * HR), vs('a', 'ch1', 1 * HR, 4 * HR), vs('a', 'ch2', 3 * HR, 5 * HR),
+    vs('b', 'afk', 0, 10 * HR), vs('c', 'ch1', 8 * HR, 20 * HR), vs('d', 'ch1', 1 * HR, 1 * HR + 30_000),
+  ];
+  const vt = voiceTotals(sessions, 0, 10 * HR, 10, 'afk');
+  check('voiceTotals: clip, merge overlaps, skip AFK, rank', vt.map((v) => `${v.userId}:${v.ms}`).join() === `a:${5 * HR},c:${2 * HR},d:30000`, JSON.stringify(vt));
+  check('voiceTotals: limit and no AFK arg', voiceTotals(sessions, 0, 10 * HR, 1, 'afk').length === 1 && voiceTotals(sessions, 0, 10 * HR, 5)[0]?.userId === 'b');
+  check('voiceTotalMs sums merged time', voiceTotalMs(sessions, 0, 10 * HR, 'afk') === 7 * HR + 30_000 && voiceTotalMs(sessions, 0, 10 * HR, null) === 17 * HR + 30_000);
+  const buddies = voiceBuddies([
+    vs('b', 'ch1', 2 * HR, 6 * HR), vs('a', 'ch1', 0, 4 * HR),
+    vs('b', 'ch2', 5 * HR, 6 * HR), vs('a', 'ch2', 5 * HR, 6 * HR),
+    vs('c', 'ch3', 0, 10 * HR), vs('a', 'ch4', 0, 10 * HR),
+    vs('d', 'ch1', 2 * HR, 2 * HR + 30_000),
+    vs('f', 'ch5', 0, MIN), vs('e', 'ch5', 0, MIN),
+    vs('h', 'ch6', 0, MIN - 1), vs('g', 'ch6', 0, MIN - 1),
+    vs('z', 'afk', 0, HR), vs('y', 'afk', 0, HR),
+  ], 0, 10 * HR, 10, 'afk');
+  check('voiceBuddies: same-channel overlap only, ordered pair, sums channels, drops <1 min',
+    buddies.map((p) => `${p.a}-${p.b}:${p.ms}`).join() === `a-b:${3 * HR},e-f:${MIN}`, JSON.stringify(buddies));
+  check('voiceBuddies: limit', voiceBuddies([vs('a', 'c', 0, HR), vs('b', 'c', 0, HR), vs('c', 'c', 0, HR)], 0, HR, 2).length === 2);
+
+  // message length
+  const many = (userId: string, words: (number | null)[]) => words.map((w) => msg(userId, 'c', 0, w));
+  const rep = <T,>(n: number, v: T): T[] => new Array<T>(n).fill(v);
+  const wordRows = [
+    ...many('n', rep(20, 10)), ...many('m', rep(20, 3)), ...many('p', rep(19, 100)),
+    ...many('q', [...rep(10, null), ...rep(10, 50)]),
+    ...many('r', [...rep(20, 0), ...rep(20, 20)]),
+  ];
+  const nov = novelists(wordRows, 10);
+  check('novelists: threshold, NULL/0 ignored, avg desc', nov.map((r) => `${r.userId}:${r.avgWords}:${r.messages}`).join() === 'r:20:20,n:10:20,m:3:20', JSON.stringify(nov));
+  check('novelists: custom min and limit', novelists(wordRows, 1, 19).length === 1 && novelists(wordRows, 10, 19).some((r) => r.userId === 'p'));
+  const oneRows = [
+    ...many('n', [...rep(5, 1), ...rep(15, 3)]), ...many('m', [...rep(10, 1), ...rep(10, 3)]), ...many('k', rep(20, 4)),
+    ...many('j', [...rep(10, 1), ...rep(30, 3)]), ...many('l', [...rep(20, 1), ...rep(10, null)]),
+  ];
+  const ow = oneWorders(oneRows, 10);
+  check('oneWorders: share desc, then count, drops 0, threshold + NULL', ow.map((r) => `${r.userId}:${r.share}:${r.oneWord}:${r.messages}`).join() === 'l:1:20:20,m:0.5:10:20,j:0.25:10:40,n:0.25:5:20', JSON.stringify(ow));
+
+  // typo kings
+  const kings = typoKings([
+    { userId: 'a', edits: 1, deletes: 4 }, { userId: 'b', edits: 3, deletes: 2 }, { userId: 'c', edits: 0, deletes: 0 },
+    { userId: 'd', edits: 5, deletes: 0 }, { userId: 'e', edits: 2, deletes: 3 },
+  ], 10);
+  check('typoKings: total desc, edits desc, drops zero', kings.map((k) => k.userId).join() === 'd,b,e,a', JSON.stringify(kings));
+  check('typoKings: limit', typoKings([{ userId: 'a', edits: 1, deletes: 0 }, { userId: 'b', edits: 2, deletes: 0 }], 1)[0]?.userId === 'b');
+
+  // charts
+  let seed = 7;
+  const rnd = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  const monthDays = monthDaySeries(lastMonthBounds(LJ, new Date('2026-12-02T12:00:00Z')), LJ).map((d, i) => ({
+    label: d.label,
+    count: Math.round((i % 7 >= 5 ? 180 : 420) * (0.5 + rnd()) + (i === 11 ? 600 : 0)),
+  }));
+  const monthPng = renderDailyChart(monthDays, { title: 'Messages per day' });
+  check('31-day chart is PNG', monthDays.length === 30 && monthPng.subarray(0, 8).equals(PNG_MAGIC), `${monthPng.length} bytes`);
+  const day31 = renderDailyChart(Array.from({ length: 31 }, (_, i) => ({ label: String(i + 1), count: i * 3 })));
+  check('31-bar chart and all-zero 31-bar chart render', day31.subarray(0, 8).equals(PNG_MAGIC) && renderDailyChart(Array.from({ length: 31 }, (_, i) => ({ label: String(i + 1), count: 0 }))).length > 0);
+  check('weekly (7-bar) chart still shows every value label', (renderDailyChartSvg(sampleDays).match(/font-size="26"/g) ?? []).length === 7);
+  check('31-bar chart labels only the max bar', (renderDailyChartSvg(monthDays).match(/font-size="22" font-weight="bold"/g) ?? []).length === 1);
+  const sampleGrid = Array.from({ length: 7 }, (_, d) => Array.from({ length: 24 }, (_, h) => {
+    const evening = Math.exp(-(((h - 21) % 24) ** 2) / 18) * 60;
+    const day = Math.exp(-((h - 14) ** 2) / 30) * 35;
+    return Math.round((evening + day) * (d >= 5 ? 1.2 : 0.8) * (0.6 + rnd() * 0.8) * (h < 6 ? 0.3 : 1));
+  }));
+  const heatPng = renderHeatmap(sampleGrid);
+  check('heatmap is PNG', heatPng.subarray(0, 8).equals(PNG_MAGIC), `${heatPng.length} bytes`);
+  check('heatmap renders an all-zero grid', renderHeatmap(Array.from({ length: 7 }, () => new Array<number>(24).fill(0)), { title: 'Quiet month' }).subarray(0, 8).equals(PNG_MAGIC));
+  check('heatmap svg has 168 cells and 8 hour labels', (renderHeatmapSvg(sampleGrid).match(/<rect x=/g) ?? []).length === 168 && /Activity by hour/.test(renderHeatmapSvg(sampleGrid)));
+  writeFileSync('/tmp/bojan-heatmap.png', heatPng);
+  writeFileSync('/tmp/bojan-month-chart.png', monthPng);
+}
+
+// ---- weekly voice section, monthly recap messages, monthly scheduling -------
+{
+  const textsOf = (components: { toJSON(): unknown }[]): string[] => {
+    const out: string[] = [];
+    const walk = (x: unknown): void => {
+      if (Array.isArray(x)) x.forEach(walk);
+      else if (x && typeof x === 'object') {
+        const o = x as Record<string, unknown>;
+        if (o.type === 10 && typeof o.content === 'string') out.push(o.content);
+        Object.values(o).forEach(walk);
+      }
+    };
+    walk(components.map((c) => c.toJSON()));
+    return out;
+  };
+  const HR = 3_600_000;
+  const MIN = 60_000;
+
+  check(
+    'fmtHoursMinutes: hours and minutes, never days',
+    fmtHoursMinutes(12 * HR + 30 * MIN) === '12h 30m' && fmtHoursMinutes(5 * HR) === '5h' && fmtHoursMinutes(45 * MIN) === '45m' && fmtHoursMinutes(1000) === '<1m' && fmtHoursMinutes(60 * HR + 5 * MIN) === '60h 5m',
+  );
+
+  // weekly voice section
+  const wkBase = { week: lwk, timeZone: 'UTC', weekTotal: 0, weekReactions: 0, activeMembers: 0, total: 0, topMessagers: [], topChannels: [], topGiven: [], topReceived: [], perDay: [] };
+  const wkVoice = textsOf(buildWeeklyStatsMessage({ ...wkBase, topVoice: [{ userId: 'v1', ms: 12 * HR + 30 * MIN }, { userId: 'v2', ms: 45 * MIN }] }).components);
+  const wkVoiceText = wkVoice.join('\n---\n');
+  check(
+    'weekly voice section: heading, formatting, order between Reactions and Awards',
+    wkVoiceText.includes('### 🎙️ Voice time\n1. <@v1> — **12h 30m**\n2. <@v2> — **45m**') &&
+      wkVoiceText.indexOf('### 😄 Reactions') < wkVoiceText.indexOf('### 🎙️ Voice time') && wkVoiceText.indexOf('### 🎙️ Voice time') < wkVoiceText.indexOf('### 🏅 Awards'),
+  );
+  check('weekly voice section: dash when empty or omitted', textsOf(buildWeeklyStatsMessage(wkBase).components).includes('### 🎙️ Voice time\n—') && textsOf(buildWeeklyStatsMessage({ ...wkBase, topVoice: [] }).components).includes('### 🎙️ Voice time\n—'));
+
+  // monthly builders
+  const NOV = lastMonthBounds('UTC', new Date('2026-12-01T10:00:00Z'));
+  const emptyGrid = Array.from({ length: 7 }, () => new Array<number>(24).fill(0));
+  const emptyMonthly: MonthlyRecapData = {
+    guildId: 'g1', month: NOV, timeZone: 'UTC', monthTotal: 0, monthReactions: 0, activeMembers: 0, voiceMs: 0, total: 0,
+    topMessagers: [], topChannels: [], topGiven: [], topReceived: [], topVoice: [], perDay: [], heatmap: emptyGrid, topMessage: null,
+    crowdPleasers: [], silentSpectators: [], biggestFans: [], nightOwls: [], earlyBirds: [], starters: [], streaks: [], buddies: [],
+    novelists: [], oneWorders: [], typoKings: [],
+  };
+  const grid = emptyGrid.map((r) => [...r]);
+  grid[5]![22] = 123;
+  grid[5]![21] = 50;
+  grid[1]![21] = 100;
+  const fullMonthly: MonthlyRecapData = {
+    ...emptyMonthly,
+    monthTotal: 12345, monthReactions: 678, activeMembers: 15, voiceMs: 245 * HR + 10 * MIN, total: 99999,
+    topMessagers: [{ userId: 'u1', messages: 900 }, { userId: 'u2', messages: 500 }, { userId: 'u3', messages: 100 }, { userId: 'u4', messages: 50 }, { userId: 'u5', messages: 10 }, { userId: 'u6', messages: 1 }],
+    xpByUser: { u1: 650 },
+    topChannels: [{ channelId: 'c1', count: 9000 }, { channelId: 'c2', count: 100 }],
+    topGiven: [{ userId: 'u2', count: 200 }], topReceived: [{ userId: 'u1', count: 300 }],
+    topVoice: [{ userId: 'v1', ms: 40 * HR + 30 * MIN }, { userId: 'v2', ms: 2 * HR }],
+    perDay: [{ day: `${NOV.key}-03`, count: 400 }, { day: `${NOV.key}-04`, count: 10 }],
+    heatmap: grid,
+    topMessage: { messageId: 'm1', channelId: 'c1', authorId: 'u1', count: 23 },
+    crowdPleasers: [{ userId: 'u1', messages: 10, received: 24, given: 0, ratio: 2.4 }],
+    silentSpectators: [{ userId: 'u9', messages: 0, received: 0, given: 42 }, { userId: 'u8', messages: 0, received: 0, given: 1 }],
+    biggestFans: [{ reactorId: 'u2', authorId: 'u1', count: 42 }],
+    nightOwls: [{ userId: 'u3', count: 42 }, { userId: 'u4', count: 1 }],
+    earlyBirds: [{ userId: 'u5', count: 7 }],
+    starters: [{ userId: 'u2', count: 12 }, { userId: 'u3', count: 1 }],
+    streaks: [{ userId: 'u1', days: 21 }, { userId: 'u2', days: 1 }],
+    buddies: [{ a: 'v1', b: 'v2', ms: 8 * HR + 10 * MIN }],
+    novelists: [{ userId: 'u7', avgWords: 18.24, messages: 30 }],
+    oneWorders: [{ userId: 'u6', share: 0.64, oneWord: 32, messages: 50 }],
+    typoKings: [{ userId: 'u4', edits: 31, deletes: 4 }, { userId: 'u5', edits: 1, deletes: 1 }],
+    guildIconUrl: 'https://example.com/icon.png',
+  };
+
+  const recap = buildMonthlyRecapMessage(fullMonthly);
+  const recapJson = JSON.stringify(recap.components.map((c) => c.toJSON()));
+  const recapText = textsOf(recap.components).join('\n---\n');
+  check('monthly recap: Components V2, one blurple container, no pings, no content', (recap.flags & MessageFlags.IsComponentsV2) !== 0 && recap.components.length === 1 && recapJson.includes('"accent_color":5793266') && recap.allowedMentions.parse.length === 0 && !('content' in recap));
+  check('monthly recap: two attachments, both referenced', recap.files.map((f) => f.name).join() === 'monthly-chart.png,monthly-heatmap.png' && recapJson.includes('attachment://monthly-chart.png') && recapJson.includes('attachment://monthly-heatmap.png') && recapJson.includes('https://example.com/icon.png'));
+  check(
+    'monthly recap: header, stats line and every section heading',
+    recapText.startsWith('## 📅 Monthly recap\n-# November 2026\n\n**12,345** messages · **678** reactions · **15** active members · **245h** in voice\n-# 99,999 messages all time') &&
+      ['### 🏆 Top messagers', '### 💬 Most used channels', '### 😄 Reactions', '### 🎙️ Voice time', '### 📈 Messages per day', '### ⏰ Peak hours'].every((h) => recapText.includes(h)),
+  );
+  check(
+    'monthly recap: lists use the weekly formats',
+    recapText.includes('<@u1> — **900**') && recapText.includes('lvl 3 · 50/400') && recapText.includes('1. <#c1> — **9,000**') && recapText.includes('**Given**\n1. <@u2> — **200**') &&
+      recapText.includes('**Received**\n1. <@u1> — **300**') && recapText.includes('1. <@v1> — **40h 30m**') && recapText.includes('<@u5>') && !recapText.includes('<@u6>'),
+  );
+  check('monthly recap: peak hours line', recapText.includes('Busiest day **Saturday** · busiest hour **21:00** · peak **Sat 22:00** (123 msgs)') && peakHoursText(emptyGrid) === '—' && peakHoursText(emptyGrid.map((r, d) => r.map((_, h) => (d === 0 && h === 3 ? 1 : 0)))).endsWith('(1 msg)'));
+
+  const awards = buildMonthlyAwardsMessage(fullMonthly);
+  const awardsJson = JSON.stringify(awards.components.map((c) => c.toJSON()));
+  const awardTexts = textsOf(awards.components);
+  const awardsText2 = awardTexts.join('\n---\n');
+  check('monthly awards: Components V2, one gold container, no attachments, no pings', (awards.flags & MessageFlags.IsComponentsV2) !== 0 && awards.components.length === 1 && awardsJson.includes('"accent_color":15844367') && awards.allowedMentions.parse.length === 0 && !('files' in awards));
+  check('monthly awards: header and four groups separated by dividers', awardTexts[0] === '## 🏅 Awards · November 2026' && awardTexts.length === 5 && (awardsJson.match(/"type":14/g) ?? []).length === 4);
+  check(
+    'monthly awards: every award title with its subtitle',
+    [
+      '**⭐ Message of the month** ·', '**🎭 Crowd pleaser** ·', '**👀 Silent spectator** ·', '**💞 Biggest fan** ·', '**🦉 Night owl** · midnight–5am', '**🐓 Early bird** · 5–8am',
+      '**🗣️ Conversation starter** · first message after 1h+ of silence', '**🔥 Streak** · most days in a row', '**🤝 Voice buddies** ·', '**✍️ Novelist** ·', '**🤏 One-word replier** ·', '**✏️ Typo king** · edits & deletes',
+    ].every((t) => awardsText2.includes(t)),
+  );
+  check(
+    'monthly awards: line formats and jump link',
+    awardsText2.includes('<@u1> in <#c1> — **23** reactions · [Jump](https://discord.com/channels/g1/c1/m1)') &&
+      awardsText2.includes('1. <@u1> — **2.4** per msg') && awardsText2.includes('1. <@u9> — **42** reactions') && awardsText2.includes('1. <@u2> → <@u1> — **42**') &&
+      awardsText2.includes('1. <@u3> — **42** msgs') && awardsText2.includes('1. <@u5> — **7** msgs') && awardsText2.includes('1. <@u2> — **12** starts') && awardsText2.includes('1. <@u1> — **21** days') &&
+      awardsText2.includes('1. <@v1> & <@v2> — **8h 10m**') && awardsText2.includes('1. <@u7> — **18.2** words/msg') && awardsText2.includes('1. <@u6> — **64%** one-word') && awardsText2.includes('1. <@u4> — **31** edits · **4** deletes'),
+  );
+  check(
+    'monthly awards: singular forms when the number is 1',
+    awardsText2.includes('<@u8> — **1** reaction') && !awardsText2.includes('**1** reactions') && awardsText2.includes('<@u4> — **1** msg\n') &&
+      awardsText2.includes('<@u3> — **1** start') && !awardsText2.includes('**1** starts') && awardsText2.includes('<@u2> — **1** day') && !awardsText2.includes('**1** days') &&
+      awardsText2.includes('**1** edit · **1** delete') && !awardsText2.includes('**1** edits') && !awardsText2.includes('**1** deletes') &&
+      textsOf(buildMonthlyAwardsMessage({ ...fullMonthly, topMessage: { ...fullMonthly.topMessage!, count: 1 } }).components).join('\n').includes('**1** reaction · [Jump]'),
+  );
+  check('monthly awards: one number per award line', awardTexts.slice(1).join('\n').split('\n').filter((l) => /^\d\. /.test(l) && !l.includes('delete')).every((l) => (l.match(/\*\*/g) ?? []).length === 2));
+
+  // empty data renders dashes and does not throw
+  const recapEmpty = textsOf(buildMonthlyRecapMessage(emptyMonthly).components);
+  const awardsEmpty = textsOf(buildMonthlyAwardsMessage(emptyMonthly).components);
+  check(
+    'monthly builders: empty data renders dashes, headings kept',
+    recapEmpty.includes('### 🏆 Top messagers\n—') && recapEmpty.includes('### 💬 Most used channels\n—') && recapEmpty.includes('### 🎙️ Voice time\n—') && recapEmpty.includes('### ⏰ Peak hours\n—') &&
+      recapEmpty[0]!.includes('**0**') && awardsEmpty.slice(1).every((t) => (t.match(/^—$/gm) ?? []).length === (t.match(/^\*\*/gm) ?? []).length) && awardsEmpty[1]!.includes('**⭐ Message of the month** · most reactions on one message\n—'),
+  );
+
+  // budget: long ids push both messages over 3800 chars; lists shrink, headings stay
+  const longId = (c: string): string => c.repeat(200);
+  const ids = ['a', 'b', 'c', 'd', 'e', 'f'].map(longId);
+  const fat: MonthlyRecapData = {
+    ...fullMonthly,
+    topMessagers: ids.map((userId, i) => ({ userId, messages: 100 - i })),
+    topChannels: ids.map((channelId, i) => ({ channelId, count: 100 - i })),
+    topGiven: ids.slice(0, 3).map((userId, i) => ({ userId, count: 9 - i })),
+    topReceived: ids.slice(0, 3).map((userId, i) => ({ userId, count: 9 - i })),
+    topVoice: ids.map((userId, i) => ({ userId, ms: (10 - i) * HR })),
+    crowdPleasers: ids.slice(0, 3).map((userId, i) => ({ userId, messages: 10, received: 30 - i, given: 0, ratio: 3 - i / 10 })),
+    silentSpectators: ids.slice(0, 3).map((userId, i) => ({ userId, messages: 0, received: 0, given: 50 - i })),
+    biggestFans: [{ reactorId: ids[0]!, authorId: ids[1]!, count: 9 }, { reactorId: ids[2]!, authorId: ids[3]!, count: 8 }, { reactorId: ids[4]!, authorId: ids[5]!, count: 7 }],
+    nightOwls: ids.slice(0, 3).map((userId, i) => ({ userId, count: 9 - i })),
+    earlyBirds: ids.slice(0, 3).map((userId, i) => ({ userId, count: 9 - i })),
+    starters: ids.slice(0, 3).map((userId, i) => ({ userId, count: 9 - i })),
+    streaks: ids.slice(0, 3).map((userId, i) => ({ userId, days: 9 - i })),
+    buddies: [{ a: ids[0]!, b: ids[1]!, ms: 9 * HR }, { a: ids[2]!, b: ids[3]!, ms: 8 * HR }, { a: ids[4]!, b: ids[5]!, ms: 7 * HR }],
+    novelists: ids.slice(0, 3).map((userId, i) => ({ userId, avgWords: 20 - i, messages: 30 })),
+    oneWorders: ids.slice(0, 3).map((userId, i) => ({ userId, share: 0.9 - i / 10, oneWord: 30, messages: 40 })),
+    typoKings: ids.slice(0, 3).map((userId, i) => ({ userId, edits: 9 - i, deletes: 1 })),
+  };
+  const len = (t: string[]): number => t.reduce((n, s) => n + s.length, 0);
+  const fatRecap = textsOf(buildMonthlyRecapMessage(fat).components);
+  const fatAwards = textsOf(buildMonthlyAwardsMessage(fat).components);
+  const fatAwardsText = fatAwards.join('\n');
+  const heads = ['### 🏆 Top messagers', '### 💬 Most used channels', '### 😄 Reactions', '### 🎙️ Voice time', '### 📈 Messages per day', '### ⏰ Peak hours'];
+  check(
+    'monthly recap: over-budget text shrinks the lists, never the headings',
+    len(fatRecap) <= 3800 && heads.every((h) => fatRecap.some((t) => t.includes(h))) && !fatRecap.join('\n').includes(ids[4]!) && fatRecap[0]!.startsWith('## 📅 Monthly recap'),
+    `${len(fatRecap)} chars`,
+  );
+  check(
+    'monthly awards: over-budget text shrinks the lists, never the headings or titles',
+    len(fatAwards) <= 3800 && fatAwards[0]!.startsWith('## 🏅 Awards') && ['⭐ Message of the month', '🎭 Crowd pleaser', '👀 Silent spectator', '💞 Biggest fan', '🦉 Night owl', '🐓 Early bird', '🗣️ Conversation starter', '🔥 Streak', '🤝 Voice buddies', '✍️ Novelist', '🤏 One-word replier', '✏️ Typo king'].every((t) => fatAwardsText.includes(`**${t}**`)) && !/^[23]\. /m.test(fatAwardsText),
+    `${len(fatAwards)} chars`,
+  );
+  check('monthly builders: normal data stays untrimmed', awardsText2.includes('2. <@u4> — **1** msg') && recapText.includes('5. <@u5>') === false && recapText.includes('<@u5>') && len(textsOf(recap.components)) <= 3800 && len(awardTexts) > 0);
+
+  // monthlyAction: seeding and due logic (Europe/Ljubljana, hour 10 == 09:00 UTC in December)
+  {
+    const tz = 'Europe/Ljubljana';
+    const d = (s: string): Date => new Date(s);
+    check('monthlyAction: no state seeds, even right on the 1st', monthlyAction(null, tz, 10, d('2026-12-01T09:30:00Z')) === 'seed' && monthlyAction(undefined, tz, 10, d('2026-11-26T12:00:00Z')) === 'seed');
+    check('monthlyAction: due on the 1st at the hour, not before', monthlyAction('2026-11', tz, 10, d('2026-12-01T08:59:00Z')) === 'none' && monthlyAction('2026-11', tz, 10, d('2026-12-01T09:00:00Z')) === 'post');
+    check('monthlyAction: catch-up later in the month, nothing once sent', monthlyAction('2026-11', tz, 10, d('2026-12-05T15:00:00Z')) === 'post' && monthlyAction('2026-12', tz, 10, d('2026-12-05T15:00:00Z')) === 'none' && monthlyAction('2026-12', tz, 10, d('2026-12-31T23:00:00Z')) === 'none');
+    check('monthlyAction: seeded mid-month stays quiet until the next month', monthlyAction('2026-11', tz, 10, d('2026-11-26T12:00:00Z')) === 'none' && monthlyAction('2026-11', tz, 10, d('2026-12-01T09:00:00Z')) === 'post');
+  }
+
+  // gatherMonthlyData against a temp DB
+  {
+    const GM = 'gather-guild';
+    const gdb = new BotDatabase(join(mkdtempSync(join(tmpdir(), 'bojan-gather-')), 'gather.db'));
+    const settings = gdb.getSettings(GM);
+    const now = new Date('2026-12-01T10:00:00Z');
+    const nov = lastMonthBounds(settings.timezone, now);
+    const at = (day: number, hour: number, min = 0): number => Date.UTC(2026, 10, day, hour, min);
+    // Oct 31 23:30 message right before the month: u1's 00:10 message on the 1st is NOT a conversation start
+    gdb.recordMessage(GM, 'c1', 'x', Date.UTC(2026, 9, 31, 23, 30), 'pre');
+    gdb.recordMessage(GM, 'c1', 'u1', at(1, 0, 10), 'g1', 1);
+    gdb.recordMessage(GM, 'c1', 'u1', at(2, 1), 'g2', 1);
+    gdb.recordMessage(GM, 'c1', 'u2', at(2, 22), 'g3', 30);
+    gdb.recordMessage(GM, 'c2', 'u2', at(3, 22, 5), 'g4', 1);
+    gdb.recordMessage(GM, 'c1', 'u1', Date.UTC(2026, 11, 1, 0, 5), 'g5', 1); // December: outside
+    for (let i = 0; i < 5; i++) gdb.recordMessage(GM, 'c3', 'u3', at(10 + i, 6), `e${i}`, 4); // early bird, 5-day streak
+    gdb.recordReaction({ guildId: GM, channelId: 'c1', messageId: 'g3', authorId: 'u2', reactorId: 'u1', emojiKey: 'x', emojiLabel: 'x', ts: at(4, 12) });
+    gdb.recordReaction({ guildId: GM, channelId: 'c1', messageId: 'g3', authorId: 'u2', reactorId: 'u3', emojiKey: 'y', emojiLabel: 'y', ts: at(4, 12) });
+    gdb.recordMessageEdit(GM, 'c1', 'g1', 'u1', 'edit', at(2, 3));
+    gdb.recordMessageEdit(GM, 'c1', 'g2', 'u1', 'delete', at(2, 4));
+    // voice: u1 and u2 together 2h in vc1; u1 also 5h in the AFK channel (ignored)
+    gdb.recordVoiceState(GM, 'u1', 'vc1', at(5, 10));
+    gdb.recordVoiceState(GM, 'u2', 'vc1', at(5, 10));
+    gdb.recordVoiceState(GM, 'u1', null, at(5, 12));
+    gdb.recordVoiceState(GM, 'u2', null, at(5, 12));
+    gdb.recordVoiceState(GM, 'u1', 'afk', at(6, 10));
+    gdb.recordVoiceState(GM, 'u1', null, at(6, 15));
+    const guildStub = { id: GM, afkChannelId: 'afk', iconURL: () => 'https://example.com/g.png' };
+    const data = gatherMonthlyData(guildStub, gdb, settings, nov, now);
+    check(
+      'gatherMonthlyData: counts, voice (AFK excluded), peaks and awards come from the previous month only',
+      data.guildId === GM && data.month.key === '2026-11' && data.monthTotal === 9 && data.activeMembers === 3 && data.total === 11 && data.monthReactions === 2 &&
+        data.voiceMs === 4 * HR && data.topVoice.length === 2 && data.topVoice[0]!.ms === 2 * HR && data.buddies.length === 1 && data.buddies[0]!.ms === 2 * HR &&
+        data.topMessage?.messageId === 'g3' && data.topMessage.count === 2 && data.biggestFans.length === 2 && data.guildIconUrl === 'https://example.com/g.png',
+      JSON.stringify({ t: data.monthTotal, a: data.activeMembers, v: data.voiceMs, tv: data.topVoice, b: data.buddies, tm: data.topMessage }),
+    );
+    check(
+      'gatherMonthlyData: time awards (night owl, early bird, streak, starters with lookback) and typo kings',
+      data.nightOwls[0]?.userId === 'u1' && data.nightOwls[0]?.count === 2 && data.earlyBirds[0]?.userId === 'u3' && data.earlyBirds[0]?.count === 5 &&
+        data.streaks[0]?.userId === 'u3' && data.streaks[0]?.days === 5 && !data.starters.some((s) => s.userId === 'u1' && s.count > 2) && data.starters.find((s) => s.userId === 'u3')?.count === 5 &&
+        data.typoKings[0]?.userId === 'u1' && data.typoKings[0]?.edits === 1 && data.typoKings[0]?.deletes === 1 && data.perDay.reduce((n, p) => n + p.count, 0) === 9,
+      JSON.stringify({ no: data.nightOwls, eb: data.earlyBirds, st: data.streaks, s: data.starters, tk: data.typoKings }),
+    );
+    const startsU1 = data.starters.find((s) => s.userId === 'u1')?.count ?? 0;
+    check('gatherMonthlyData: a message within an hour of the previous one (before the 1st) is not a start', startsU1 === 1, `u1 starts=${startsU1}`);
+    const gRecap = buildMonthlyRecapMessage(data);
+    const gAwards = buildMonthlyAwardsMessage(data);
+    check('gatherMonthlyData output renders through both builders', textsOf(gRecap.components)[0]!.includes('**9** messages') && textsOf(gAwards.components).join('\n').includes('[Jump](https://discord.com/channels/gather-guild/c1/g3)') && gRecap.files.length === 2);
+    const emptyGather = gatherMonthlyData(guildStub, gdb, settings, lastMonthBounds(settings.timezone, new Date('2026-06-01T10:00:00Z')), now);
+    check('gatherMonthlyData: a month with no data renders without throwing', emptyGather.monthTotal === 0 && emptyGather.topMessage === null && buildMonthlyRecapMessage(emptyGather).components.length === 1 && buildMonthlyAwardsMessage(emptyGather).components.length === 1);
+  }
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} test(s) FAILED`);

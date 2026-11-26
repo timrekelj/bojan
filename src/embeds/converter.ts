@@ -1,5 +1,6 @@
 import { ChannelType, Webhook, type Message, type TextChannel } from 'discord.js';
 import type { BotDatabase } from '../db.js';
+import { markBotDeleted, unmarkBotDeleted } from '../botdeletes.js';
 import { extractUrlOutsideCode, detectProvider, transformUrl, canonicalizeUrl, isShortLink } from './providers.js';
 
 const WEBHOOK_NAME = 'embed-converter';
@@ -80,8 +81,10 @@ export async function maybeConvert(message: Message, db: BotDatabase, embedChann
     }
 
     // Remove the original so its native embed doesn't double up with ours.
+    markBotDeleted(message.id); // so the delete handler doesn't count it as the user's delete
     const deleted = await message.delete().then(() => true).catch(() => false);
     if (!deleted) {
+      unmarkBotDeleted(message.id);
       const suppressed = await message.suppressEmbeds(true).then(() => true).catch(() => false);
       if (!suppressed) {
         // Can't remove the original at all — undo the repost to avoid duplicates.

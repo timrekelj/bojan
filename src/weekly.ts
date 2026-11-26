@@ -12,7 +12,7 @@ import {
 } from 'discord.js';
 import { renderDailyChart } from './chart.js';
 import type { ChannelRow, ReactionCountRow, UserRow } from './db.js';
-import { daySeries, fmt, leaderboardLines, weekRangeLabel, type WeekBounds } from './stats.js';
+import { daySeries, fmt, fmtHoursMinutes, leaderboardLines, weekRangeLabel, type AwardRow, type CrowdPleaserRow, type WeekBounds } from './stats.js';
 import { NO_MENTIONS } from './discord.js';
 
 export const WEEKLY_CHART_NAME = 'weekly-chart.png';
@@ -32,11 +32,38 @@ export interface WeeklyStatsData {
   topGiven: ReactionCountRow[];
   topReceived: ReactionCountRow[];
   perDay: { day: string; count: number }[];
+  crowdPleasers?: CrowdPleaserRow[];
+  silentSpectators?: AwardRow[];
+  /** Voice time per member (AFK excluded), most first. */
+  topVoice?: { userId: string; ms: number }[];
   guildIconUrl?: string | null;
+}
+
+/** "1. <@id> — **12h 30m**" lines, or a dash when empty. */
+export function voiceRanked(rows: { userId: string; ms: number }[]): string {
+  return rows.length > 0 ? rows.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmtHoursMinutes(r.ms)}**`).join('\n') : '—';
 }
 
 function ranked(rows: ReactionCountRow[]): string {
   return rows.length > 0 ? rows.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmt(r.count)}**`).join('\n') : '—';
+}
+
+/** Text of the "Awards" section of the weekly message. */
+export function awardsText(crowd: CrowdPleaserRow[], spectators: AwardRow[]): string {
+  const crowdLines =
+    crowd.length > 0 ? crowd.map((r, i) => `${i + 1}. <@${r.userId}> — **${r.ratio.toFixed(1)}** per msg`).join('\n') : '—';
+  const spectatorLines =
+    spectators.length > 0
+      ? spectators.map((r, i) => `${i + 1}. <@${r.userId}> — **${fmt(r.given)}** ${r.given === 1 ? 'reaction' : 'reactions'}`).join('\n')
+      : '—';
+  return [
+    '### 🏅 Awards',
+    '**🎭 Crowd pleaser** · most reactions per message',
+    crowdLines,
+    '',
+    '**👀 Silent spectator** · reacts a lot, barely talks',
+    spectatorLines,
+  ].join('\n');
 }
 
 export function divider(): SeparatorBuilder {
@@ -85,6 +112,10 @@ export function buildWeeklyStatsMessage(data: WeeklyStatsData) {
         ['### 😄 Reactions', '**Given**', ranked(data.topGiven), '', '**Received**', ranked(data.topReceived)].join('\n'),
       ),
     )
+    .addSeparatorComponents(divider())
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### 🎙️ Voice time\n${voiceRanked(data.topVoice ?? [])}`))
+    .addSeparatorComponents(divider())
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(awardsText(data.crowdPleasers ?? [], data.silentSpectators ?? [])))
     .addSeparatorComponents(divider())
     .addTextDisplayComponents(new TextDisplayBuilder().setContent('### 📈 Messages per day'))
     .addMediaGalleryComponents(new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(`attachment://${WEEKLY_CHART_NAME}`)));

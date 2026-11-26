@@ -16,6 +16,40 @@ export interface Settings {
   embedChannels: string[];
   levelingEnabled: boolean;
   levelupChannelId: string | null; // null = track XP but never announce
+  monthlyEnabled: boolean;
+}
+
+export interface MessageActivityRow {
+  userId: string;
+  channelId: string;
+  ts: number;
+  words: number | null; // NULL for messages recorded before word counts existed
+}
+
+export interface VoiceRangeRow {
+  userId: string;
+  channelId: string;
+  start: number;
+  end: number;
+}
+
+export interface TopReactedMessageRow {
+  messageId: string;
+  channelId: string;
+  authorId: string;
+  count: number;
+}
+
+export interface ReactionPairRow {
+  reactorId: string;
+  authorId: string;
+  count: number;
+}
+
+export interface EditDeleteRow {
+  userId: string;
+  edits: number;
+  deletes: number;
 }
 
 export interface UserRow {
@@ -76,6 +110,13 @@ export interface ChannelRow {
 export interface ReactionCountRow {
   userId: string;
   count: number;
+}
+
+export interface ReactionMessageRow {
+  userId: string;
+  messages: number;
+  received: number;
+  given: number;
 }
 
 /** A pre-made role used as a name colour, plus the picker message posted for it. */
@@ -192,7 +233,8 @@ CREATE TABLE IF NOT EXISTS messages (
   channel_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   ts INTEGER NOT NULL,
-  message_id TEXT
+  message_id TEXT,
+  words INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_messages_guild_ts ON messages (guild_id, ts);
 CREATE INDEX IF NOT EXISTS idx_messages_guild_user ON messages (guild_id, user_id);
@@ -206,8 +248,22 @@ CREATE TABLE IF NOT EXISTS settings (
   timezone TEXT NOT NULL DEFAULT 'UTC',
   embed_channels TEXT NOT NULL DEFAULT '[]',
   leveling_enabled INTEGER NOT NULL DEFAULT 1,
-  levelup_channel_id TEXT
+  levelup_channel_id TEXT,
+  monthly_enabled INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS message_edits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_message_edits_guild_ts ON message_edits (guild_id, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_message_edits_unique_edit ON message_edits (guild_id, message_id, kind, ts) WHERE kind = 'edit';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_message_edits_unique_delete ON message_edits (guild_id, message_id, kind) WHERE kind = 'delete';
 
 CREATE TABLE IF NOT EXISTS user_xp (
   guild_id TEXT NOT NULL,
@@ -688,6 +744,7 @@ const DEFAULT_SETTINGS: Omit<Settings, 'guildId'> = {
   embedChannels: [],
   levelingEnabled: true,
   levelupChannelId: null,
+  monthlyEnabled: true,
 };
 
 export class BotDatabase {
@@ -717,6 +774,14 @@ export class BotDatabase {
     }
     if (!settingsCols.some((c) => c.name === 'levelup_channel_id')) {
       this.db.exec('ALTER TABLE settings ADD COLUMN levelup_channel_id TEXT');
+    }
+    if (!settingsCols.some((c) => c.name === 'monthly_enabled')) {
+      this.db.exec('ALTER TABLE settings ADD COLUMN monthly_enabled INTEGER NOT NULL DEFAULT 1');
+    }
+    // Migration for messages recorded before word counts existed (old rows stay NULL).
+    const messageCols = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
+    if (!messageCols.some((c) => c.name === 'words')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN words INTEGER');
     }
     // Migration for voice_sessions created before voice XP existed.
     const voiceCols = this.db.prepare('PRAGMA table_info(voice_sessions)').all() as { name: string }[];
@@ -795,20 +860,21 @@ export class BotDatabase {
 
   // ---- messages -------------------------------------------------------
 
-  recordMessage(guildId: string, channelId: string, userId: string, ts: number, messageId: string): void {
+  /** `words` is the word count of the content (never the content itself); omitted = NULL. */
+  recordMessage(guildId: string, channelId: string, userId: string, ts: number, messageId: string, words?: number): void {
     this.db
-      .prepare('INSERT OR IGNORE INTO messages (guild_id, channel_id, user_id, ts, message_id) VALUES (?, ?, ?, ?, ?)')
-      .run(guildId, channelId, userId, ts, messageId);
+      .prepare('INSERT OR IGNORE INTO messages (guild_id, channel_id, user_id, ts, message_id, words) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(guildId, channelId, userId, ts, messageId, words ?? null);
   }
 
   /** Insert many rows in one transaction; returns how many were actually new. */
-  recordMessagesBatch(rows: { guildId: string; channelId: string; userId: string; ts: number; messageId: string }[]): number {
+  recordMessagesBatch(rows: { guildId: string; channelId: string; userId: string; ts: number; messageId: string; words?: number }[]): number {
     if (rows.length === 0) return 0;
     this.db.exec('BEGIN');
     try {
-      const ins = this.db.prepare('INSERT OR IGNORE INTO messages (guild_id, channel_id, user_id, ts, message_id) VALUES (?, ?, ?, ?, ?)');
+      const ins = this.db.prepare('INSERT OR IGNORE INTO messages (guild_id, channel_id, user_id, ts, message_id, words) VALUES (?, ?, ?, ?, ?, ?)');
       let changes = 0;
-      for (const r of rows) changes += Number(ins.run(r.guildId, r.channelId, r.userId, r.ts, r.messageId).changes);
+      for (const r of rows) changes += Number(ins.run(r.guildId, r.channelId, r.userId, r.ts, r.messageId, r.words ?? null).changes);
       this.db.exec('COMMIT');
       return changes;
     } catch (err) {
@@ -871,6 +937,88 @@ export class BotDatabase {
   distinctActiveUsers(guildId: string): number {
     const row = this.db.prepare('SELECT COUNT(DISTINCT user_id) AS c FROM messages WHERE guild_id = ?').get(guildId) as { c: number };
     return row.c;
+  }
+
+  /** Per-message rows in [fromTs, toTs), oldest first; `words` is NULL for pre-migration rows. */
+  messageActivity(guildId: string, fromTs: number, toTs: number): MessageActivityRow[] {
+    return this.db
+      .prepare('SELECT user_id AS userId, channel_id AS channelId, ts, words FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ? ORDER BY ts ASC, id ASC')
+      .all(guildId, fromTs, toTs) as unknown as MessageActivityRow[];
+  }
+
+  /** Distinct message authors in [fromTs, toTs). */
+  countActiveMembers(guildId: string, fromTs: number, toTs: number): number {
+    const row = this.db
+      .prepare('SELECT COUNT(DISTINCT user_id) AS c FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ?')
+      .get(guildId, fromTs, toTs) as { c: number };
+    return row.c;
+  }
+
+  /**
+   * Voice sessions overlapping [fromTs, toTs), unclipped (the caller clips). `end` is `ended_at`
+   * for closed sessions. A still-open session ends at `now`, matching `voiceStats` and
+   * `topVoiceChannels`. `last_seen_at` is not used: it is only touched when the member re-joins
+   * the same channel, so it is not a heartbeat. Open sessions do not go stale across restarts:
+   * the startup seeding re-opens sessions for members still in voice and, if a member left while
+   * the bot was down, the old session stays open until their next voice event closes it.
+   */
+  voiceSessionsInRange(guildId: string, fromTs: number, toTs: number, now: number): VoiceRangeRow[] {
+    return this.db
+      .prepare(
+        `SELECT user_id AS userId, channel_id AS channelId, started_at AS start, COALESCE(ended_at, ?) AS end
+         FROM voice_sessions
+         WHERE guild_id = ? AND started_at < ? AND COALESCE(ended_at, ?) > ?
+         ORDER BY started_at ASC, id ASC`,
+      )
+      .all(now, guildId, toTs, now, fromTs) as unknown as VoiceRangeRow[];
+  }
+
+  /** Most reacted-to messages by reaction time in [fromTs, toTs); self-reactions excluded. */
+  topReactedMessages(guildId: string, fromTs: number, toTs: number, limit: number): TopReactedMessageRow[] {
+    return this.db
+      .prepare(
+        `SELECT message_id AS messageId, channel_id AS channelId, author_id AS authorId, COUNT(*) AS count
+         FROM reactions WHERE guild_id = ? AND ts >= ? AND ts < ? AND reactor_id <> author_id
+         GROUP BY message_id, channel_id, author_id ORDER BY count DESC, message_id ASC LIMIT ?`,
+      )
+      .all(guildId, fromTs, toTs, limit) as unknown as TopReactedMessageRow[];
+  }
+
+  /** Reactor -> author pairs ranked by reaction count in [fromTs, toTs); self-reactions excluded. */
+  topReactionPairs(guildId: string, fromTs: number, toTs: number, limit: number): ReactionPairRow[] {
+    return this.db
+      .prepare(
+        `SELECT reactor_id AS reactorId, author_id AS authorId, COUNT(*) AS count
+         FROM reactions WHERE guild_id = ? AND ts >= ? AND ts < ? AND reactor_id <> author_id
+         GROUP BY reactor_id, author_id ORDER BY count DESC, reactor_id ASC, author_id ASC LIMIT ?`,
+      )
+      .all(guildId, fromTs, toTs, limit) as unknown as ReactionPairRow[];
+  }
+
+  // ---- edits and deletes ----------------------------------------------------
+
+  /** Record an edit (`ts` = the message's editedTimestamp) or delete; repeated events are ignored. */
+  recordMessageEdit(guildId: string, channelId: string, messageId: string, userId: string, kind: 'edit' | 'delete', ts: number): void {
+    this.db
+      .prepare('INSERT OR IGNORE INTO message_edits (guild_id, channel_id, message_id, user_id, kind, ts) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(guildId, channelId, messageId, userId, kind, ts);
+  }
+
+  /** Author of a tracked message, or null when we never recorded it (bots, webhooks, pre-tracking). */
+  messageAuthor(guildId: string, messageId: string): string | null {
+    const row = this.db.prepare('SELECT user_id AS userId FROM messages WHERE guild_id = ? AND message_id = ?').get(guildId, messageId) as { userId: string } | undefined;
+    return row?.userId ?? null;
+  }
+
+  /** Per user edit and delete counts in [fromTs, toTs). */
+  editDeleteCounts(guildId: string, fromTs: number, toTs: number): EditDeleteRow[] {
+    return this.db
+      .prepare(
+        `SELECT user_id AS userId, SUM(kind = 'edit') AS edits, SUM(kind = 'delete') AS deletes
+         FROM message_edits WHERE guild_id = ? AND ts >= ? AND ts < ?
+         GROUP BY user_id ORDER BY user_id ASC`,
+      )
+      .all(guildId, fromTs, toTs) as unknown as EditDeleteRow[];
   }
 
   // ---- reactions --------------------------------------------------------
@@ -945,6 +1093,24 @@ export class BotDatabase {
     return this.db
       .prepare('SELECT author_id AS userId, COUNT(*) AS count FROM reactions WHERE guild_id = ? GROUP BY author_id ORDER BY count DESC, userId ASC LIMIT ?')
       .all(guildId, limit) as unknown as ReactionCountRow[];
+  }
+
+  /**
+   * Per user in [fromTs, toTs): messages sent, reactions received and reactions given
+   * (self-reactions excluded). Includes users with any of the three.
+   */
+  reactionMessageStats(guildId: string, fromTs: number, toTs: number): ReactionMessageRow[] {
+    return this.db
+      .prepare(
+        `SELECT userId, SUM(messages) AS messages, SUM(received) AS received, SUM(given) AS given FROM (
+           SELECT user_id AS userId, COUNT(*) AS messages, 0 AS received, 0 AS given FROM messages WHERE guild_id = ? AND ts >= ? AND ts < ? GROUP BY user_id
+           UNION ALL
+           SELECT author_id AS userId, 0 AS messages, COUNT(*) AS received, 0 AS given FROM reactions WHERE guild_id = ? AND ts >= ? AND ts < ? AND reactor_id <> author_id GROUP BY author_id
+           UNION ALL
+           SELECT reactor_id AS userId, 0 AS messages, 0 AS received, COUNT(*) AS given FROM reactions WHERE guild_id = ? AND ts >= ? AND ts < ? AND reactor_id <> author_id GROUP BY reactor_id
+         ) GROUP BY userId`,
+      )
+      .all(guildId, fromTs, toTs, guildId, fromTs, toTs, guildId, fromTs, toTs) as unknown as ReactionMessageRow[];
   }
 
   /** Emojis most used on this user's messages (i.e. reactions they received). */
@@ -1209,6 +1375,30 @@ export class BotDatabase {
     }
   }
 
+  /**
+   * Close open sessions whose member is no longer in voice (or is in another
+   * channel) — they left while the bot was offline. Sessions end at `endTs`
+   * (the last heartbeat), or at their own `last_seen_at` when `endTs` is null,
+   * never before `started_at`. Returns how many sessions were closed.
+   */
+  closeStaleVoiceSessions(guildId: string, liveUserChannels: Map<string, string>, endTs: number | null): number {
+    const open = this.db
+      .prepare('SELECT id, user_id, channel_id FROM voice_sessions WHERE guild_id = ? AND ended_at IS NULL')
+      .all(guildId) as unknown as { id: number; user_id: string; channel_id: string }[];
+    const stale = open.filter((r) => liveUserChannels.get(r.user_id) !== r.channel_id);
+    if (stale.length === 0) return 0;
+    const stmt = this.db.prepare('UPDATE voice_sessions SET ended_at = MAX(started_at, COALESCE(?, last_seen_at, started_at)) WHERE id = ?');
+    this.db.exec('BEGIN');
+    try {
+      for (const r of stale) stmt.run(endTs, r.id);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return stale.length;
+  }
+
   /** Open sessions count up to `now`. */
   voiceStats(guildId: string, userId: string, now = Date.now()): VoiceStats {
     const row = this.db
@@ -1319,7 +1509,7 @@ export class BotDatabase {
 
   getSettings(guildId: string): Settings {
     const row = this.db.prepare('SELECT * FROM settings WHERE guild_id = ?').get(guildId) as
-      | { stats_channel_id: string | null; weekly_enabled: number; weekly_day: number; weekly_hour: number; timezone: string; embed_channels: string; leveling_enabled: number; levelup_channel_id: string | null }
+      | { stats_channel_id: string | null; weekly_enabled: number; weekly_day: number; weekly_hour: number; timezone: string; embed_channels: string; leveling_enabled: number; levelup_channel_id: string | null; monthly_enabled: number }
       | undefined;
     if (!row) return { guildId, ...DEFAULT_SETTINGS };
     return {
@@ -1332,13 +1522,14 @@ export class BotDatabase {
       embedChannels: JSON.parse(row.embed_channels) as string[],
       levelingEnabled: row.leveling_enabled === 1,
       levelupChannelId: row.levelup_channel_id,
+      monthlyEnabled: row.monthly_enabled === 1,
     };
   }
 
   saveSettings(s: Settings): void {
     this.db
-      .prepare(`INSERT INTO settings (guild_id, stats_channel_id, weekly_enabled, weekly_day, weekly_hour, timezone, embed_channels, leveling_enabled, levelup_channel_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      .prepare(`INSERT INTO settings (guild_id, stats_channel_id, weekly_enabled, weekly_day, weekly_hour, timezone, embed_channels, leveling_enabled, levelup_channel_id, monthly_enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                   stats_channel_id = excluded.stats_channel_id,
                   weekly_enabled = excluded.weekly_enabled,
@@ -1347,8 +1538,9 @@ export class BotDatabase {
                   timezone = excluded.timezone,
                   embed_channels = excluded.embed_channels,
                   leveling_enabled = excluded.leveling_enabled,
-                  levelup_channel_id = excluded.levelup_channel_id`)
-      .run(s.guildId, s.statsChannelId, s.weeklyEnabled ? 1 : 0, s.weeklyDay, s.weeklyHour, s.timezone, JSON.stringify(s.embedChannels), s.levelingEnabled ? 1 : 0, s.levelupChannelId);
+                  levelup_channel_id = excluded.levelup_channel_id,
+                  monthly_enabled = excluded.monthly_enabled`)
+      .run(s.guildId, s.statsChannelId, s.weeklyEnabled ? 1 : 0, s.weeklyDay, s.weeklyHour, s.timezone, JSON.stringify(s.embedChannels), s.levelingEnabled ? 1 : 0, s.levelupChannelId, s.monthlyEnabled ? 1 : 0);
   }
 
   // ---- free games -----------------------------------------------------

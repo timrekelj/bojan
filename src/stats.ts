@@ -78,7 +78,111 @@ export function currentWeekBounds(timeZone: string, now = new Date()): WeekBound
   return { start, end: start + 7 * 86_400_000, key };
 }
 
+// ---- months -------------------------------------------------------------
+
+export interface MonthBounds {
+  start: number; // inclusive, UTC ms (local midnight of day 1)
+  end: number; // exclusive, UTC ms (local midnight of day 1 of the next month)
+  key: string; // YYYY-MM
+}
+
+function monthBoundsFor(timeZone: string, y: number, mo: number): MonthBounds {
+  // Normalise month overflow/underflow (0 -> December of the previous year, 13 -> January).
+  const first = new Date(Date.UTC(y, mo - 1, 1));
+  const fy = first.getUTCFullYear();
+  const fm = first.getUTCMonth() + 1;
+  const next = new Date(Date.UTC(fy, fm, 1));
+  return {
+    start: zonedToUtcMs(timeZone, fy, fm, 1),
+    end: zonedToUtcMs(timeZone, next.getUTCFullYear(), next.getUTCMonth() + 1, 1),
+    key: `${fy}-${String(fm).padStart(2, '0')}`,
+  };
+}
+
+/** The current, in-progress calendar month in `timeZone`. */
+export function currentMonthBounds(timeZone: string, now = new Date()): MonthBounds {
+  const { y, mo } = localParts(timeZone, now);
+  return monthBoundsFor(timeZone, y, mo);
+}
+
+/** The most recently completed calendar month in `timeZone`. */
+export function lastMonthBounds(timeZone: string, now = new Date()): MonthBounds {
+  const { y, mo } = localParts(timeZone, now);
+  return monthBoundsFor(timeZone, y, mo - 1);
+}
+
+/** e.g. "November 2026". */
+export function monthLabel(b: MonthBounds, timeZone: string): string {
+  // Format the middle of the month so DST/offset edges can't tip it into a neighbour.
+  return new Intl.DateTimeFormat('en-GB', { timeZone, month: 'long', year: 'numeric' }).format(new Date((b.start + b.end) / 2));
+}
+
+/** Every local day of the month with a YYYY-MM-DD key (as `messageCountsPerDay`) and a day-number label. */
+export function monthDaySeries(b: MonthBounds, _timeZone: string): { key: string; label: string }[] {
+  const [y, mo] = b.key.split('-').map(Number) as [number, number];
+  const days = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  const out: { key: string; label: string }[] = [];
+  for (let d = 1; d <= days; d++) {
+    out.push({ key: `${b.key}-${String(d).padStart(2, '0')}`, label: String(d) });
+  }
+  return out;
+}
+
+/**
+ * True when the monthly recap is due: `now` is at or after day 1 of the current
+ * local month at `hour`:00 and that month's key was not already sent. The caller
+ * handles first-run seeding.
+ */
+export function isMonthlyDue(timeZone: string, hour: number, now: Date, lastSentKey: string | null | undefined): boolean {
+  const month = currentMonthBounds(timeZone, now);
+  if (lastSentKey === month.key) return false;
+  const [y, mo] = month.key.split('-').map(Number) as [number, number];
+  return now.getTime() >= zonedToUtcMs(timeZone, y, mo, 1, hour);
+}
+
+// ---- awards -------------------------------------------------------------
+
+/** Members need at least this many messages in the week to compete for "Crowd pleaser". */
+export const AWARD_MIN_MESSAGES = 5;
+/** Members need at least this many reactions given in the week to compete for "Silent spectator". */
+export const AWARD_MIN_REACTIONS = 5;
+
+export interface AwardRow {
+  userId: string;
+  messages: number;
+  received: number;
+  given: number;
+}
+
+export type CrowdPleaserRow = AwardRow & { ratio: number };
+
+export function crowdPleasers(rows: AwardRow[], limit: number): CrowdPleaserRow[] {
+  return rows
+    .filter((r) => r.messages >= AWARD_MIN_MESSAGES && r.received > 0)
+    .map((r) => ({ ...r, ratio: r.received / r.messages }))
+    .sort((a, b) => b.ratio - a.ratio || b.received - a.received || (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0))
+    .slice(0, limit);
+}
+
+/** Reacts a lot, talks little: lowest (messages + 1) / reactions given. */
+export function silentSpectators(rows: AwardRow[], limit: number): AwardRow[] {
+  return rows
+    .filter((r) => r.given >= AWARD_MIN_REACTIONS)
+    .sort(
+      (a, b) =>
+        (a.messages + 1) / a.given - (b.messages + 1) / b.given ||
+        b.given - a.given ||
+        (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0),
+    )
+    .slice(0, limit);
+}
+
 // ---- formatting ---------------------------------------------------------
+
+/** Words in a message: runs of non-whitespace characters (0 for empty or attachment-only text). */
+export function countWords(text: string): number {
+  return text.split(/\s+/).filter((w) => w.length > 0).length;
+}
 
 export function fmt(n: number): string {
   return n.toLocaleString('en-US');
@@ -98,6 +202,16 @@ export function fmtDuration(ms: number): string {
   const mins = totalMin % 60;
   if (days > 0) return `${days}d ${hours}h`;
   if (hours > 0) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  return `${mins}m`;
+}
+
+/** Voice time as hours and minutes, never days: "12h 30m", "5h", "45m", "<1m". */
+export function fmtHoursMinutes(ms: number): string {
+  const totalMin = Math.floor(ms / 60_000);
+  if (totalMin < 1) return '<1m';
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  if (hours > 0) return mins > 0 ? `${fmt(hours)}h ${mins}m` : `${fmt(hours)}h`;
   return `${mins}m`;
 }
 

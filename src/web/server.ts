@@ -9,7 +9,7 @@ import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
 import { chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
 import { cachedDeployments, dokployEnabled, fetchDeployments, type DeployResult, type DeployStatus, type DokployConfig } from '../dokploy.js';
-import { postWeeklyStats } from '../scheduler.js';
+import { postMonthlyRecap, postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
 import { createReplayGuard, FREESTUFF_COMPAT_DATE, handleFreeStuffWebhook } from '../freegames/freestuff.js';
 import { parseFreeForm } from '../freegames/form.js';
@@ -591,6 +591,12 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
           : q.weekly === 'error'
             ? { kind: 'error', reason: (q.reason ?? '').slice(0, 200) }
             : null,
+      monthlyFlash:
+        q.monthly === 'sent'
+          ? { kind: 'sent' }
+          : q.monthly === 'error'
+            ? { kind: 'error', reason: (q.reason ?? '').slice(0, 200) }
+            : null,
       challenges: opts.challenges ?? loadChallenges(q),
       free: {
         settings: db.getFreeSettings(config.guildId),
@@ -840,6 +846,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const next: Settings = {
       guildId: config.guildId,
       statsChannelId: str(form.statsChannel) || null,
+      monthlyEnabled: form.monthlyEnabled === '1',
       weeklyEnabled: form.weeklyEnabled === '1',
       weeklyDay: num(form.weeklyDay, current.weeklyDay, 0, 6),
       weeklyHour: num(form.weeklyHour, current.weeklyHour, 0, 23),
@@ -869,6 +876,23 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     }
     console.log(`[web] weekly stats sent manually by ${c.get('session').username} to channel ${result.channelId} (guild ${config.guildId})`);
     return c.redirect('/dashboard/settings?weekly=sent');
+  });
+
+  // Manual monthly recap (last month's). Like the weekly one, never touches the
+  // `monthly:<guild>` state key, so the scheduled post is unaffected.
+  app.post('/monthly/send-now', requireAdmin, async (c) => {
+    const guild = client.guilds.cache.get(config.guildId);
+    if (!guild) {
+      console.error(`[web] monthly recap send-now failed: guild ${config.guildId} not in cache`);
+      return c.redirect(`/dashboard/settings?monthly=error&reason=${encodeURIComponent('guild not available')}`);
+    }
+    const result = await postMonthlyRecap(guild, db, db.getSettings(config.guildId));
+    if (!result.ok) {
+      console.error(`[web] monthly recap send-now failed: ${result.reason} (guild ${config.guildId})`);
+      return c.redirect(`/dashboard/settings?monthly=error&reason=${encodeURIComponent(result.reason.slice(0, 200))}`);
+    }
+    console.log(`[web] monthly recap sent manually by ${c.get('session').username} to channel ${result.channelId} (guild ${config.guildId})`);
+    return c.redirect('/dashboard/settings?monthly=sent');
   });
 
   app.get('/api/stats.json', requireAdmin, (c) => {

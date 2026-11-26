@@ -6,6 +6,7 @@ import {
   Events,
   GatewayIntentBits,
   MessageFlags,
+  Partials,
   PermissionFlagsBits,
   REST,
   Routes,
@@ -18,7 +19,8 @@ import {
 } from 'discord.js';
 import type { BotDatabase } from './db.js';
 import { config } from './config.js';
-import { activityTypeLabel, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
+import { consumeBotDeleted } from './botdeletes.js';
+import { activityTypeLabel, countWords, fmt, fmtDate, fmtDuration, localParts, zonedToUtcMs } from './stats.js';
 import { buildActivityMessage, buildLeaderboardMessage } from './cards.js';
 import { maybeConvert } from './embeds/converter.js';
 import { announceLevelUp, awardMessageXp, awardReactionXp, levelTag, XP_BACKFILL_PER_MESSAGE } from './levels.js';
@@ -38,6 +40,9 @@ export function createClient(): Client {
       GatewayIntentBits.GuildPresences, // privileged: needed to see what members are playing/listening to
       GatewayIntentBits.GuildVoiceStates, // voice channel join/leave tracking
     ],
+    // Receive edit/delete events for messages that aren't in the cache (e.g. posted before a restart).
+    // Handlers that use message fields already check `.partial` and fetch (reactions) or only read ids (delete).
+    partials: [Partials.Message],
   });
 }
 
@@ -277,7 +282,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
             const reactionRows = [];
             for (const m of batch.values()) {
               if (m.author.bot || m.webhookId || !m.author) continue;
-              rows.push({ guildId, channelId: channel.id, userId: m.author.id, ts: m.createdTimestamp, messageId: m.id });
+              rows.push({ guildId, channelId: channel.id, userId: m.author.id, ts: m.createdTimestamp, messageId: m.id, words: countWords(m.content ?? '') });
               // Fetch who reacted to this message (paginated, 100 per request).
               for (const reaction of m.reactions.cache.values()) {
                 const total = reaction.count ?? 0;
@@ -417,6 +422,21 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
     // (re)starts — their real join time is unknown, so it counts from now.
     const now = Date.now();
     for (const guild of ready.guilds.cache.values()) {
+      // Close sessions of members who left voice while the bot was offline,
+      // ending them at the last heartbeat (or their last_seen_at on first run).
+      try {
+        const liveMap = new Map<string, string>();
+        for (const vs of guild.voiceStates.cache.values()) {
+          if (!vs.channelId || vs.member?.user.bot) continue;
+          liveMap.set(vs.id, vs.channelId);
+        }
+        const hb = Number(db.getState(`voice:heartbeat:${guild.id}`));
+        const closed = db.closeStaleVoiceSessions(guild.id, liveMap, Number.isFinite(hb) && hb > 0 ? hb : null);
+        if (closed > 0) console.log(`[bot] closed ${closed} stale voice sessions in guild ${guild.id}`);
+        db.setState(`voice:heartbeat:${guild.id}`, String(Date.now()));
+      } catch (err) {
+        console.error(`[bot] stale voice session cleanup failed in guild ${guild.id}:`, err);
+      }
       for (const vs of guild.voiceStates.cache.values()) {
         if (!vs.channelId || vs.member?.user.bot) continue;
         try {
@@ -430,7 +450,7 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
 
   client.on(Events.MessageCreate, (message: Message) => {
     if (!message.guildId || message.author.bot || message.webhookId) return;
-    db.recordMessage(message.guildId, message.channelId, message.author.id, message.createdTimestamp, message.id);
+    db.recordMessage(message.guildId, message.channelId, message.author.id, message.createdTimestamp, message.id, countWords(message.content));
     const settings = db.getSettings(message.guildId);
     if (settings.levelingEnabled) {
       void handleMessageXp(message, db, settings.levelupChannelId).catch((err) => console.error(`[levels] xp handling failed in guild ${message.guildId}:`, err));
@@ -439,6 +459,37 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
       void maybeConvert(message, db, settings.embedChannels);
     }
     void handleBuilderMessage(message, client, db, builder).catch((err) => console.error('[builder] message handler failed:', err));
+  });
+
+  // Edits: only a changed editedTimestamp counts (embed unfurls and suppress-embeds leave it alone).
+  // The (guild, message, kind, ts) unique index dedupes repeats, e.g. partial old messages.
+  client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
+    void (async () => {
+      try {
+        if (!newMessage.guildId) return;
+        let message = newMessage;
+        if (message.partial) message = await message.fetch();
+        const editedAt = message.editedTimestamp;
+        if (!editedAt || editedAt === oldMessage.editedTimestamp) return;
+        if (!message.author || message.author.bot || message.webhookId) return;
+        db.recordMessageEdit(newMessage.guildId, message.channelId, message.id, message.author.id, 'edit', editedAt);
+      } catch (err) {
+        console.error('[bot] edit tracking failed:', err);
+      }
+    })();
+  });
+
+  // Deletes: the author is usually uncached, so look them up in our own messages table.
+  client.on(Events.MessageDelete, (message) => {
+    try {
+      if (!message.guildId) return;
+      if (consumeBotDeleted(message.id)) return; // the bot removed it (embed conversion)
+      const userId = db.messageAuthor(message.guildId, message.id);
+      if (!userId) return; // bots, webhooks and untracked messages are never in the table
+      db.recordMessageEdit(message.guildId, message.channelId, message.id, userId, 'delete', Date.now());
+    } catch (err) {
+      console.error('[bot] delete tracking failed:', err);
+    }
   });
 
   client.on(Events.MessageReactionAdd, (reaction, user) => {

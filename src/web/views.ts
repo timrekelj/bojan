@@ -690,6 +690,7 @@ export interface SettingsPageData {
   deploy?: DeployStatus;
   saved: boolean;
   weeklyFlash: { kind: 'sent' } | { kind: 'error'; reason: string } | null;
+  monthlyFlash: { kind: 'sent' } | { kind: 'error'; reason: string } | null;
   challenges: ChallengesSectionData;
   free: {
     settings: FreeSettings;
@@ -1063,14 +1064,17 @@ function generalForm(d: SettingsPageData): string {
   const embedChips = d.channels.map((c) => chip('embedChannels', c.id, s.embedChannels.includes(c.id), `#${c.name}`)).join('');
   const schedule = `<div class="row"><div class="row-l"><span class="lbl" id="weeklyWhen">Schedule</span><span class="help">Day and hour, in the timezone below.</span></div><div class="row-c split"><select id="weeklyDay" name="weeklyDay" aria-label="Day">${dayOptions}</select><select id="weeklyHour" name="weeklyHour" aria-label="Hour">${hourOptions}</select></div></div>`;
   const sendNow = `<div class="row"><div class="row-l"><span class="lbl">Test</span><span class="help">Posts last week's stats to the saved channel right now. Doesn't affect the schedule.</span></div><div class="row-c"><button type="submit" class="btn ghost" form="send-now-form" onclick="return confirm('Post last week\\'s stats to the channel now?')">Send now</button></div></div>`;
+  const sendMonthlyNow = `<div class="row"><div class="row-l"><span class="lbl">Test monthly</span><span class="help">Posts last month's recap (two messages) to the saved channel right now. Doesn't affect the schedule.</span></div><div class="row-c"><button type="submit" class="btn ghost" form="monthly-send-now-form" onclick="return confirm('Post last month\\'s recap to the channel now?')">Send monthly recap now</button></div></div>`;
   return `<div class="formgroup stack"><form class="stack" id="general-form" method="post" action="/settings">
-    <section class="card" id="weekly" aria-labelledby="h-weekly"><div class="card-head"><h2 id="h-weekly">Weekly stats</h2></div><p class="card-sub">Post last week's leaderboard to a channel on a schedule.</p>
+    <section class="card" id="weekly" aria-labelledby="h-weekly"><div class="card-head"><h2 id="h-weekly">Weekly &amp; monthly stats</h2></div><p class="card-sub">Post last week's leaderboard every week and a recap of last month on the 1st, to a channel on a schedule.</p>
       <div class="rows">
         ${toggleRow('weeklyEnabled', s.weeklyEnabled, 'Send weekly stats automatically', 'Needs a channel below.')}
+        ${toggleRow('monthlyEnabled', s.monthlyEnabled, 'Send monthly recap automatically', 'Posted on the 1st at the hour above, to the same channel.')}
         ${row({ id: 'statsChannel', label: 'Channel', help: 'Where the weekly stats are posted.', control: selectEl('statsChannel', 'statsChannel', `<option value="">— disabled —</option>${chanOpts(s.statsChannelId)}`) })}
         ${schedule}
         ${row({ id: 'timezone', label: 'Timezone', help: 'IANA name, e.g. Europe/Ljubljana.', control: textEl('timezone', 'timezone', s.timezone, true) })}
         ${sendNow}
+        ${sendMonthlyNow}
       </div>
     </section>
     <section class="card" id="embeds" aria-labelledby="h-embedset"><div class="card-head"><h2 id="h-embedset">Link embeds</h2><span class="sub">${fmt(s.embedChannels.length)} of ${fmt(d.channels.length)} channels</span></div><p class="card-sub">Social links posted in the selected channels are converted to rich embeds.</p>
@@ -1082,8 +1086,8 @@ function generalForm(d: SettingsPageData): string {
         ${row({ id: 'levelupChannel', label: 'Level-up announcements', help: 'Where level-ups are posted (e.g. #bot-testing). Silent = track XP without announcing.', control: selectEl('levelupChannel', 'levelupChannel', `<option value="">— silent —</option>${chanOpts(s.levelupChannelId)}`) })}
       </div>
     </section>
-    <div class="savebar"><span class="muted">Saves weekly stats, link embeds and leveling together.</span><button type="submit">Save settings</button></div>
-  </form><form id="send-now-form" method="post" action="/weekly/send-now"></form></div>`;
+    <div class="savebar"><span class="muted">Saves weekly &amp; monthly stats, link embeds and leveling together.</span><button type="submit">Save settings</button></div>
+  </form><form id="send-now-form" method="post" action="/weekly/send-now"></form><form id="monthly-send-now-form" method="post" action="/monthly/send-now"></form></div>`;
 }
 
 function colorSection(d: SettingsPageData): string {
@@ -1290,7 +1294,7 @@ export function builderSection(d: Pick<SettingsPageData, 'builder' | 'settings'>
 
 // Strips the one-shot flash params so a refresh doesn't show the toast again.
 const CLEAR_FLASH_SCRIPT =
-  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('colorSaved');u.searchParams.delete('colorError');u.searchParams.delete('weekly');u.searchParams.delete('reason');u.searchParams.delete('challengeCreated');u.searchParams.delete('challengeError');u.searchParams.delete('challengeEnded');u.searchParams.delete('challengeDeleted');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
+  "<script>(()=>{const u=new URL(location.href);u.searchParams.delete('saved');u.searchParams.delete('freeSaved');u.searchParams.delete('builderSaved');u.searchParams.delete('builderError');u.searchParams.delete('colorSaved');u.searchParams.delete('colorError');u.searchParams.delete('weekly');u.searchParams.delete('monthly');u.searchParams.delete('reason');u.searchParams.delete('challengeCreated');u.searchParams.delete('challengeError');u.searchParams.delete('challengeEnded');u.searchParams.delete('challengeDeleted');history.replaceState(null,'',u.pathname+u.search+u.hash)})()</script>";
 
 /** Settings page: one card per feature; forms save independently (general, colours, free games, AI assistant). */
 export function settingsPage(d: SettingsPageData, now: number = Date.now()): string {
@@ -1298,11 +1302,13 @@ export function settingsPage(d: SettingsPageData, now: number = Date.now()): str
     d.saved ? '<div class="flash" role="status">Settings saved.</div>' : '',
     d.weeklyFlash?.kind === 'sent' ? '<div class="flash" role="status">Weekly stats sent.</div>' : '',
     d.weeklyFlash?.kind === 'error' ? `<div class="flash" role="alert">Couldn't send weekly stats: ${escapeHtml(d.weeklyFlash.reason || 'unknown error')}</div>` : '',
+    d.monthlyFlash?.kind === 'sent' ? '<div class="flash" role="status">Monthly recap sent.</div>' : '',
+    d.monthlyFlash?.kind === 'error' ? `<div class="flash" role="alert">Couldn't send monthly recap: ${escapeHtml(d.monthlyFlash.reason || 'unknown error')}</div>` : '',
     d.free.flash?.kind === 'saved' ? '<div class="flash" role="status">Free games settings saved.</div>' : '',
   ].join('');
   const anchors: [string, string][] = [['weekly', 'Weekly'], ['embeds', 'Embeds'], ['leveling', 'Leveling'], ['colors', 'Colours'], ['free', 'Free games'], ['challenges', 'Challenges'], ['builder', 'Assistant']];
   const secnav = `<nav class="secnav" aria-label="Settings sections"><div class="secnav-in">${anchors.map(([id, label]) => `<a href="#${id}">${label}</a>`).join('')}</div></nav>`;
-  const body = `${flashes}${generalForm(d)}${colorSection(d)}${freeSection(d)}${challengeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.free.flash || d.builder.flash || d.color.flash || d.challenges.flash ? CLEAR_FLASH_SCRIPT : ''}`;
+  const body = `${flashes}${generalForm(d)}${colorSection(d)}${freeSection(d)}${challengeSection(d)}${builderSection(d)}${d.saved || d.weeklyFlash || d.monthlyFlash || d.free.flash || d.builder.flash || d.color.flash || d.challenges.flash ? CLEAR_FLASH_SCRIPT : ''}`;
   return layout({ active: 'settings', title: 'Settings', sub: '<p class="hero-sub">Everything the bot does is configured here. Each section saves on its own.</p>', live: 'quiet', between: secnav, body, now }, { user: d.user, deploy: d.deploy });
 }
 
