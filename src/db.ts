@@ -17,6 +17,8 @@ export interface Settings {
   levelingEnabled: boolean;
   levelupChannelId: string | null; // null = track XP but never announce
   monthlyEnabled: boolean;
+  /** Where every new challenge card is posted (forum post or message); null = not set. */
+  challengeChannelId: string | null;
 }
 
 export interface MessageActivityRow {
@@ -249,7 +251,8 @@ CREATE TABLE IF NOT EXISTS settings (
   embed_channels TEXT NOT NULL DEFAULT '[]',
   leveling_enabled INTEGER NOT NULL DEFAULT 1,
   levelup_channel_id TEXT,
-  monthly_enabled INTEGER NOT NULL DEFAULT 1
+  monthly_enabled INTEGER NOT NULL DEFAULT 1,
+  challenge_channel_id TEXT DEFAULT '1575504788999639061'
 );
 
 CREATE TABLE IF NOT EXISTS message_edits (
@@ -451,6 +454,7 @@ CREATE TABLE IF NOT EXISTS challenges (
   ends_at INTEGER NOT NULL,
   channel_id TEXT NOT NULL,
   message_id TEXT,
+  thread_id TEXT,
   reward_role_id TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   created_by TEXT NOT NULL,
@@ -625,6 +629,8 @@ export interface Challenge {
   endsAt: number;
   channelId: string;
   messageId: string | null;
+  /** Forum post thread id when the card lives in a forum channel. */
+  threadId: string | null;
   rewardRoleId: string | null;
   /** Stored status; the ticker moves upcoming -> active -> ended. */
   status: 'upcoming' | 'active' | 'ended';
@@ -698,6 +704,7 @@ function challengeFromRow(r: Record<string, unknown>): Challenge {
     endsAt: r.ends_at as number,
     channelId: r.channel_id as string,
     messageId: (r.message_id as string | null) ?? null,
+    threadId: (r.thread_id as string | null) ?? null,
     rewardRoleId: (r.reward_role_id as string | null) ?? null,
     status: r.status === 'ended' ? 'ended' : r.status === 'upcoming' ? 'upcoming' : 'active',
     createdBy: r.created_by as string,
@@ -875,6 +882,7 @@ const DEFAULT_SETTINGS: Omit<Settings, 'guildId'> = {
   levelingEnabled: true,
   levelupChannelId: null,
   monthlyEnabled: true,
+  challengeChannelId: '1575504788999639061',
 };
 
 export class BotDatabase {
@@ -907,6 +915,9 @@ export class BotDatabase {
     }
     if (!settingsCols.some((c) => c.name === 'monthly_enabled')) {
       this.db.exec('ALTER TABLE settings ADD COLUMN monthly_enabled INTEGER NOT NULL DEFAULT 1');
+    }
+    if (!settingsCols.some((c) => c.name === 'challenge_channel_id')) {
+      this.db.exec("ALTER TABLE settings ADD COLUMN challenge_channel_id TEXT DEFAULT '1575504788999639061'");
     }
     // Migration for messages recorded before word counts existed (old rows stay NULL).
     const messageCols = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
@@ -947,6 +958,9 @@ export class BotDatabase {
     const challengeCols = this.db.prepare('PRAGMA table_info(challenges)').all() as { name: string }[];
     if (!challengeCols.some((c) => c.name === 'label')) {
       this.db.exec('ALTER TABLE challenges ADD COLUMN label TEXT');
+    }
+    if (!challengeCols.some((c) => c.name === 'thread_id')) {
+      this.db.exec('ALTER TABLE challenges ADD COLUMN thread_id TEXT');
     }
     const challengeGoalCols = this.db.prepare('PRAGMA table_info(challenge_goals)').all() as { name: string }[];
     if (!challengeGoalCols.some((c) => c.name === 'label')) {
@@ -1662,7 +1676,7 @@ export class BotDatabase {
 
   getSettings(guildId: string): Settings {
     const row = this.db.prepare('SELECT * FROM settings WHERE guild_id = ?').get(guildId) as
-      | { stats_channel_id: string | null; weekly_enabled: number; weekly_day: number; weekly_hour: number; timezone: string; embed_channels: string; leveling_enabled: number; levelup_channel_id: string | null; monthly_enabled: number }
+      | { stats_channel_id: string | null; weekly_enabled: number; weekly_day: number; weekly_hour: number; timezone: string; embed_channels: string; leveling_enabled: number; levelup_channel_id: string | null; monthly_enabled: number; challenge_channel_id: string | null }
       | undefined;
     if (!row) return { guildId, ...DEFAULT_SETTINGS };
     return {
@@ -1676,13 +1690,14 @@ export class BotDatabase {
       levelingEnabled: row.leveling_enabled === 1,
       levelupChannelId: row.levelup_channel_id,
       monthlyEnabled: row.monthly_enabled === 1,
+      challengeChannelId: row.challenge_channel_id,
     };
   }
 
   saveSettings(s: Settings): void {
     this.db
-      .prepare(`INSERT INTO settings (guild_id, stats_channel_id, weekly_enabled, weekly_day, weekly_hour, timezone, embed_channels, leveling_enabled, levelup_channel_id, monthly_enabled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      .prepare(`INSERT INTO settings (guild_id, stats_channel_id, weekly_enabled, weekly_day, weekly_hour, timezone, embed_channels, leveling_enabled, levelup_channel_id, monthly_enabled, challenge_channel_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                   stats_channel_id = excluded.stats_channel_id,
                   weekly_enabled = excluded.weekly_enabled,
@@ -1692,8 +1707,9 @@ export class BotDatabase {
                   embed_channels = excluded.embed_channels,
                   leveling_enabled = excluded.leveling_enabled,
                   levelup_channel_id = excluded.levelup_channel_id,
-                  monthly_enabled = excluded.monthly_enabled`)
-      .run(s.guildId, s.statsChannelId, s.weeklyEnabled ? 1 : 0, s.weeklyDay, s.weeklyHour, s.timezone, JSON.stringify(s.embedChannels), s.levelingEnabled ? 1 : 0, s.levelupChannelId, s.monthlyEnabled ? 1 : 0);
+                  monthly_enabled = excluded.monthly_enabled,
+                  challenge_channel_id = excluded.challenge_channel_id`)
+      .run(s.guildId, s.statsChannelId, s.weeklyEnabled ? 1 : 0, s.weeklyDay, s.weeklyHour, s.timezone, JSON.stringify(s.embedChannels), s.levelingEnabled ? 1 : 0, s.levelupChannelId, s.monthlyEnabled ? 1 : 0, s.challengeChannelId);
   }
 
   // ---- free games -----------------------------------------------------
@@ -2145,8 +2161,8 @@ export class BotDatabase {
     };
   }
 
-  setChallengeMessage(id: number, messageId: string | null): void {
-    this.db.prepare('UPDATE challenges SET message_id = ? WHERE id = ?').run(messageId, id);
+  setChallengeMessage(id: number, messageId: string | null, threadId: string | null = null): void {
+    this.db.prepare('UPDATE challenges SET message_id = ?, thread_id = ? WHERE id = ?').run(messageId, threadId, id);
   }
 
   /** upcoming -> active; false when it was not upcoming (ticker/manual race). */

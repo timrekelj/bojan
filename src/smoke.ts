@@ -2,7 +2,7 @@
 // detection without needing a Discord token. Run with: npm run smoke
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { activityHeatmap, conversationStarters, earlyBirds, heatmapPeaks, longestStreaks, nightOwls, novelists, oneWorders, typoKings, voiceBuddies, voiceTotalMs, voiceTotals } from './recap.js';
-import { MessageFlags } from 'discord.js';
+import { MessageFlags, ChannelType } from 'discord.js';
 import { renderDailyChart, renderDailyChartSvg, renderHeatmap, renderHeatmapSvg } from './chart.js';
 import { awardsText, buildWeeklyStatsMessage } from './weekly.js';
 import { gatherMonthlyData, isWeeklyDue, monthlyAction } from './scheduler.js';
@@ -18,6 +18,7 @@ import { fmtHoursMinutes, currentMonthBounds, isMonthlyDue, lastMonthBounds, mon
 import { filterGames, isBetaTitle } from './freegames/filters.js';
 import { buildFreeGameMessage, priceLine } from './freegames/cards.js';
 import { buildChallengeCard } from './challenges/cards.js';
+import { createAndPostChallenge, isForumChannelType } from './challenges/actions.js';
 import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challengeLogId, challengeStatus, challengeWindow, dayEndMs, dayStartMs, defaultEndDate, emptyDraft, formatChallengeTarget, formatChallengeValue, goalRemaining, goalShare, goalTargetValue, MAX_SET_VALUE, overallRankProgress, parseChallengeButtonId, parseChallengeLogId, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry } from './challenges/form.js';
 import { CHALLENGE_METRICS, goalName, isManualMetric, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
@@ -104,9 +105,10 @@ check(
 
 const s = db.getSettings(G);
 check('default settings', s.weeklyEnabled && s.weeklyDay === 1 && s.weeklyHour === 9 && s.timezone === 'UTC' && s.embedChannels.length === 0);
-db.saveSettings({ ...s, statsChannelId: 'chan9', weeklyDay: 5, weeklyHour: 18, timezone: 'Europe/Ljubljana', embedChannels: ['c1', 'c2'] });
+check('default challenge channel', s.challengeChannelId === '1575504788999639061');
+db.saveSettings({ ...s, statsChannelId: 'chan9', weeklyDay: 5, weeklyHour: 18, timezone: 'Europe/Ljubljana', embedChannels: ['c1', 'c2'], challengeChannelId: 'ch9' });
 const s2 = db.getSettings(G);
-check('settings roundtrip', s2.statsChannelId === 'chan9' && s2.weeklyDay === 5 && s2.weeklyHour === 18 && s2.timezone === 'Europe/Ljubljana' && s2.embedChannels.join() === 'c1,c2');
+check('settings roundtrip', s2.statsChannelId === 'chan9' && s2.weeklyDay === 5 && s2.weeklyHour === 18 && s2.timezone === 'Europe/Ljubljana' && s2.embedChannels.join() === 'c1,c2' && s2.challengeChannelId === 'ch9');
 check('default leveling settings', s.levelingEnabled && s.levelupChannelId === null);
 
 // ---- leveling (MEE6-style XP) ------------------------------------------
@@ -923,12 +925,13 @@ rmSync(dir, { recursive: true, force: true });
     const reqRes = await get('/dashboard/requests');
     check('route: logs + requests pages render', logsRes.status === 200 && (await logsRes.text()).includes('id="live-logs"') && reqRes.status === 200 && (await reqRes.text()).includes('id="live-reqs"'));
 
-    const p1 = await postForm('/settings', 'weeklyEnabled=1&monthlyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana&embedChannels=c1&embedChannels=c2&levelingEnabled=1&levelupChannel=');
+    const p1 = await postForm('/settings', 'weeklyEnabled=1&monthlyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana&embedChannels=c1&embedChannels=c2&levelingEnabled=1&levelupChannel=&challengeChannel=ch5');
     const saved = wdb.getSettings(cfg.guildId);
-    check('route: POST /settings saves and redirects to the settings page', p1.status === 302 && p1.headers.get('location') === '/dashboard/settings?saved=1' && saved.weeklyDay === 3 && saved.weeklyHour === 18 && saved.statsChannelId === 'c1' && saved.embedChannels.join() === 'c1,c2' && saved.levelingEnabled && saved.levelupChannelId === null);
+    check('route: POST /settings saves and redirects to the settings page', p1.status === 302 && p1.headers.get('location') === '/dashboard/settings?saved=1' && saved.weeklyDay === 3 && saved.weeklyHour === 18 && saved.statsChannelId === 'c1' && saved.embedChannels.join() === 'c1,c2' && saved.levelingEnabled && saved.levelupChannelId === null && saved.challengeChannelId === 'ch5');
     check('route: POST /settings stores monthlyEnabled', saved.monthlyEnabled === true && saved.weeklyEnabled === true);
     await postForm('/settings', 'weeklyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana');
     check('route: unchecked monthly toggle saves false', wdb.getSettings(cfg.guildId).monthlyEnabled === false && wdb.getSettings(cfg.guildId).weeklyEnabled === true);
+    check('route: POST /settings without the challenge field keeps the saved channel', wdb.getSettings(cfg.guildId).challengeChannelId === 'ch5');
     const p2 = await postForm('/free-settings', 'channel=&pingRole=&stores=steam&includeBeta=1');
     check('route: POST /free-settings redirects to #free', p2.status === 302 && p2.headers.get('location') === '/dashboard/settings?freeSaved=1#free' && wdb.getFreeSettings(cfg.guildId).includeBeta === true && wdb.getFreeSettings(cfg.guildId).stores.join() === 'steam');
     const p3 = await postForm('/builder-settings', 'chatEnabled=1&chatModel=opencode-go%2Fa&chatDecisionModel=opencode-go%2Fb&chatLanguages=English&model=opencode-go%2Fc&maxParallelBuilds=2&limitThreshold=90');
@@ -1187,7 +1190,8 @@ rmSync(dir, { recursive: true, force: true });
   check('chromeParts: deploy chip only when configured', Object.keys(chromeParts(null, T)).length === 0 && chromeParts({ ok: false, error: 'x' }, T)['live-deploy']!.includes('Deploy status unavailable') && !dashboardPage({ ...ovData, deploy: null }, T).includes('id="live-deploy"'));
 
   const setData: SettingsPageData = {
-    settings: { guildId: G, statsChannelId: 'c2', weeklyEnabled: true, weeklyDay: 3, weeklyHour: 18, timezone: 'Europe/Ljubljana', embedChannels: ['c1'], levelingEnabled: false, levelupChannelId: null, monthlyEnabled: true },
+    settings: { guildId: G, statsChannelId: 'c2', weeklyEnabled: true, weeklyDay: 3, weeklyHour: 18, timezone: 'Europe/Ljubljana', embedChannels: ['c1'], levelingEnabled: false, levelupChannelId: null, monthlyEnabled: true, challengeChannelId: 'c1' },
+    challengeChannels: [{ id: 'c1', name: 'general' }, { id: 'c2', name: 'challenges' }],
     channels: [{ id: 'c1', name: 'general' }, { id: 'c2', name: 'bots <b>' }],
     user: { username: 'Two', avatar: null },
     deploy: null,
@@ -1220,6 +1224,7 @@ rmSync(dir, { recursive: true, force: true });
       general.includes('<input type="checkbox" name="embedChannels" value="c2"><span>#bots &lt;b&gt;</span>') &&
       general.includes('name="levelingEnabled" value="1">') &&
       general.includes('<select id="levelupChannel" name="levelupChannel"') && general.includes('<option value="">— silent —</option>') &&
+      general.includes('<select id="challengeChannel" name="challengeChannel"') && general.includes('<option value="c1" selected>#general</option>') &&
       (general.match(/type="submit"/g) ?? []).length === 3 &&
       general.includes('form="send-now-form"') && general.includes('confirm(') &&
       setHtmlV.includes('<form id="send-now-form" method="post" action="/weekly/send-now"></form>') &&
@@ -1234,8 +1239,8 @@ rmSync(dir, { recursive: true, force: true });
       !general.includes('name="stores"') && !general.includes('name="chatModel"'),
   );
   check(
-    'settingsPage: weekly, embeds and leveling are separate cards inside the one general form',
-    ['id="weekly"', 'id="embeds"', 'id="leveling"'].every((id) => general.includes(`<section class="card" ${id}`)) && (general.match(/<section class="card"/g) ?? []).length === 3,
+    'settingsPage: weekly, embeds, leveling and challenge posts are separate cards inside the one general form',
+    ['id="weekly"', 'id="embeds"', 'id="leveling"', 'id="challenge-posting"'].every((id) => general.includes(`<section class="card" ${id}`)) && (general.match(/<section class="card"/g) ?? []).length === 4,
   );
   check(
     'settingsPage: free games form keeps its field names',
@@ -1265,8 +1270,8 @@ rmSync(dir, { recursive: true, force: true });
   check(
     'settingsPage: section nav, labels tied to inputs, flash, no live polling without Dokploy',
     setHtmlV.includes('<nav class="secnav" aria-label="Settings sections">') &&
-      ['weekly', 'embeds', 'leveling', 'colors', 'free', 'builder'].every((id) => setHtmlV.includes(`<a href="#${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
-      ['statsChannel', 'timezone', 'levelupChannel', 'freeChannel', 'freeRole', 'chatModel', 'chatDecisionModel', 'chatLanguages', 'builderModel', 'maxParallelBuilds', 'limitThreshold'].every((id) => setHtmlV.includes(`<label for="${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
+      ['weekly', 'embeds', 'leveling', 'challenge-posting', 'colors', 'free', 'builder'].every((id) => setHtmlV.includes(`<a href="#${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
+      ['statsChannel', 'timezone', 'levelupChannel', 'challengeChannel', 'freeChannel', 'freeRole', 'chatModel', 'chatDecisionModel', 'chatLanguages', 'builderModel', 'maxParallelBuilds', 'limitThreshold'].every((id) => setHtmlV.includes(`<label for="${id}">`) && setHtmlV.includes(` id="${id}"`)) &&
       setHtmlV.includes('<div class="flash" role="status">Settings saved.</div>') && setHtmlV.includes("searchParams.delete('saved')") &&
       setHtmlV.includes('<a href="/dashboard/settings" aria-current="page">') && (setHtmlV.match(/<h1/g) ?? []).length === 1 &&
       !setHtmlV.includes('data-live=') && !setHtmlV.includes(LIVE_SCRIPT) && !setHtmlV.includes('id="livestat"'),
@@ -1277,10 +1282,10 @@ rmSync(dir, { recursive: true, force: true });
   check('builderSection: standalone card with its own form; no meters without limits', bsec.startsWith('<section class="card" id="builder"') && bsec.includes('action="/builder-settings"') && bsec.includes('OPENCODE_PASSWORD not set') && bsec.includes('Agent server not checked') && !bsec.includes('class="meter"'));
 
   const chData: ChallengesPageData = {
-    wizard: { step: 1, draft: { name: 'Skelce <x>', description: 'Do konca leta.', metric: 'messages', activityName: '', label: '', target: 500, startDate: '', endDate: '2026-12-31', channelId: 'c1', rewardRoleId: 'r1' }, errors: [] },
+    wizard: { step: 1, draft: { name: 'Skelce <x>', description: 'Do konca leta.', metric: 'messages', activityName: '', label: '', target: 500, startDate: '', endDate: '2026-12-31', rewardRoleId: 'r1' }, errors: [] },
     list: [
-      { challenge: { id: 7, guildId: G, name: 'Skelce <x>', description: 'Do konca leta.', metric: 'messages', activityName: null, label: null, target: 500, startsAt: T - 1000, endsAt: T + 86_400_000, channelId: 'c1', messageId: 'm', rewardRoleId: null, status: 'active', createdBy: 'a', createdAt: T, endedAt: null }, status: 'active', joined: 2 },
-      { challenge: { id: 8, guildId: G, name: 'Future', description: '', metric: 'voice', activityName: null, label: null, target: 60, startsAt: T + 86_400_000, endsAt: T + 2 * 86_400_000, channelId: 'c1', messageId: 'm2', rewardRoleId: null, status: 'upcoming', createdBy: 'a', createdAt: T, endedAt: null }, status: 'upcoming', joined: 0 },
+      { challenge: { id: 7, guildId: G, name: 'Skelce <x>', description: 'Do konca leta.', metric: 'messages', activityName: null, label: null, target: 500, startsAt: T - 1000, endsAt: T + 86_400_000, channelId: 'c1', messageId: 'm', threadId: null, rewardRoleId: null, status: 'active', createdBy: 'a', createdAt: T, endedAt: null }, status: 'active', joined: 2 },
+      { challenge: { id: 8, guildId: G, name: 'Future', description: '', metric: 'voice', activityName: null, label: null, target: 60, startsAt: T + 86_400_000, endsAt: T + 2 * 86_400_000, channelId: 'c1', messageId: 'm2', threadId: null, rewardRoleId: null, status: 'upcoming', createdBy: 'a', createdAt: T, endedAt: null }, status: 'upcoming', joined: 0 },
     ],
     counts: { all: 12, upcoming: 3, active: 8, ended: 1 },
     status: 'all',
@@ -1292,6 +1297,7 @@ rmSync(dir, { recursive: true, force: true });
     channels: [{ id: 'c1', name: 'general' }],
     roles: [{ id: 'r1', name: 'Gamers' }],
     activityNames: ['Counter-Strike 2'],
+    challengeChannelId: 'c1',
     canManageRoles: true,
     timezone: 'Europe/Ljubljana',
     flash: null,
@@ -1315,14 +1321,15 @@ rmSync(dir, { recursive: true, force: true });
     'challengesPage: step 2 opens the wizard and carries step 1 as hidden inputs',
     chStep2.includes('id="challenge-new" open') && chStep2.includes('<input type="hidden" name="step" value="2">') &&
       chStep2.includes('<input type="hidden" name="name" value="Skelce &lt;x&gt;">') && chStep2.includes('name="metric" value="messages"') &&
-      chStep2.includes('id="challengeTarget"') && chStep2.includes('id="challengeStart"') && chStep2.includes('id="challengeEnd"') && chStep2.includes('id="challengeChannel"') && chStep2.includes('Step 2 of 3') &&
+      chStep2.includes('id="challengeTarget"') && chStep2.includes('id="challengeStart"') && chStep2.includes('id="challengeEnd"') && !chStep2.includes('name="challengeChannel"') && !chStep2.includes('name="channelId"') && chStep2.includes('Posted in the challenge channel from Settings.') && chStep2.includes('Step 2 of 3') &&
       chStep2.includes('Target (optional)') && chStep2.includes('name="nav" value="back"') && chStep2.includes('formnovalidate'),
   );
   const chStep3 = challengesPage({ ...chData, wizard: { step: 3, draft: chData.wizard.draft, errors: ['Bad <thing>'] } }, T);
   check(
     'challengesPage: step 3 summary, escaped errors, Create submit',
     chStep3.includes('id="challenge-new" open') && chStep3.includes('<input type="hidden" name="step" value="3">') && chStep3.includes('<input type="hidden" name="target" value="500">') &&
-      chStep3.includes('Create challenge') && chStep3.includes('Bad &lt;thing&gt;') && !chStep3.includes('Bad <thing>') && chStep3.includes('name="nav" value="back"') && chStep3.includes('target <b>500</b>'),
+      chStep3.includes('Create challenge') && chStep3.includes('Bad &lt;thing&gt;') && !chStep3.includes('Bad <thing>') && chStep3.includes('name="nav" value="back"') && chStep3.includes('target <b>500</b>') &&
+      chStep3.includes('· #general'),
   );
   const chStep3NoTarget = challengesPage({ ...chData, wizard: { step: 3, draft: { ...chData.wizard.draft, metric: 'custom', label: 'Squats', target: 0 }, errors: [] } }, T);
   check(
@@ -1331,7 +1338,7 @@ rmSync(dir, { recursive: true, force: true });
   );
 
   const chDetail: ChallengeDetailData = {
-    challenge: { id: 7, guildId: G, name: 'Skelce <x>', description: 'Do konca leta.', metric: 'messages', activityName: null, label: null, target: 500, startsAt: T - 1000, endsAt: T + 86_400_000, channelId: 'c1', messageId: 'm', rewardRoleId: 'r1', status: 'active', createdBy: 'admin <a>', createdAt: T, endedAt: null },
+    challenge: { id: 7, guildId: G, name: 'Skelce <x>', description: 'Do konca leta.', metric: 'messages', activityName: null, label: null, target: 500, startsAt: T - 1000, endsAt: T + 86_400_000, channelId: 'c1', messageId: 'm', threadId: null, rewardRoleId: 'r1', status: 'active', createdBy: 'admin <a>', createdAt: T, endedAt: null },
     status: 'active',
     tab: 'overview',
     joined: 2,
@@ -2045,7 +2052,7 @@ rmSync(dir, { recursive: true, force: true });
 
   // ---- challenges (izzivi) ----------------------------------------------------
   const chNow = Date.UTC(2026, 5, 1, 12);
-  const wctx = { channels: new Set(['c1']), roles: new Set(['r1']), now: chNow };
+  const wctx = { roles: new Set(['r1']), now: chNow };
   check(
     'challenge form: default end is +7 UTC days, day bounds are midnights',
     defaultEndDate(chNow) === '2026-06-08' && dayStartMs('2026-06-08') === Date.UTC(2026, 5, 8) && dayEndMs('2026-06-08') === Date.UTC(2026, 5, 9) && dayStartMs('2026-02-30') === null && emptyDraft(chNow).endDate === '2026-06-08',
@@ -2085,13 +2092,13 @@ rmSync(dir, { recursive: true, force: true });
   const step1Default = parseWizardStep({ name: 'Skelce', metric: 'messages' }, 1, wctx);
   check('parseWizardStep: step 1 fills the default +7 day end date', step1Default.errors.length === 0 && step1Default.draft.endDate === defaultEndDate(chNow));
   const step2 = parseWizardStep({ step: '2', name: 'Skelce', description: '', metric: 'voice', activityName: '', target: '120', startDate: '2026-06-02', endDate: '2026-06-30', channelId: 'c1', rewardRoleId: 'r1' }, 2, wctx);
-  check('parseWizardStep: step 2 accepts a full schedule', step2.errors.length === 0 && step2.draft.target === 120 && step2.draft.channelId === 'c1');
-  const badStep = parseWizardStep({ metric: 'nope', name: '', endDate: 'not-a-date', target: '-5', channelId: 'c9', rewardRoleId: 'r9' }, 3, wctx);
+  check('parseWizardStep: step 2 accepts a full schedule', step2.errors.length === 0 && step2.draft.target === 120 && step2.draft.rewardRoleId === 'r1');
+  const badStep = parseWizardStep({ metric: 'nope', name: '', endDate: 'not-a-date', target: '-5', rewardRoleId: 'r9' }, 3, wctx);
   check(
-    'parseWizardStep: reports name, metric, target, date, channel and role errors',
-    badStep.errors.length >= 6 &&
+    'parseWizardStep: reports name, metric, target, date and role errors',
+    badStep.errors.length >= 5 &&
       badStep.errors.some((e) => e.includes('name')) && badStep.errors.some((e) => e.includes('metric')) && badStep.errors.some((e) => e.includes('target')) &&
-      badStep.errors.some((e) => e.includes('end date')) && badStep.errors.some((e) => e.includes('channel')) && badStep.errors.some((e) => e.includes('role')),
+      badStep.errors.some((e) => e.includes('end date')) && badStep.errors.some((e) => e.includes('role')),
     badStep.errors.join(' | '),
   );
   const activityStep = parseWizardStep({ name: 'CS', metric: 'activity', activityName: '', endDate: '2026-12-31' }, 1, wctx);
@@ -2249,8 +2256,36 @@ rmSync(dir, { recursive: true, force: true });
     chDb.listChallenges(CHG, { sort: 'name', now: chNow }).map((c) => c.name).join() === 'Cancelled,Future,Skelce' &&
       chDb.listChallenges(CHG, { sort: 'ending', now: chNow }).map((c) => c.id)[0] === chChallenge.id,
   );
-  chDb.setChallengeMessage(chChallenge.id, 'm1');
-  check('challenges DB: message id, recent list, pending list', chDb.getChallenge(chChallenge.id)?.messageId === 'm1' && chDb.recentChallenges(CHG).some((c) => c.id === chChallenge.id) && chDb.pendingChallenges().some((c) => c.id === chChallenge.id));
+  chDb.setChallengeMessage(chChallenge.id, 'm1', 't1');
+  check(
+    'challenges DB: message id and forum thread round-trip, recent list, pending list',
+    chDb.getChallenge(chChallenge.id)?.messageId === 'm1' && chDb.getChallenge(chChallenge.id)?.threadId === 't1' &&
+      chDb.recentChallenges(CHG).some((c) => c.id === chChallenge.id) && chDb.pendingChallenges().some((c) => c.id === chChallenge.id),
+  );
+  check(
+    'isForumChannelType: forum and media get one post, text and announcement one message',
+    isForumChannelType(ChannelType.GuildForum) && isForumChannelType(ChannelType.GuildMedia) &&
+      !isForumChannelType(ChannelType.GuildText) && !isForumChannelType(ChannelType.GuildAnnouncement),
+  );
+  const chInput = { guildId: CHG, name: 'Forum time', description: '', metric: 'messages' as const, activityName: null, label: null, target: 10, startsAt: chNow - 1000, endsAt: chNow + 86_400_000, channelId: 'cf', rewardRoleId: null, createdBy: 'admin', createdByName: 'Admin' };
+  const forumCreates: { name: string; message: { flags: number; components: unknown[] } }[] = [];
+  const fakeForum = { type: ChannelType.GuildForum, threads: { create: async (o: (typeof forumCreates)[number]) => { forumCreates.push(o); return { id: 'th1' }; } } };
+  const forumRes = await createAndPostChallenge(chDb, chInput, fakeForum as never, chNow);
+  const forumRow = forumRes.ok ? chDb.getChallenge(forumRes.challenge.id) : null;
+  check(
+    'createAndPostChallenge: forum channel opens one post and stores thread + message ids',
+    forumRes.ok && forumRes.challenge.threadId === 'th1' && forumRes.challenge.messageId === 'th1' &&
+      forumRow?.threadId === 'th1' && forumRow?.messageId === 'th1' && forumRow?.channelId === 'cf' &&
+      forumCreates.length === 1 && forumCreates[0]?.name === 'Forum time' && forumCreates[0]?.message.flags === MessageFlags.IsComponentsV2 && Array.isArray(forumCreates[0]?.message.components),
+  );
+  const fakeText = { type: ChannelType.GuildText, send: async () => ({ id: 'm2' }) };
+  const textRes = await createAndPostChallenge(chDb, { ...chInput, name: 'Text time', channelId: 'ct' }, fakeText as never, chNow);
+  const textRow = textRes.ok ? chDb.getChallenge(textRes.challenge.id) : null;
+  check(
+    'createAndPostChallenge: text channel sends one message and leaves the thread empty',
+    textRes.ok && textRes.challenge.messageId === 'm2' && textRes.challenge.threadId === null &&
+      textRow?.messageId === 'm2' && textRow?.threadId === null && textRow?.channelId === 'ct',
+  );
   check('challenges DB: endChallenge is idempotent and keeps the first timestamp', chDb.endChallenge(chChallenge.id, chNow + 5) && !chDb.endChallenge(chChallenge.id, chNow + 6) && chDb.getChallenge(chChallenge.id)?.endedAt === chNow + 5 && !chDb.pendingChallenges().some((c) => c.id === chChallenge.id));
 
   const chLabelled = chDb.createChallenge(
@@ -2316,7 +2351,7 @@ rmSync(dir, { recursive: true, force: true });
   check('challenges DB: startup backfill gives legacy challenges one goal', bfGoals.length === 1 && bfGoals[0]?.metric === 'messages' && bfGoals[0]?.target === 250 && bfGoals[0]?.position === 0);
   bfDb.close();
 
-  const cardChallenge = { id: 7, guildId: 'g', name: 'Skelce', description: 'Do konca leta.', metric: 'messages' as const, activityName: null, label: null, target: 500, startsAt: chNow - 1000, endsAt: chNow + 86_400_000, channelId: 'c', messageId: 'm', rewardRoleId: null, status: 'active' as const, createdBy: 'a', createdAt: chNow, endedAt: null };
+  const cardChallenge = { id: 7, guildId: 'g', name: 'Skelce', description: 'Do konca leta.', metric: 'messages' as const, activityName: null, label: null, target: 500, startsAt: chNow - 1000, endsAt: chNow + 86_400_000, channelId: 'c', messageId: 'm', threadId: null, rewardRoleId: null, status: 'active' as const, createdBy: 'a', createdAt: chNow, endedAt: null };
   const cardParticipants = [
     { challengeId: 7, userId: 'u1', displayName: 'Ana', joinedAt: chNow - 500 },
     { challengeId: 7, userId: 'u2', displayName: 'Bojan', joinedAt: chNow - 400 },

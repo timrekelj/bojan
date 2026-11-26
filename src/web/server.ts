@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { Hono, type Context, type Next } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { serve } from '@hono/node-server';
-import { ChannelType, PermissionFlagsBits, type Client } from 'discord.js';
+import { ChannelType, PermissionFlagsBits, type Client, type ForumChannel, type SendableChannels } from 'discord.js';
 import type { BotDatabase, ChallengeFilter, ChallengeSort, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
@@ -20,7 +20,7 @@ import { OpenCodeAgent, probeAgent, type AgentStatus } from '../builder/opencode
 import { fetchTranscript } from '../builder/transcript.js';
 import { buildColorMessage, COLOR_MARKER, sortColorRoles } from '../colors.js';
 import { challengeStatus, challengeWindow, emptyDraft, formatChallengeTarget, MAX_CHALLENGE_GOALS, MAX_SET_VALUE, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry, type ChallengeDraft, type ChallengeWizardStep } from '../challenges/form.js';
-import { createAndPostChallenge, finalizeChallenge, refreshChallengeCard } from '../challenges/actions.js';
+import { createAndPostChallenge, finalizeChallenge, isForumChannelType, refreshChallengeCard } from '../challenges/actions.js';
 import { goalName, isManualMetric } from '../challenges/types.js';
 
 interface Session {
@@ -291,6 +291,17 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
           .sort((a, b) => a.name.localeCompare(b.name))
       : [];
   };
+  // Channels a challenge card can be posted to: text/announcement (a message each)
+  // or forum/media (one post each).
+  const listChallengeChannels = (): { id: string; name: string }[] => {
+    const guild = client.guilds.cache.get(config.guildId);
+    return guild
+      ? guild.channels.cache
+          .filter((ch) => ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildAnnouncement || isForumChannelType(ch.type))
+          .map((ch) => ({ id: ch.id, name: ch.name }))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      : [];
+  };
   // Pingable roles: not @everyone, not bot-managed; highest position first.
   const listRoles = (): { id: string; name: string }[] => {
     const guild = client.guilds.cache.get(config.guildId);
@@ -308,6 +319,16 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     if (!guild) return null;
     const channel = guild.channels.cache.get(channelId) ?? (await guild.channels.fetch(channelId).catch(() => null));
     return channel && channel.isSendable() ? channel : null;
+  };
+
+  // Channel a challenge card can be posted in: sendable text, or a forum/media channel.
+  const challengePostChannel = async (channelId: string): Promise<SendableChannels | ForumChannel | null> => {
+    const guild = client.guilds.cache.get(config.guildId);
+    if (!guild) return null;
+    const channel = guild.channels.cache.get(channelId) ?? (await guild.channels.fetch(channelId).catch(() => null));
+    if (!channel) return null;
+    if (isForumChannelType(channel.type)) return channel as ForumChannel;
+    return channel.isSendable() ? channel : null;
   };
 
   // Best-effort removal of an old picker message (the channel or message may be gone).
@@ -555,7 +576,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     return null;
   };
 
-  const challengeNames = (): { channels: { id: string; name: string }[]; roles: { id: string; name: string }[] } => ({ channels: listChannels(), roles: listRoles() });
+  const challengeNames = (): { channels: { id: string; name: string }[]; roles: { id: string; name: string }[] } => ({ channels: listChallengeChannels(), roles: listRoles() });
 
   const loadChallengesPage = (session: Session, q: Record<string, string | undefined>, deploy: DeployStatus, now = Date.now()): ChallengesPageData => {
     const status = challengeFilter(q.status);
@@ -583,6 +604,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       activityNames: db.activityNames(config.guildId, '', 100),
       canManageRoles: guild?.members.me?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false,
       timezone: db.getSettings(config.guildId).timezone,
+      challengeChannelId: db.getSettings(config.guildId).challengeChannelId,
       flash: challengeFlash(q),
       user: { username: session.username, avatar: session.avatar },
       deploy,
@@ -651,6 +673,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     return {
       settings: db.getSettings(config.guildId),
       channels: listChannels(),
+      challengeChannels: listChallengeChannels(),
       user: { username: session.username, avatar: session.avatar },
       deploy: opts.deploy,
       saved: q.saved === '1',
@@ -712,7 +735,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     return data ? c.html(challengeDetailPage(data)) : c.text('Challenge not found.', 404);
   });
 
-  const CHALLENGE_FIELDS = ['step', 'name', 'description', 'metric', 'activityName', 'label', 'target', 'startDate', 'endDate', 'channelId', 'rewardRoleId', 'nav'] as const;
+  const CHALLENGE_FIELDS = ['step', 'name', 'description', 'metric', 'activityName', 'label', 'target', 'startDate', 'endDate', 'rewardRoleId', 'nav'] as const;
 
   const challengeForm = (form: Record<string, unknown>): Record<string, string | undefined> => {
     const out: Record<string, string | undefined> = {};
@@ -735,7 +758,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const raw = challengeForm(await c.req.parseBody());
     const stepNum = Number(raw.step);
     const step: ChallengeWizardStep = stepNum === 2 ? 2 : stepNum === 3 ? 3 : 1;
-    const ctx = { channels: new Set(listChannels().map((ch) => ch.id)), roles: new Set(listRoles().map((r) => r.id)) };
+    const ctx = { roles: new Set(listRoles().map((r) => r.id)) };
     if (raw.nav === 'back') {
       const prev = (step > 1 ? step - 1 : 1) as ChallengeWizardStep;
       return challengeWizardPage(c, prev, parseWizardStep(raw, prev, ctx).draft, []);
@@ -747,8 +770,10 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const now = Date.now();
     const window = challengeWindow(parsed.draft.startDate, parsed.draft.endDate, now);
     if (!window.ok) return challengeWizardPage(c, 3, parsed.draft, [window.reason], 400);
-    const channel = await sendableChannel(parsed.draft.channelId);
-    if (!channel) return challengeWizardPage(c, 3, parsed.draft, ['The selected channel is missing or the bot cannot post in it.'], 400);
+    const challengeChannelId = db.getSettings(config.guildId).challengeChannelId;
+    if (!challengeChannelId) return challengeWizardPage(c, 3, parsed.draft, ['Set the challenges channel in Settings first.'], 400);
+    const channel = await challengePostChannel(challengeChannelId);
+    if (!channel) return challengeWizardPage(c, 3, parsed.draft, ['The challenges channel from Settings is missing or the bot cannot post in it.'], 400);
 
     const session = c.get('session');
     const result = await createAndPostChallenge(
@@ -763,7 +788,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         target: parsed.draft.target,
         startsAt: window.window.startsAt,
         endsAt: window.window.endsAt,
-        channelId: parsed.draft.channelId,
+        channelId: challengeChannelId,
         rewardRoleId: parsed.draft.rewardRoleId || null,
         createdBy: session.userId,
         createdByName: session.username,
@@ -872,7 +897,13 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const id = Number(typeof form.id === 'string' ? form.id : '');
     const challenge = Number.isSafeInteger(id) ? db.getChallenge(id) : null;
     if (!challenge || challenge.guildId !== config.guildId) return c.redirect(`/dashboard/challenges?challengeError=${encodeURIComponent('Challenge not found.')}`);
-    await deletePickerMessage(challenge.channelId, challenge.messageId);
+    // The card lives in the forum thread when there is one; archived threads are
+    // not "sendable" but client.channels.fetch still resolves them.
+    const cardChannel = await client.channels.fetch(challenge.threadId ?? challenge.channelId).catch(() => null);
+    if (cardChannel?.isTextBased() && challenge.messageId) {
+      const message = await cardChannel.messages.fetch(challenge.messageId).catch(() => null);
+      if (message) await message.delete().catch(() => undefined);
+    }
     db.deleteChallenge(challenge.id);
     console.log(`[web] challenge #${challenge.id} deleted by ${c.get('session').username}`);
     return c.redirect(`/dashboard/challenges?challengeDeleted=${challenge.id}`);
@@ -1020,6 +1051,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       embedChannels: Array.isArray(rawChannels) ? rawChannels.map(String) : rawChannels ? [String(rawChannels)] : [],
       levelingEnabled: form.levelingEnabled === '1',
       levelupChannelId: str(form.levelupChannel) || null,
+      challengeChannelId: 'challengeChannel' in form ? str(form.challengeChannel) || null : current.challengeChannelId,
     };
     db.saveSettings(next);
     console.log(`[web] settings updated by ${c.get('session').username}`);
