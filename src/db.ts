@@ -4,7 +4,7 @@ import { statSync } from 'node:fs';
 import { XP_BACKFILL_PER_MESSAGE } from './levels.js';
 import { localParts, zonedToUtcMs } from './stats.js';
 import { ALL_STORES, type FreeSettings, type Store } from './freegames/types.js';
-import type { ChallengeMetric } from './challenges/types.js';
+import { isManualMetric, type ChallengeMetric } from './challenges/types.js';
 
 export interface Settings {
   guildId: string;
@@ -445,6 +445,7 @@ CREATE TABLE IF NOT EXISTS challenges (
   description TEXT NOT NULL DEFAULT '',
   metric TEXT NOT NULL,
   activity_name TEXT,
+  label TEXT,
   target INTEGER NOT NULL,
   starts_at INTEGER NOT NULL,
   ends_at INTEGER NOT NULL,
@@ -482,6 +483,7 @@ CREATE TABLE IF NOT EXISTS challenge_goals (
   challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
   metric TEXT NOT NULL,
   activity_name TEXT,
+  label TEXT,
   target INTEGER NOT NULL,
   position INTEGER NOT NULL,
   created_at INTEGER NOT NULL
@@ -615,7 +617,9 @@ export interface Challenge {
   metric: ChallengeMetric;
   /** Only set for the `activity` metric. */
   activityName: string | null;
-  /** Count for messages/reactions, minutes for voice/activity. */
+  /** Custom goal name (the unit); null for the built-in metrics. */
+  label: string | null;
+  /** Count for messages/reactions, minutes for voice/activity; 0 = no target. */
   target: number;
   startsAt: number;
   endsAt: number;
@@ -660,7 +664,8 @@ export interface ChallengeGoal {
   challengeId: number;
   metric: ChallengeMetric;
   activityName: string | null;
-  /** Count for messages/reactions/push-ups, minutes for voice/activity. */
+  label: string | null;
+  /** Count for messages/reactions/push-ups/custom units, minutes for voice/activity; 0 = no target. */
   target: number;
   position: number;
   createdAt: number;
@@ -687,6 +692,7 @@ function challengeFromRow(r: Record<string, unknown>): Challenge {
     description: r.description as string,
     metric: r.metric as ChallengeMetric,
     activityName: (r.activity_name as string | null) ?? null,
+    label: (r.label as string | null) ?? null,
     target: r.target as number,
     startsAt: r.starts_at as number,
     endsAt: r.ends_at as number,
@@ -735,6 +741,7 @@ function challengeGoalFromRow(r: Record<string, unknown>): ChallengeGoal {
     challengeId: r.challenge_id as number,
     metric: r.metric as ChallengeMetric,
     activityName: (r.activity_name as string | null) ?? null,
+    label: (r.label as string | null) ?? null,
     target: r.target as number,
     position: r.position as number,
     createdAt: r.created_at as number,
@@ -936,11 +943,20 @@ export class BotDatabase {
     if (!chatCols.some((c) => c.name === 'pending_notes')) {
       this.db.exec(`ALTER TABLE chat_threads ADD COLUMN pending_notes TEXT NOT NULL DEFAULT '[]'`);
     }
+    // Migration for challenges created before custom goal labels existed.
+    const challengeCols = this.db.prepare('PRAGMA table_info(challenges)').all() as { name: string }[];
+    if (!challengeCols.some((c) => c.name === 'label')) {
+      this.db.exec('ALTER TABLE challenges ADD COLUMN label TEXT');
+    }
+    const challengeGoalCols = this.db.prepare('PRAGMA table_info(challenge_goals)').all() as { name: string }[];
+    if (!challengeGoalCols.some((c) => c.name === 'label')) {
+      this.db.exec('ALTER TABLE challenge_goals ADD COLUMN label TEXT');
+    }
     // Challenges used to be stored active even when their start date was in the future.
     this.db.prepare(`UPDATE challenges SET status = 'upcoming' WHERE status = 'active' AND starts_at > ?`).run(Date.now());
     // One goal per challenge for rows created before multi-goal challenges existed.
-    this.db.exec(`INSERT INTO challenge_goals (challenge_id, metric, activity_name, target, position, created_at)
-      SELECT id, metric, activity_name, target, 0, created_at FROM challenges c
+    this.db.exec(`INSERT INTO challenge_goals (challenge_id, metric, activity_name, label, target, position, created_at)
+      SELECT id, metric, activity_name, label, target, 0, created_at FROM challenges c
       WHERE NOT EXISTS (SELECT 1 FROM challenge_goals g WHERE g.challenge_id = c.id)`);
     // Event log for challenges created before challenge_events existed.
     this.db.exec(`INSERT INTO challenge_events (challenge_id, ts, kind, actor_id)
@@ -2056,6 +2072,7 @@ export class BotDatabase {
       description: string;
       metric: ChallengeMetric;
       activityName: string | null;
+      label?: string | null;
       target: number;
       startsAt: number;
       endsAt: number;
@@ -2070,12 +2087,12 @@ export class BotDatabase {
     try {
       const res = this.db
         .prepare(
-          `INSERT INTO challenges (guild_id, name, description, metric, activity_name, target, starts_at, ends_at, channel_id, reward_role_id, status, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO challenges (guild_id, name, description, metric, activity_name, label, target, starts_at, ends_at, channel_id, reward_role_id, status, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(c.guildId, c.name, c.description, c.metric, c.activityName, c.target, c.startsAt, c.endsAt, c.channelId, c.rewardRoleId, status, c.createdBy, now);
+        .run(c.guildId, c.name, c.description, c.metric, c.activityName, c.label ?? null, c.target, c.startsAt, c.endsAt, c.channelId, c.rewardRoleId, status, c.createdBy, now);
       const id = Number(res.lastInsertRowid);
-      this.addChallengeGoal({ challengeId: id, metric: c.metric, activityName: c.activityName, target: c.target, position: 0, createdAt: now });
+      this.addChallengeGoal({ challengeId: id, metric: c.metric, activityName: c.activityName, label: c.label ?? null, target: c.target, position: 0, createdAt: now });
       this.db.exec('COMMIT');
       return this.getChallenge(id)!;
     } catch (err) {
@@ -2199,11 +2216,11 @@ export class BotDatabase {
     return row ? challengeGoalFromRow(row) : null;
   }
 
-  addChallengeGoal(g: { challengeId: number; metric: ChallengeMetric; activityName: string | null; target: number; position?: number; createdAt?: number }): ChallengeGoal {
+  addChallengeGoal(g: { challengeId: number; metric: ChallengeMetric; activityName: string | null; label?: string | null; target: number; position?: number; createdAt?: number }): ChallengeGoal {
     const position = g.position ?? ((this.db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM challenge_goals WHERE challenge_id = ?').get(g.challengeId) as { p: number }).p);
     const res = this.db
-      .prepare('INSERT INTO challenge_goals (challenge_id, metric, activity_name, target, position, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(g.challengeId, g.metric, g.activityName, g.target, position, g.createdAt ?? Date.now());
+      .prepare('INSERT INTO challenge_goals (challenge_id, metric, activity_name, label, target, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(g.challengeId, g.metric, g.activityName, g.label ?? null, g.target, position, g.createdAt ?? Date.now());
     return this.getChallengeGoal(Number(res.lastInsertRowid))!;
   }
 
@@ -2274,6 +2291,7 @@ export class BotDatabase {
    */
   challengeTotals(guildId: string, metric: ChallengeMetric, activityName: string | null, from: number, to: number, now = Date.now()): Record<string, number> {
     const out: Record<string, number> = {};
+    if (isManualMetric(metric)) return out;
     let rows: { userId: string; value: number }[];
     if (metric === 'messages') {
       rows = this.db

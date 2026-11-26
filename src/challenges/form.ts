@@ -1,14 +1,16 @@
 import { fmt, fmtDuration } from '../stats.js';
-import { isChallengeMetric, isTimeMetric, type ChallengeMetric } from './types.js';
+import { isChallengeMetric, isManualMetric, isTimeMetric, type ChallengeMetric } from './types.js';
 
 export const MAX_CHALLENGE_NAME = 100;
 export const MAX_CHALLENGE_DESCRIPTION = 500;
 export const MIN_CHALLENGE_TARGET = 1;
 export const MAX_CHALLENGE_TARGET = 1_000_000;
+/** Longest custom goal label (the goal name, which is also its unit). */
+export const MAX_CUSTOM_LABEL = 50;
 export const MAX_CHALLENGE_GOALS = 5;
 /** Largest single manually logged set. */
 export const MAX_SET_VALUE = 5000;
-/** A single push-up set above this is flagged for admin review (still recorded). */
+/** A single manual set above this is flagged for admin review (still recorded). */
 export const PUSHUP_FLAG_THRESHOLD = 99;
 export const DAY_MS = 86_400_000;
 
@@ -21,7 +23,9 @@ export interface ChallengeDraft {
   metric: ChallengeMetric;
   /** Only used by the `activity` metric. */
   activityName: string;
-  /** Count for messages/reactions, minutes for voice/activity. */
+  /** Custom goal name; only meaningful for the `custom` metric. */
+  label: string;
+  /** Count for messages/reactions, minutes for voice/activity; 0 = no target. */
   target: number;
   /** YYYY-MM-DD, empty = starts now. */
   startDate: string;
@@ -48,7 +52,7 @@ export function defaultEndDate(now = Date.now()): string {
 }
 
 export function emptyDraft(now = Date.now()): ChallengeDraft {
-  return { name: '', description: '', metric: 'messages', activityName: '', target: 1, startDate: '', endDate: defaultEndDate(now), channelId: '', rewardRoleId: '' };
+  return { name: '', description: '', metric: 'messages', activityName: '', label: '', target: 0, startDate: '', endDate: defaultEndDate(now), channelId: '', rewardRoleId: '' };
 }
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -161,8 +165,9 @@ export function formatChallengeValue(metric: ChallengeMetric, value: number): st
   return isTimeMetric(metric) ? fmtDuration(value) : fmt(value);
 }
 
-/** The wizard's target (minutes for time metrics) for display. */
+/** The wizard's target (minutes for time metrics) for display; 0 means the goal has no target. */
 export function formatChallengeTarget(metric: ChallengeMetric, target: number): string {
+  if (target <= 0) return 'no target';
   return isTimeMetric(metric) ? fmtDuration(target * 60_000) : fmt(target);
 }
 
@@ -204,9 +209,9 @@ export function parseEntryValue(raw: string): number | null {
   return Number.isSafeInteger(value) && value >= 1 && value <= MAX_SET_VALUE ? value : null;
 }
 
-/** Single push-up sets above the threshold need an admin review; everything else is trusted. */
+/** Single manual sets above the threshold need an admin review; every manual metric (push-ups, custom) is checked. */
 export function shouldFlagEntry(metric: ChallengeMetric, value: number): boolean {
-  return metric === 'pushups' && value > PUSHUP_FLAG_THRESHOLD;
+  return isManualMetric(metric) && value > PUSHUP_FLAG_THRESHOLD;
 }
 
 interface GoalLike {
@@ -214,18 +219,23 @@ interface GoalLike {
   target: number;
 }
 
-/** Target in storage units (ms for time metrics, counts otherwise). */
+/** Target in storage units (ms for time metrics, counts otherwise); 0 = no target. */
 export function goalTargetValue(goal: GoalLike): number {
   return isTimeMetric(goal.metric) ? goal.target * 60_000 : goal.target;
 }
 
-/** Capped 0..1 progress share of one goal; the mean of the shares ranks the overall challenge. */
-export function goalShare(goal: GoalLike, value: number): number {
+/**
+ * Capped 0..1 progress share of one goal; the mean of the shares ranks the
+ * overall challenge. A targetless goal is measured against `maxValue` (the
+ * leader of that goal), so it still contributes a meaningful share.
+ */
+export function goalShare(goal: GoalLike, value: number, maxValue = 0): number {
   const target = goalTargetValue(goal);
-  return target > 0 ? Math.max(0, Math.min(1, value / target)) : 0;
+  if (target > 0) return Math.max(0, Math.min(1, value / target));
+  return maxValue > 0 ? Math.max(0, Math.min(1, value / maxValue)) : 0;
 }
 
-/** How much is still missing for one goal, in storage units (0 when reached). */
+/** How much is still missing for one goal, in storage units (0 when reached or the goal has no target). */
 export function goalRemaining(goal: GoalLike, value: number): number {
   return Math.max(0, goalTargetValue(goal) - Math.max(0, value));
 }
@@ -243,11 +253,18 @@ export function overallRankProgress(
   goals: readonly (GoalLike & { id: number })[],
   totalsByGoal: Readonly<Record<number, Record<string, number> | undefined>>,
 ): OverallProgressRow[] {
+  // Targetless goals are relative: the best value in the goal counts as full progress.
+  const maxByGoal: Record<number, number> = {};
+  for (const g of goals) {
+    const totals = totalsByGoal[g.id];
+    if (goalTargetValue(g) > 0 || !totals) continue;
+    maxByGoal[g.id] = participants.reduce((max, p) => Math.max(max, totals[p.userId] ?? 0), 0);
+  }
   return participants
     .map((p) => ({
       userId: p.userId,
       joinedAt: p.joinedAt,
-      share: goals.length > 0 ? goals.reduce((sum, g) => sum + goalShare(g, totalsByGoal[g.id]?.[p.userId] ?? 0), 0) / goals.length : 0,
+      share: goals.length > 0 ? goals.reduce((sum, g) => sum + goalShare(g, totalsByGoal[g.id]?.[p.userId] ?? 0, maxByGoal[g.id] ?? 0), 0) / goals.length : 0,
     }))
     .sort((a, b) => b.share - a.share || a.joinedAt - b.joinedAt || a.userId.localeCompare(b.userId))
     .map((p, i) => ({ userId: p.userId, share: p.share, rank: i + 1 }));
@@ -256,6 +273,8 @@ export function overallRankProgress(
 export interface ParsedGoal {
   metric: ChallengeMetric;
   activityName: string;
+  label: string;
+  /** 0 = no target. */
   target: number;
 }
 
@@ -266,12 +285,15 @@ export function parseGoal(raw: Record<string, string | undefined>): { ok: true; 
   const activityName = (raw.activityName ?? '').trim().slice(0, 100);
   if (metricRaw === 'activity' && !activityName) return { ok: false, reason: 'Enter the activity name for the activity goal.' };
   if ((raw.activityName ?? '').length > 100) return { ok: false, reason: 'The activity name may be at most 100 characters.' };
+  const label = (raw.label ?? '').trim();
+  if (label.length > MAX_CUSTOM_LABEL) return { ok: false, reason: `The goal name may be at most ${MAX_CUSTOM_LABEL} characters.` };
+  if (metricRaw === 'custom' && !label) return { ok: false, reason: 'Enter a name for the custom goal (e.g. Squats).' };
   const targetRaw = (raw.target ?? '').trim();
-  const target = Number(targetRaw);
-  if (!/^\d+$/.test(targetRaw) || !Number.isInteger(target) || target < MIN_CHALLENGE_TARGET || target > MAX_CHALLENGE_TARGET) {
-    return { ok: false, reason: `The target must be a whole number between ${MIN_CHALLENGE_TARGET} and ${MAX_CHALLENGE_TARGET}.` };
+  const target = targetRaw === '' ? 0 : Number(targetRaw);
+  if ((targetRaw !== '' && !/^\d+$/.test(targetRaw)) || !Number.isInteger(target) || target < 0 || target > MAX_CHALLENGE_TARGET) {
+    return { ok: false, reason: `The target is optional; when set it must be a whole number from 0 to ${MAX_CHALLENGE_TARGET} (0 = no target).` };
   }
-  return { ok: true, goal: { metric: metricRaw, activityName: metricRaw === 'activity' ? activityName : '', target } };
+  return { ok: true, goal: { metric: metricRaw, activityName: metricRaw === 'activity' ? activityName : '', label: label || '', target } };
 }
 
 export interface ChallengeWizardContext {
@@ -303,7 +325,8 @@ export function parseWizardStep(raw: Record<string, string | undefined>, step: C
     description: text('description'),
     metric,
     activityName: text('activityName'),
-    target: targetRaw !== '' && Number.isFinite(targetNum) ? Math.trunc(targetNum) : MIN_CHALLENGE_TARGET,
+    label: text('label'),
+    target: targetRaw !== '' && Number.isFinite(targetNum) ? Math.trunc(targetNum) : 0,
     startDate: text('startDate'),
     endDate: endDate || (step === 1 ? defaultEndDate(now) : ''),
     channelId: text('channelId'),
@@ -318,11 +341,12 @@ export function parseWizardStep(raw: Record<string, string | undefined>, step: C
   if (draft.description.length > MAX_CHALLENGE_DESCRIPTION) errors.push(`The description may be at most ${MAX_CHALLENGE_DESCRIPTION} characters.`);
   if (draft.metric === 'activity' && !draft.activityName) errors.push('Enter the activity name for the activity metric.');
   if (draft.activityName.length > 100) errors.push('The activity name may be at most 100 characters.');
+  if (draft.label.length > MAX_CUSTOM_LABEL) errors.push(`The goal name may be at most ${MAX_CUSTOM_LABEL} characters.`);
+  if (draft.metric === 'custom' && !draft.label) errors.push('Enter a name for the custom goal (e.g. Squats).');
 
   if (step >= 2) {
-    if (!targetRaw) errors.push('The target is required.');
-    else if (!Number.isInteger(targetNum) || targetNum < MIN_CHALLENGE_TARGET || targetNum > MAX_CHALLENGE_TARGET) {
-      errors.push(`The target must be a whole number between ${MIN_CHALLENGE_TARGET} and ${MAX_CHALLENGE_TARGET}.`);
+    if (targetRaw !== '' && (!Number.isInteger(targetNum) || targetNum < 0 || targetNum > MAX_CHALLENGE_TARGET)) {
+      errors.push(`The target is optional; when set it must be a whole number from 0 to ${MAX_CHALLENGE_TARGET} (0 = no target).`);
     }
     if (draft.startDate && dayStartMs(draft.startDate) === null) errors.push('The start date is not a valid date.');
     if (!draft.endDate) errors.push('The end date is required.');
