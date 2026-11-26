@@ -27,7 +27,7 @@ import { announceLevelUp, awardMessageXp, awardReactionXp, levelTag, XP_BACKFILL
 import { handleBuilderMessage } from './builder/handler.js';
 import type { BuilderRunner } from './builder/runner.js';
 import { rolesToSwap } from './colors.js';
-import { handleChallengeButton } from './challenges/actions.js';
+import { handleChallengeButton, handleChallengeLogSubmit } from './challenges/actions.js';
 
 export function createClient(): Client {
   return new Client({
@@ -590,6 +590,10 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
     }
     if (interaction.isButton() && interaction.customId.startsWith('challenge:')) {
       void handleChallengeButton(interaction, client, db).catch((err) => console.error('[challenges] button error:', err));
+      return;
+    }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('challenge:log:')) {
+      void handleChallengeLogSubmit(interaction, client, db).catch((err) => console.error('[challenges] modal error:', err));
       return;
     }
     if (!interaction.isChatInputCommand()) return;

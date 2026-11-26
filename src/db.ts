@@ -476,6 +476,29 @@ CREATE TABLE IF NOT EXISTS challenge_events (
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_challenge_events_challenge ON challenge_events (challenge_id, id);
+
+CREATE TABLE IF NOT EXISTS challenge_goals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+  metric TEXT NOT NULL,
+  activity_name TEXT,
+  target INTEGER NOT NULL,
+  position INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_challenge_goals_challenge ON challenge_goals (challenge_id, position);
+
+CREATE TABLE IF NOT EXISTS challenge_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+  goal_id INTEGER NOT NULL REFERENCES challenge_goals(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  value INTEGER NOT NULL,
+  flagged INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_challenge_entries_goal_user ON challenge_entries (goal_id, user_id);
 `;
 
 export type BuildJobStatus = 'planning' | 'awaiting_input' | 'queued' | 'building' | 'pr_open' | 'merged' | 'closed' | 'failed' | 'cancelled';
@@ -632,6 +655,30 @@ export interface ChallengeParticipant {
   joinedAt: number;
 }
 
+export interface ChallengeGoal {
+  id: number;
+  challengeId: number;
+  metric: ChallengeMetric;
+  activityName: string | null;
+  /** Count for messages/reactions/push-ups, minutes for voice/activity. */
+  target: number;
+  position: number;
+  createdAt: number;
+}
+
+export interface ChallengeEntry {
+  id: number;
+  challengeId: number;
+  goalId: number;
+  userId: string;
+  displayName: string;
+  value: number;
+  flagged: boolean;
+  createdAt: number;
+}
+
+export type ChallengeSort = 'newest' | 'ending' | 'name';
+
 function challengeFromRow(r: Record<string, unknown>): Challenge {
   return {
     id: r.id as number,
@@ -679,6 +726,31 @@ function challengeParticipantFromRow(r: Record<string, unknown>): ChallengeParti
     userId: r.user_id as string,
     displayName: r.display_name as string,
     joinedAt: r.joined_at as number,
+  };
+}
+
+function challengeGoalFromRow(r: Record<string, unknown>): ChallengeGoal {
+  return {
+    id: r.id as number,
+    challengeId: r.challenge_id as number,
+    metric: r.metric as ChallengeMetric,
+    activityName: (r.activity_name as string | null) ?? null,
+    target: r.target as number,
+    position: r.position as number,
+    createdAt: r.created_at as number,
+  };
+}
+
+function challengeEntryFromRow(r: Record<string, unknown>): ChallengeEntry {
+  return {
+    id: r.id as number,
+    challengeId: r.challenge_id as number,
+    goalId: r.goal_id as number,
+    userId: r.user_id as string,
+    displayName: r.display_name as string,
+    value: r.value as number,
+    flagged: Number(r.flagged) === 1,
+    createdAt: r.created_at as number,
   };
 }
 
@@ -866,6 +938,10 @@ export class BotDatabase {
     }
     // Challenges used to be stored active even when their start date was in the future.
     this.db.prepare(`UPDATE challenges SET status = 'upcoming' WHERE status = 'active' AND starts_at > ?`).run(Date.now());
+    // One goal per challenge for rows created before multi-goal challenges existed.
+    this.db.exec(`INSERT INTO challenge_goals (challenge_id, metric, activity_name, target, position, created_at)
+      SELECT id, metric, activity_name, target, 0, created_at FROM challenges c
+      WHERE NOT EXISTS (SELECT 1 FROM challenge_goals g WHERE g.challenge_id = c.id)`);
     // Event log for challenges created before challenge_events existed.
     this.db.exec(`INSERT INTO challenge_events (challenge_id, ts, kind, actor_id)
       SELECT id, created_at, 'created', created_by FROM challenges c
@@ -1990,13 +2066,22 @@ export class BotDatabase {
     now = Date.now(),
   ): Challenge {
     const status = c.startsAt > now ? 'upcoming' : 'active';
-    const res = this.db
-      .prepare(
-        `INSERT INTO challenges (guild_id, name, description, metric, activity_name, target, starts_at, ends_at, channel_id, reward_role_id, status, created_by, created_at)
+    this.db.exec('BEGIN');
+    try {
+      const res = this.db
+        .prepare(
+          `INSERT INTO challenges (guild_id, name, description, metric, activity_name, target, starts_at, ends_at, channel_id, reward_role_id, status, created_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(c.guildId, c.name, c.description, c.metric, c.activityName, c.target, c.startsAt, c.endsAt, c.channelId, c.rewardRoleId, status, c.createdBy, now);
-    return this.getChallenge(Number(res.lastInsertRowid))!;
+        )
+        .run(c.guildId, c.name, c.description, c.metric, c.activityName, c.target, c.startsAt, c.endsAt, c.channelId, c.rewardRoleId, status, c.createdBy, now);
+      const id = Number(res.lastInsertRowid);
+      this.addChallengeGoal({ challengeId: id, metric: c.metric, activityName: c.activityName, target: c.target, position: 0, createdAt: now });
+      this.db.exec('COMMIT');
+      return this.getChallenge(id)!;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   getChallenge(id: number): Challenge | null {
@@ -2016,12 +2101,13 @@ export class BotDatabase {
     return rows.map(challengeFromRow);
   }
 
-  /** Newest first, filtered by the effective status (ended past its deadline even before the ticker runs). */
-  listChallenges(guildId: string, opts: { status?: ChallengeFilter; limit?: number; offset?: number; now?: number } = {}): Challenge[] {
+  /** Newest first by default, filtered by the effective status (ended past its deadline even before the ticker runs). */
+  listChallenges(guildId: string, opts: { status?: ChallengeFilter; sort?: ChallengeSort; limit?: number; offset?: number; now?: number } = {}): Challenge[] {
     const now = opts.now ?? Date.now();
     const { clause, params } = challengeStatusClause(opts.status ?? 'all', now);
+    const order = opts.sort === 'ending' ? 'ends_at ASC, id DESC' : opts.sort === 'name' ? 'name COLLATE NOCASE ASC, id ASC' : 'id DESC';
     const rows = this.db
-      .prepare(`SELECT * FROM challenges WHERE guild_id = ?${clause} ORDER BY id DESC LIMIT ? OFFSET ?`)
+      .prepare(`SELECT * FROM challenges WHERE guild_id = ?${clause} ORDER BY ${order} LIMIT ? OFFSET ?`)
       .all(guildId, ...params, opts.limit ?? 10, opts.offset ?? 0) as unknown as Record<string, unknown>[];
     return rows.map(challengeFromRow);
   }
@@ -2100,6 +2186,85 @@ export class BotDatabase {
   challengeParticipantCount(challengeId: number): number {
     const row = this.db.prepare('SELECT COUNT(*) AS c FROM challenge_participants WHERE challenge_id = ?').get(challengeId) as { c: number };
     return row.c;
+  }
+
+  /** Goals of a challenge in display order. */
+  challengeGoals(challengeId: number): ChallengeGoal[] {
+    const rows = this.db.prepare('SELECT * FROM challenge_goals WHERE challenge_id = ? ORDER BY position ASC, id ASC').all(challengeId) as unknown as Record<string, unknown>[];
+    return rows.map(challengeGoalFromRow);
+  }
+
+  getChallengeGoal(id: number): ChallengeGoal | null {
+    const row = this.db.prepare('SELECT * FROM challenge_goals WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? challengeGoalFromRow(row) : null;
+  }
+
+  addChallengeGoal(g: { challengeId: number; metric: ChallengeMetric; activityName: string | null; target: number; position?: number; createdAt?: number }): ChallengeGoal {
+    const position = g.position ?? ((this.db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM challenge_goals WHERE challenge_id = ?').get(g.challengeId) as { p: number }).p);
+    const res = this.db
+      .prepare('INSERT INTO challenge_goals (challenge_id, metric, activity_name, target, position, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(g.challengeId, g.metric, g.activityName, g.target, position, g.createdAt ?? Date.now());
+    return this.getChallengeGoal(Number(res.lastInsertRowid))!;
+  }
+
+  addChallengeEntry(e: { challengeId: number; goalId: number; userId: string; displayName: string; value: number; flagged?: boolean; createdAt?: number }): ChallengeEntry {
+    const res = this.db
+      .prepare('INSERT INTO challenge_entries (challenge_id, goal_id, user_id, display_name, value, flagged, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(e.challengeId, e.goalId, e.userId, e.displayName, e.value, e.flagged ? 1 : 0, e.createdAt ?? Date.now());
+    return this.getChallengeEntry(Number(res.lastInsertRowid))!;
+  }
+
+  getChallengeEntry(id: number): ChallengeEntry | null {
+    const row = this.db.prepare('SELECT * FROM challenge_entries WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? challengeEntryFromRow(row) : null;
+  }
+
+  /** Correct a value in place (never inserts, so the leaderboard cannot double count); re-evaluates the flag. */
+  updateChallengeEntry(id: number, value: number, flagged: boolean): boolean {
+    const res = this.db.prepare('UPDATE challenge_entries SET value = ?, flagged = ? WHERE id = ?').run(value, flagged ? 1 : 0, id);
+    return Number(res.changes) > 0;
+  }
+
+  deleteChallengeEntry(id: number): boolean {
+    const res = this.db.prepare('DELETE FROM challenge_entries WHERE id = ?').run(id);
+    return Number(res.changes) > 0;
+  }
+
+  /** Summed manual entries per member in [from, to), keyed by user id. */
+  challengeEntryTotals(goalId: number, from = 0, to = Number.MAX_SAFE_INTEGER): Record<string, number> {
+    const rows = this.db
+      .prepare('SELECT user_id AS userId, SUM(value) AS value FROM challenge_entries WHERE goal_id = ? AND created_at >= ? AND created_at < ? GROUP BY user_id')
+      .all(goalId, from, to) as unknown as { userId: string; value: number }[];
+    const out: Record<string, number> = {};
+    for (const r of rows) if (r.value > 0) out[r.userId] = r.value;
+    return out;
+  }
+
+  /** Newest first. */
+  challengeEntries(challengeId: number, opts: { goalId?: number; flaggedOnly?: boolean; limit?: number; offset?: number } = {}): ChallengeEntry[] {
+    const clauses = ['challenge_id = ?'];
+    const params: number[] = [challengeId];
+    if (opts.goalId !== undefined) {
+      clauses.push('goal_id = ?');
+      params.push(opts.goalId);
+    }
+    if (opts.flaggedOnly) clauses.push('flagged = 1');
+    const rows = this.db
+      .prepare(`SELECT * FROM challenge_entries WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(...params, opts.limit ?? 20, opts.offset ?? 0) as unknown as Record<string, unknown>[];
+    return rows.map(challengeEntryFromRow);
+  }
+
+  countChallengeEntries(challengeId: number, opts: { goalId?: number; flaggedOnly?: boolean } = {}): number {
+    const clauses = ['challenge_id = ?'];
+    const params: number[] = [challengeId];
+    if (opts.goalId !== undefined) {
+      clauses.push('goal_id = ?');
+      params.push(opts.goalId);
+    }
+    if (opts.flaggedOnly) clauses.push('flagged = 1');
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM challenge_entries WHERE ${clauses.join(' AND ')}`).get(...params) as { n: number };
+    return row.n;
   }
 
   /**

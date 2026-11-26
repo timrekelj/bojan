@@ -5,6 +5,11 @@ export const MAX_CHALLENGE_NAME = 100;
 export const MAX_CHALLENGE_DESCRIPTION = 500;
 export const MIN_CHALLENGE_TARGET = 1;
 export const MAX_CHALLENGE_TARGET = 1_000_000;
+export const MAX_CHALLENGE_GOALS = 5;
+/** Largest single manually logged set. */
+export const MAX_SET_VALUE = 5000;
+/** A single push-up set above this is flagged for admin review (still recorded). */
+export const PUSHUP_FLAG_THRESHOLD = 99;
 export const DAY_MS = 86_400_000;
 
 export type ChallengeWizardStep = 1 | 2 | 3;
@@ -98,11 +103,17 @@ export const CHALLENGE_EVENT_LABELS: Record<string, string> = {
   left: 'Left',
   ended: 'Ended',
   reward: 'Reward',
+  goal_added: 'Goal added',
+  entry: 'Entry',
+  entry_flagged: 'Flagged',
+  entry_edited: 'Entry edited',
+  entry_deleted: 'Entry deleted',
 };
 
 /** One-line description of a challenge event; actor and detail may be missing. Pure. */
 export function challengeEventText(kind: string, actorName: string | null, detail: string | null): string {
   const actor = actorName?.trim() || 'A member';
+  const rest = detail?.trim() ? ` · ${detail.trim()}` : '';
   switch (kind) {
     case 'created':
       return actorName?.trim() ? `Created by ${actor}` : 'Created';
@@ -113,9 +124,19 @@ export function challengeEventText(kind: string, actorName: string | null, detai
     case 'left':
       return `${actor} left`;
     case 'ended':
-      return `Ended${actorName?.trim() ? ` by ${actor}` : ''}${detail?.trim() ? ` · ${detail.trim()}` : ''}`;
+      return `Ended${actorName?.trim() ? ` by ${actor}` : ''}${rest}`;
     case 'reward':
       return `Reward given to ${actor}${detail?.trim() ? ` (${detail.trim()})` : ''}`;
+    case 'goal_added':
+      return `Goal added by ${actor}${rest}`;
+    case 'entry':
+      return `${actor} logged ${detail?.trim() || 'a set'}`;
+    case 'entry_flagged':
+      return `${actor} logged ${detail?.trim() || 'a set'}`;
+    case 'entry_edited':
+      return `Entry edited by ${actor}${rest}`;
+    case 'entry_deleted':
+      return `Entry deleted by ${actor}${rest}`;
     default:
       return kind;
   }
@@ -145,19 +166,112 @@ export function formatChallengeTarget(metric: ChallengeMetric, target: number): 
   return isTimeMetric(metric) ? fmtDuration(target * 60_000) : fmt(target);
 }
 
-export type ChallengeButtonAction = 'join' | 'leave';
+export type ChallengeButtonAction = 'join' | 'leave' | 'my';
 
 export function challengeButtonId(action: ChallengeButtonAction, challengeId: number): string {
   return `challenge:${action}:${challengeId}`;
 }
 
-/** `challenge:join:<id>` / `challenge:leave:<id>` -> action + id, null for anything else. */
+/** `challenge:join|leave|my:<id>` -> action + id, null for anything else. */
 export function parseChallengeButtonId(customId: string): { action: ChallengeButtonAction; challengeId: number } | null {
-  const m = /^challenge:(join|leave):(\d+)$/.exec(customId);
+  const m = /^challenge:(join|leave|my):(\d+)$/.exec(customId);
   if (!m) return null;
   const id = Number(m[2]);
   if (!Number.isSafeInteger(id) || id <= 0) return null;
   return { action: m[1] as ChallengeButtonAction, challengeId: id };
+}
+
+/** Button and modal id for logging a manual set to one goal. */
+export function challengeLogId(challengeId: number, goalId: number): string {
+  return `challenge:log:${challengeId}:${goalId}`;
+}
+
+/** `challenge:log:<challengeId>:<goalId>` -> ids, null for anything else. */
+export function parseChallengeLogId(customId: string): { challengeId: number; goalId: number } | null {
+  const m = /^challenge:log:(\d+):(\d+)$/.exec(customId);
+  if (!m) return null;
+  const challengeId = Number(m[1]);
+  const goalId = Number(m[2]);
+  if (!Number.isSafeInteger(challengeId) || challengeId <= 0 || !Number.isSafeInteger(goalId) || goalId <= 0) return null;
+  return { challengeId, goalId };
+}
+
+/** A logged set: a whole number in 1..MAX_SET_VALUE, null for anything else. */
+export function parseEntryValue(raw: string): number | null {
+  const text = raw.trim();
+  if (!/^\d+$/.test(text)) return null;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value >= 1 && value <= MAX_SET_VALUE ? value : null;
+}
+
+/** Single push-up sets above the threshold need an admin review; everything else is trusted. */
+export function shouldFlagEntry(metric: ChallengeMetric, value: number): boolean {
+  return metric === 'pushups' && value > PUSHUP_FLAG_THRESHOLD;
+}
+
+interface GoalLike {
+  metric: ChallengeMetric;
+  target: number;
+}
+
+/** Target in storage units (ms for time metrics, counts otherwise). */
+export function goalTargetValue(goal: GoalLike): number {
+  return isTimeMetric(goal.metric) ? goal.target * 60_000 : goal.target;
+}
+
+/** Capped 0..1 progress share of one goal; the mean of the shares ranks the overall challenge. */
+export function goalShare(goal: GoalLike, value: number): number {
+  const target = goalTargetValue(goal);
+  return target > 0 ? Math.max(0, Math.min(1, value / target)) : 0;
+}
+
+/** How much is still missing for one goal, in storage units (0 when reached). */
+export function goalRemaining(goal: GoalLike, value: number): number {
+  return Math.max(0, goalTargetValue(goal) - Math.max(0, value));
+}
+
+export interface OverallProgressRow {
+  userId: string;
+  /** Mean of the per-goal shares, 0..1. */
+  share: number;
+  rank: number;
+}
+
+/** Rank participants by the mean share of every goal; ties keep the earlier joiner first. */
+export function overallRankProgress(
+  participants: readonly { userId: string; joinedAt: number }[],
+  goals: readonly (GoalLike & { id: number })[],
+  totalsByGoal: Readonly<Record<number, Record<string, number> | undefined>>,
+): OverallProgressRow[] {
+  return participants
+    .map((p) => ({
+      userId: p.userId,
+      joinedAt: p.joinedAt,
+      share: goals.length > 0 ? goals.reduce((sum, g) => sum + goalShare(g, totalsByGoal[g.id]?.[p.userId] ?? 0), 0) / goals.length : 0,
+    }))
+    .sort((a, b) => b.share - a.share || a.joinedAt - b.joinedAt || a.userId.localeCompare(b.userId))
+    .map((p, i) => ({ userId: p.userId, share: p.share, rank: i + 1 }));
+}
+
+export interface ParsedGoal {
+  metric: ChallengeMetric;
+  activityName: string;
+  target: number;
+}
+
+/** Validate the dashboard add-goal form. Pure. */
+export function parseGoal(raw: Record<string, string | undefined>): { ok: true; goal: ParsedGoal } | { ok: false; reason: string } {
+  const metricRaw = (raw.metric ?? '').trim();
+  if (!isChallengeMetric(metricRaw)) return { ok: false, reason: 'Choose a goal type.' };
+  const activityName = (raw.activityName ?? '').trim().slice(0, 100);
+  if (metricRaw === 'activity' && !activityName) return { ok: false, reason: 'Enter the activity name for the activity goal.' };
+  if ((raw.activityName ?? '').length > 100) return { ok: false, reason: 'The activity name may be at most 100 characters.' };
+  const targetRaw = (raw.target ?? '').trim();
+  const target = Number(targetRaw);
+  if (!/^\d+$/.test(targetRaw) || !Number.isInteger(target) || target < MIN_CHALLENGE_TARGET || target > MAX_CHALLENGE_TARGET) {
+    return { ok: false, reason: `The target must be a whole number between ${MIN_CHALLENGE_TARGET} and ${MAX_CHALLENGE_TARGET}.` };
+  }
+  return { ok: true, goal: { metric: metricRaw, activityName: metricRaw === 'activity' ? activityName : '', target } };
 }
 
 export interface ChallengeWizardContext {

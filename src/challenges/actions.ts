@@ -1,8 +1,28 @@
-import type { ButtonInteraction, Client, SendableChannels } from 'discord.js';
-import type { BotDatabase, Challenge } from '../db.js';
-import { buildChallengeCard } from './cards.js';
-import { challengeStatus, parseChallengeButtonId, rankProgress } from './form.js';
-import type { ChallengeMetric } from './types.js';
+import {
+  ActionRowBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  type ButtonInteraction,
+  type Client,
+  type ModalSubmitInteraction,
+  type SendableChannels,
+} from 'discord.js';
+import type { BotDatabase, Challenge, ChallengeGoal } from '../db.js';
+import { buildChallengeCard, goalProgressLines, goalProgressText } from './cards.js';
+import {
+  challengeStatus,
+  formatChallengeTarget,
+  formatChallengeValue,
+  goalRemaining,
+  MAX_SET_VALUE,
+  overallRankProgress,
+  parseChallengeButtonId,
+  parseChallengeLogId,
+  parseEntryValue,
+  shouldFlagEntry,
+} from './form.js';
+import { isManualMetric, metricLabel, type ChallengeMetric } from './types.js';
 
 export interface NewChallengeInput {
   guildId: string;
@@ -24,11 +44,25 @@ export interface NewChallengeInput {
 /** Retention: the reward role is granted permanently to the top 3 with progress > 0. */
 const REWARD_POSITIONS = 3;
 
+/** Goals of a challenge plus per-goal, per-member progress in storage units. */
+export function challengeGoalTotals(db: BotDatabase, challenge: Challenge, now = Date.now()): { goals: ChallengeGoal[]; totalsByGoal: Record<number, Record<string, number>> } {
+  const goals = db.challengeGoals(challenge.id);
+  const totalsByGoal: Record<number, Record<string, number>> = {};
+  for (const goal of goals) {
+    totalsByGoal[goal.id] = isManualMetric(goal.metric)
+      ? db.challengeEntryTotals(goal.id, challenge.startsAt, challenge.endsAt)
+      : db.challengeTotals(challenge.guildId, goal.metric, goal.activityName, challenge.startsAt, challenge.endsAt, now);
+  }
+  return { goals, totalsByGoal };
+}
+
 function cardData(db: BotDatabase, challenge: Challenge, now: number) {
+  const { goals, totalsByGoal } = challengeGoalTotals(db, challenge, now);
   return {
     challenge,
     participants: db.challengeParticipants(challenge.id),
-    totals: db.challengeTotals(challenge.guildId, challenge.metric, challenge.activityName, challenge.startsAt, challenge.endsAt, now),
+    goals,
+    totalsByGoal,
     timeZone: db.getSettings(challenge.guildId).timezone,
     now,
   };
@@ -60,7 +94,7 @@ export async function createAndPostChallenge(
   }
 }
 
-/** Rebuild and edit the posted card (leaderboard + join counts). Best-effort; returns success. */
+/** Rebuild and edit the posted card (leaderboards, join counts). Best-effort; returns success. */
 export async function refreshChallengeCard(client: Client, db: BotDatabase, challenge: Challenge, now = Date.now()): Promise<boolean> {
   if (!challenge.messageId) return false;
   try {
@@ -88,22 +122,22 @@ export async function beginChallenge(client: Client, db: BotDatabase, challenge:
 }
 
 /**
- * End a challenge: mark it ended, grant the reward role to the top 3 with
- * progress > 0 and refresh the card without buttons. Idempotent (a second
- * call, or a race with the ticker, does nothing). Returns the ended row, or
- * null when it was already ended.
+ * End a challenge: mark it ended, grant the reward role to the top 3 by the
+ * mean goal share (progress > 0) and refresh the card without buttons.
+ * Idempotent (a second call, or a race with the ticker, does nothing).
  */
 export async function finalizeChallenge(client: Client, db: BotDatabase, challenge: Challenge, now = Date.now(), actor: { id: string; name: string } | null = null): Promise<Challenge | null> {
   if (!db.endChallenge(challenge.id, now)) return null;
   const ended: Challenge = { ...challenge, status: 'ended', endedAt: challenge.endedAt ?? now };
   const names = new Map(db.challengeParticipants(challenge.id).map((p) => [p.userId, p.displayName]));
+  const { goals, totalsByGoal } = challengeGoalTotals(db, challenge, now);
   let rewarded = 0;
   if (challenge.rewardRoleId) {
     const guild = client.guilds.cache.get(challenge.guildId) ?? (await client.guilds.fetch(challenge.guildId).catch(() => null));
     const role = guild ? guild.roles.cache.get(challenge.rewardRoleId) ?? (await guild.roles.fetch(challenge.rewardRoleId).catch(() => null)) : null;
     if (guild && role) {
-      const rows = rankProgress(db.challengeParticipants(challenge.id), db.challengeTotals(challenge.guildId, challenge.metric, challenge.activityName, challenge.startsAt, challenge.endsAt, now))
-        .filter((r) => r.value > 0)
+      const rows = overallRankProgress(db.challengeParticipants(challenge.id), goals, totalsByGoal)
+        .filter((r) => r.share > 0)
         .slice(0, REWARD_POSITIONS);
       for (const row of rows) {
         const member = await guild.members.fetch(row.userId).catch(() => null);
@@ -134,8 +168,62 @@ export async function finalizeChallenge(client: Client, db: BotDatabase, challen
   return ended;
 }
 
-/** Join/leave button: ephemeral confirmation, then refresh the card for everyone. */
+function displayNameOf(interaction: ButtonInteraction | ModalSubmitInteraction): string {
+  const member = interaction.member;
+  return member && 'displayName' in member && typeof member.displayName === 'string' ? member.displayName : interaction.user.username;
+}
+
+function isParticipant(db: BotDatabase, challengeId: number, userId: string): boolean {
+  return db.challengeParticipants(challengeId).some((p) => p.userId === userId);
+}
+
+function windowState(challenge: Challenge, now: number): 'upcoming' | 'active' | 'ended' {
+  if (challenge.status === 'ended' || now >= challenge.endsAt) return 'ended';
+  return now < challenge.startsAt ? 'upcoming' : 'active';
+}
+
+function openLogModal(interaction: ButtonInteraction, challenge: Challenge, goal: ChallengeGoal): Promise<void> {
+  const modal = new ModalBuilder()
+    .setCustomId(`challenge:log:${challenge.id}:${goal.id}`)
+    .setTitle(`Log ${metricLabel(goal.metric).toLowerCase()}`)
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId('value')
+          .setLabel(`${metricLabel(goal.metric)} in this set (1–${MAX_SET_VALUE})`)
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMinLength(1)
+          .setMaxLength(4),
+      ),
+    );
+  return interaction.showModal(modal);
+}
+
+/** Join/Leave/My progress/Log set button: ephemeral reaction, then refresh the card for everyone. */
 export async function handleChallengeButton(interaction: ButtonInteraction, client: Client, db: BotDatabase): Promise<void> {
+  const log = parseChallengeLogId(interaction.customId);
+  if (log) {
+    const challenge = db.getChallenge(log.challengeId);
+    const goal = db.getChallengeGoal(log.goalId);
+    if (!challenge || !goal || goal.challengeId !== challenge.id) {
+      await interaction.reply({ content: 'This challenge no longer exists.', ephemeral: true }).catch(() => undefined);
+      return;
+    }
+    const now = Date.now();
+    const state = windowState(challenge, now);
+    if (state !== 'active') {
+      await interaction.reply({ content: `**${challenge.name}** ${state === 'upcoming' ? 'has not started yet' : 'has ended'}.`, ephemeral: true }).catch(() => undefined);
+      return;
+    }
+    if (!isParticipant(db, challenge.id, interaction.user.id)) {
+      await interaction.reply({ content: `Join **${challenge.name}** before logging a set.`, ephemeral: true }).catch(() => undefined);
+      return;
+    }
+    await openLogModal(interaction, challenge, goal).catch(() => undefined);
+    return;
+  }
+
   const parsed = parseChallengeButtonId(interaction.customId);
   const challenge = parsed ? db.getChallenge(parsed.challengeId) : null;
   if (!parsed || !challenge) {
@@ -143,12 +231,19 @@ export async function handleChallengeButton(interaction: ButtonInteraction, clie
     return;
   }
   const now = Date.now();
-  if (challengeStatus(challenge, now) === 'ended') {
+  const status = challengeStatus(challenge, now);
+  if (status === 'ended') {
     await interaction.reply({ content: `**${challenge.name}** has ended.`, ephemeral: true }).catch(() => undefined);
     return;
   }
-  const member = interaction.member;
-  const displayName = member && 'displayName' in member && typeof member.displayName === 'string' ? member.displayName : interaction.user.username;
+  const displayName = displayNameOf(interaction);
+
+  if (parsed.action === 'my') {
+    const { goals, totalsByGoal } = challengeGoalTotals(db, challenge, now);
+    await interaction.reply({ content: goalProgressLines(challenge, goals, totalsByGoal, interaction.user.id), ephemeral: true }).catch(() => undefined);
+    return;
+  }
+
   const changed = parsed.action === 'join' ? db.joinChallenge(challenge.id, interaction.user.id, displayName, now) : db.leaveChallenge(challenge.id, interaction.user.id);
   if (changed) {
     db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: parsed.action === 'join' ? 'joined' : 'left', actorId: interaction.user.id, actorName: displayName });
@@ -162,5 +257,60 @@ export async function handleChallengeButton(interaction: ButtonInteraction, clie
         ? `You left **${challenge.name}**.`
         : `You were not taking part in **${challenge.name}**.`;
   await interaction.reply({ content, ephemeral: true }).catch(() => undefined);
+  await refreshChallengeCard(client, db, challenge, now);
+}
+
+/**
+ * Modal submit for a manual set: only joined members inside the active window
+ * may log; the entry is recorded even when it is flagged for review. Updates
+ * the card immediately so the leaderboard is current.
+ */
+export async function handleChallengeLogSubmit(interaction: ModalSubmitInteraction, client: Client, db: BotDatabase): Promise<void> {
+  const parsed = parseChallengeLogId(interaction.customId);
+  const challenge = parsed ? db.getChallenge(parsed.challengeId) : null;
+  const goal = parsed ? db.getChallengeGoal(parsed.goalId) : null;
+  if (!parsed || !challenge || !goal || goal.challengeId !== challenge.id || !isManualMetric(goal.metric)) {
+    await interaction.reply({ content: 'This challenge no longer exists.', ephemeral: true }).catch(() => undefined);
+    return;
+  }
+  const now = Date.now();
+  const state = windowState(challenge, now);
+  if (state !== 'active' || now < challenge.startsAt || now >= challenge.endsAt) {
+    await interaction.reply({ content: `**${challenge.name}** ${state === 'upcoming' ? 'has not started yet' : 'has ended'}; entries are closed.`, ephemeral: true }).catch(() => undefined);
+    return;
+  }
+  if (!isParticipant(db, challenge.id, interaction.user.id)) {
+    await interaction.reply({ content: `Join **${challenge.name}** before logging a set.`, ephemeral: true }).catch(() => undefined);
+    return;
+  }
+  const value = parseEntryValue(interaction.fields.getTextInputValue('value'));
+  if (value === null) {
+    await interaction.reply({ content: `Enter a whole number between 1 and ${MAX_SET_VALUE}.`, ephemeral: true }).catch(() => undefined);
+    return;
+  }
+
+  const displayName = displayNameOf(interaction);
+  const flagged = shouldFlagEntry(goal.metric, value);
+  db.addChallengeEntry({ challengeId: challenge.id, goalId: goal.id, userId: interaction.user.id, displayName, value, flagged, createdAt: now });
+  const label = `${value} ${metricLabel(goal.metric).toLowerCase()}`;
+  db.addChallengeEvent({
+    challengeId: challenge.id,
+    ts: now,
+    kind: flagged ? 'entry_flagged' : 'entry',
+    actorId: interaction.user.id,
+    actorName: displayName,
+    detail: flagged ? `${label} · flagged for review` : label,
+  });
+
+  const totals = db.challengeEntryTotals(goal.id, challenge.startsAt, challenge.endsAt);
+  const total = totals[interaction.user.id] ?? 0;
+  const remaining = goalRemaining(goal, total);
+  const lines = [
+    `Logged **${label}** for **${challenge.name}**.`,
+    goalProgressText(goal, total, remaining),
+    `Goal **${formatChallengeTarget(goal.metric, goal.target)}** · still ${formatChallengeValue(goal.metric, remaining)} to go.`,
+  ];
+  if (flagged) lines.push('⚠️ This set is above 99 and was flagged for admin review.');
+  await interaction.reply({ content: lines.join('\n'), ephemeral: true }).catch(() => undefined);
   await refreshChallengeCard(client, db, challenge, now);
 }

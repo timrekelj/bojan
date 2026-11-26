@@ -4,7 +4,7 @@ import { Hono, type Context, type Next } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { serve } from '@hono/node-server';
 import { ChannelType, PermissionFlagsBits, type Client } from 'discord.js';
-import type { BotDatabase, ChallengeFilter, Settings, WebSessionRow } from '../db.js';
+import type { BotDatabase, ChallengeFilter, ChallengeSort, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
 import { challengeDetailPage, challengesPage, chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type ChallengeDetailData, type ChallengesPageData, type ChallengeTab, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
@@ -19,8 +19,9 @@ import type { BuilderRunner } from '../builder/runner.js';
 import { OpenCodeAgent, probeAgent, type AgentStatus } from '../builder/opencode.js';
 import { fetchTranscript } from '../builder/transcript.js';
 import { buildColorMessage, COLOR_MARKER, sortColorRoles } from '../colors.js';
-import { challengeStatus, challengeWindow, emptyDraft, parseWizardStep, rankProgress, type ChallengeDraft, type ChallengeWizardStep } from '../challenges/form.js';
-import { createAndPostChallenge, finalizeChallenge } from '../challenges/actions.js';
+import { challengeStatus, challengeWindow, emptyDraft, MAX_CHALLENGE_GOALS, MAX_SET_VALUE, parseEntryValue, parseGoal, parseWizardStep, rankProgress, shouldFlagEntry, type ChallengeDraft, type ChallengeWizardStep } from '../challenges/form.js';
+import { createAndPostChallenge, finalizeChallenge, refreshChallengeCard } from '../challenges/actions.js';
+import { isManualMetric, metricLabel } from '../challenges/types.js';
 
 interface Session {
   userId: string;
@@ -542,12 +543,15 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   const CHALLENGE_FILTERS = ['all', 'upcoming', 'active', 'ended'] as const;
   const challengeFilter = (raw: string | undefined): ChallengeFilter =>
     (CHALLENGE_FILTERS as readonly string[]).includes(raw ?? '') ? (raw as ChallengeFilter) : 'all';
+  const CHALLENGE_SORTS = ['newest', 'ending', 'name'] as const;
+  const challengeSort = (raw: string | undefined): ChallengeSort => ((CHALLENGE_SORTS as readonly string[]).includes(raw ?? '') ? (raw as ChallengeSort) : 'newest');
 
   const challengeFlash = (q: Record<string, string | undefined>): ChallengesPageData['flash'] => {
     if (q.challengeCreated) return { kind: 'saved', message: `Challenge "${q.challengeCreated.slice(0, 100)}" created and posted.` };
     if (q.challengeError) return { kind: 'error', message: q.challengeError.slice(0, 300) };
-    if (q.challengeEnded && /^\d+$/.test(q.challengeEnded)) return { kind: 'saved', message: `Challenge #${q.challengeEnded} ended; the top 3 with progress got the reward role.` };
+    if (q.challengeEnded && /^\d+$/.test(q.challengeEnded)) return { kind: 'saved', message: `Challenge #${q.challengeEnded} ended; the top 3 by overall goal share got the reward role.` };
     if (q.challengeDeleted && /^\d+$/.test(q.challengeDeleted)) return { kind: 'saved', message: `Challenge #${q.challengeDeleted} deleted.` };
+    if (q.challengeUpdated) return { kind: 'saved', message: q.challengeUpdated.slice(0, 200) };
     return null;
   };
 
@@ -555,13 +559,14 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
   const loadChallengesPage = (session: Session, q: Record<string, string | undefined>, deploy: DeployStatus, now = Date.now()): ChallengesPageData => {
     const status = challengeFilter(q.status);
+    const sort = challengeSort(q.sort);
     const counts = db.challengeStatusCounts(config.guildId, now);
     const total = counts[status];
     const pageSize = parsePageSize(q.size);
     const pages = Math.max(1, Math.ceil(total / pageSize));
     const page = parsePage(q.page, pages);
     const list = db
-      .listChallenges(config.guildId, { status, limit: pageSize, offset: (page - 1) * pageSize, now })
+      .listChallenges(config.guildId, { status, sort, limit: pageSize, offset: (page - 1) * pageSize, now })
       .map((challenge) => ({ challenge, status: challengeStatus(challenge, now), joined: db.challengeParticipantCount(challenge.id) }));
     const guild = client.guilds.cache.get(config.guildId);
     return {
@@ -569,6 +574,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       list,
       counts,
       status,
+      sort,
       page,
       pages,
       pageSize,
@@ -589,23 +595,40 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     if (!challenge || challenge.guildId !== config.guildId) return null;
     const participants = db.challengeParticipants(challenge.id);
     const names = new Map(participants.map((p) => [p.userId, p.displayName]));
-    const totals = db.challengeTotals(challenge.guildId, challenge.metric, challenge.activityName, challenge.startsAt, challenge.endsAt, now);
-    const rows = rankProgress(participants, totals).map((r) => ({ ...r, name: names.get(r.userId) ?? r.userId }));
+    const goals = db.challengeGoals(challenge.id);
+    const goalsWithRows = goals.map((goal) => {
+      const totals = isManualMetric(goal.metric)
+        ? db.challengeEntryTotals(goal.id, challenge.startsAt, challenge.endsAt)
+        : db.challengeTotals(challenge.guildId, goal.metric, goal.activityName, challenge.startsAt, challenge.endsAt, now);
+      return { goal, rows: rankProgress(participants, totals).map((r) => ({ ...r, name: names.get(r.userId) ?? r.userId })) };
+    });
     const pageSize = parsePageSize(q.size);
-    const progressPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    const progressPages = Math.max(1, Math.ceil(participants.length / pageSize));
     const progressPage = parsePage(q.page, progressPages);
+    const flaggedOnly = q.flagged === '1';
+    const entryTotal = db.countChallengeEntries(challenge.id, { flaggedOnly });
+    const entryPages = Math.max(1, Math.ceil(entryTotal / pageSize));
+    const entryPage = parsePage(q.page, entryPages);
+    const goalsById = new Map(goals.map((goal) => [goal.id, goal]));
+    const entryRows = db
+      .challengeEntries(challenge.id, { flaggedOnly, limit: pageSize, offset: (entryPage - 1) * pageSize })
+      .flatMap((entry) => {
+        const goal = goalsById.get(entry.goalId);
+        return goal ? [{ entry, goal }] : [];
+      });
     const eventTotal = db.countChallengeEvents(challenge.id);
     const eventPages = Math.max(1, Math.ceil(eventTotal / pageSize));
     const eventPage = parsePage(q.page, eventPages);
-    const tab: ChallengeTab = q.tab === 'progress' || q.tab === 'activity' ? q.tab : 'overview';
+    const tab: ChallengeTab = q.tab === 'progress' || q.tab === 'entries' || q.tab === 'activity' ? q.tab : 'overview';
     const guild = client.guilds.cache.get(config.guildId);
     return {
       challenge,
       status: challengeStatus(challenge, now),
       tab,
       joined: participants.length,
-      rows: rows.slice(0, 10),
-      progress: { rows: rows.slice((progressPage - 1) * pageSize, progressPage * pageSize), page: progressPage, pages: progressPages, pageSize, total: rows.length },
+      goals: goalsWithRows,
+      progress: { page: progressPage, pages: progressPages, pageSize, total: participants.length },
+      entries: { rows: entryRows, page: entryPage, pages: entryPages, pageSize, total: entryTotal, flaggedOnly },
       events: { rows: db.challengeEvents(challenge.id, pageSize, (eventPage - 1) * pageSize), page: eventPage, pages: eventPages, pageSize, total: eventTotal },
       timezone: db.getSettings(config.guildId).timezone,
       channelName: guild?.channels.cache.get(challenge.channelId)?.name ?? challenge.channelId,
@@ -745,6 +768,83 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     if (!result.ok) return challengeWizardPage(c, 3, parsed.draft, [`Could not post the card: ${result.reason}`], 400);
     console.log(`[web] challenge #${result.challenge.id} "${result.challenge.name}" created by ${session.username}`);
     return c.redirect(`/dashboard/challenges?challengeCreated=${encodeURIComponent(parsed.draft.name)}`);
+  });
+
+  app.post('/challenge-goal-add', requireAdmin, async (c) => {
+    const form = await c.req.parseBody();
+    const challengeId = Number(typeof form.challengeId === 'string' ? form.challengeId : '');
+    const challenge = Number.isSafeInteger(challengeId) ? db.getChallenge(challengeId) : null;
+    if (!challenge || challenge.guildId !== config.guildId) return c.redirect(`/dashboard/challenges?challengeError=${encodeURIComponent('Challenge not found.')}`);
+    const now = Date.now();
+    if (challengeStatus(challenge, now) === 'ended') return c.redirect(`/dashboard/challenges/${challenge.id}?challengeError=${encodeURIComponent('This challenge has ended; goals cannot be added.')}`);
+    if (db.challengeGoals(challenge.id).length >= MAX_CHALLENGE_GOALS) {
+      return c.redirect(`/dashboard/challenges/${challenge.id}?challengeError=${encodeURIComponent(`A challenge can have at most ${MAX_CHALLENGE_GOALS} goals.`)}`);
+    }
+    const parsed = parseGoal({ metric: typeof form.metric === 'string' ? form.metric : undefined, activityName: typeof form.activityName === 'string' ? form.activityName : undefined, target: typeof form.target === 'string' ? form.target : undefined });
+    if (!parsed.ok) return c.redirect(`/dashboard/challenges/${challenge.id}?challengeError=${encodeURIComponent(parsed.reason)}`);
+    const goal = db.addChallengeGoal({
+      challengeId: challenge.id,
+      metric: parsed.goal.metric,
+      activityName: parsed.goal.metric === 'activity' ? parsed.goal.activityName : null,
+      target: parsed.goal.target,
+      createdAt: now,
+    });
+    const session = c.get('session');
+    db.addChallengeEvent({
+      challengeId: challenge.id,
+      ts: now,
+      kind: 'goal_added',
+      actorId: session.userId,
+      actorName: session.username,
+      detail: `${metricLabel(goal.metric)}${goal.activityName ? ` · ${goal.activityName}` : ''} · target ${goal.target}`,
+    });
+    await refreshChallengeCard(client, db, challenge, now);
+    console.log(`[web] challenge #${challenge.id} goal #${goal.id} (${goal.metric}) added by ${session.username}`);
+    return c.redirect(`/dashboard/challenges/${challenge.id}?challengeUpdated=${encodeURIComponent('Goal added.')}`);
+  });
+
+  app.post('/challenge-entry', requireAdmin, async (c) => {
+    const form = await c.req.parseBody();
+    const challengeId = Number(typeof form.challengeId === 'string' ? form.challengeId : '');
+    const entryId = Number(typeof form.entryId === 'string' ? form.entryId : '');
+    const challenge = Number.isSafeInteger(challengeId) ? db.getChallenge(challengeId) : null;
+    const entry = Number.isSafeInteger(entryId) ? db.getChallengeEntry(entryId) : null;
+    if (!challenge || challenge.guildId !== config.guildId || !entry || entry.challengeId !== challenge.id) {
+      return c.redirect(`/dashboard/challenges?challengeError=${encodeURIComponent('Entry not found.')}`);
+    }
+    const goal = db.getChallengeGoal(entry.goalId);
+    if (!goal || goal.challengeId !== challenge.id) {
+      return c.redirect(`/dashboard/challenges/${challenge.id}?tab=entries&challengeError=${encodeURIComponent('Entry not found.')}`);
+    }
+    const session = c.get('session');
+    const now = Date.now();
+    const reason = (typeof form.reason === 'string' ? form.reason : '').trim().slice(0, 300);
+    const reasonText = reason ? ` · reason: ${reason}` : '';
+    const op = typeof form.op === 'string' ? form.op : '';
+    if (op === 'delete') {
+      db.deleteChallengeEntry(entry.id);
+      db.addChallengeEvent({ challengeId: challenge.id, ts: now, kind: 'entry_deleted', actorId: session.userId, actorName: session.username, detail: `${entry.displayName}: ${entry.value}${reasonText}` });
+      await refreshChallengeCard(client, db, challenge, now);
+      console.log(`[web] challenge #${challenge.id} entry #${entry.id} deleted by ${session.username}`);
+      return c.redirect(`/dashboard/challenges/${challenge.id}?tab=entries&challengeUpdated=${encodeURIComponent('Entry deleted.')}`);
+    }
+    const value = parseEntryValue(typeof form.value === 'string' ? form.value : '');
+    if (value === null) {
+      return c.redirect(`/dashboard/challenges/${challenge.id}?tab=entries&challengeError=${encodeURIComponent(`The value must be a whole number between 1 and ${MAX_SET_VALUE}.`)}`);
+    }
+    const flagged = shouldFlagEntry(goal.metric, value);
+    db.updateChallengeEntry(entry.id, value, flagged);
+    db.addChallengeEvent({
+      challengeId: challenge.id,
+      ts: now,
+      kind: 'entry_edited',
+      actorId: session.userId,
+      actorName: session.username,
+      detail: `${entry.displayName}: ${entry.value} → ${value}${flagged ? ' · flagged for review' : ''}${reasonText}`,
+    });
+    await refreshChallengeCard(client, db, challenge, now);
+    console.log(`[web] challenge #${challenge.id} entry #${entry.id} edited by ${session.username}`);
+    return c.redirect(`/dashboard/challenges/${challenge.id}?tab=entries&challengeUpdated=${encodeURIComponent('Entry updated.')}`);
   });
 
   app.post('/challenge-end', requireAdmin, async (c) => {
