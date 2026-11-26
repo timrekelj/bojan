@@ -144,10 +144,16 @@ const CSS = `
   details.card > summary::after { content: '+'; color: var(--muted); font-weight: 500; }
   details.card[open] > summary { margin-bottom: 16px; }
   details.card[open] > summary::after { content: '−'; }
-  details.card.chall-new > summary { background: var(--accent-solid); color: #fff; border-radius: 12px; padding: 0 16px; min-height: 52px; align-items: center; margin: 0 -6px; }
-  details.card.chall-new > summary .sub { color: rgba(255,255,255,.82); }
+  details.card.chall-new:not([open]) { padding: 0; background: none; border-color: transparent; box-shadow: none; }
+  details.card.chall-new > summary { width: fit-content; min-height: 38px; padding: 0 14px; margin: 0; align-items: center; gap: 8px; border-radius: 999px; font-size: 14px; background: var(--accent-solid); color: #fff; transition: filter .15s, transform .15s; }
+  details.card.chall-new > summary:hover { filter: brightness(1.08); }
+  details.card.chall-new > summary:active { transform: translateY(1px); }
+  details.card.chall-new > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   details.card.chall-new > summary::after { color: #fff; }
   details.card.chall-new[open] > summary { margin-bottom: 16px; }
+  .ch-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 20px; margin: 0 0 16px; padding: 12px 0 0; border-top: 1px solid var(--line); }
+  .ch-meta dt { color: var(--muted); font-size: 12px; font-weight: 500; }
+  .ch-meta dd { margin: 2px 0 0; font-size: 13.5px; overflow-wrap: anywhere; }
   h2 { font-size: 15.5px; line-height: 1.3; font-weight: 600; letter-spacing: -.01em; }
   h3 { font-size: 13px; font-weight: 600; }
   .sub, .muted { color: var(--muted); font-size: 13px; }
@@ -390,6 +396,7 @@ const CSS = `
   }
   @media (max-width: 1080px) { .cols { grid-template-columns: minmax(0, 1fr); } }
   @media (max-width: 899px) {
+    .ch-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .chrome { position: sticky; bottom: auto; width: auto; flex-direction: row; align-items: center; gap: 10px; height: calc(var(--top-h) + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(8px, env(safe-area-inset-right)) 0 max(14px, env(safe-area-inset-left)); border-right: 0; border-bottom: 1px solid var(--line); }
     .brand { padding: 0; }
     .brand span { display: none; }
@@ -1301,13 +1308,18 @@ export function challengeWizard(d: Pick<ChallengesPageData, 'wizard' | 'channels
     </form>`;
 }
 
-/** A challenge row in the list, linking to its detail page. */
-function challengeListItem(item: ChallengeListItem, tz: string): string {
-  const c = item.challenge;
-  const when =
-    item.status === 'ended' ? `ended ${fmtDate(c.endedAt ?? c.endsAt, tz)}` : item.status === 'upcoming' ? `starts ${fmtDate(c.startsAt, tz)}` : `until ${fmtDate(c.endsAt, tz)}`;
-  const metric = goalName({ metric: c.metric, label: c.label, activityName: c.activityName });
-  return `<div class="row"><div class="row-l"><span class="lbl"><a class="row-link" href="/dashboard/challenges/${c.id}">#${c.id} ${escapeHtml(c.name)}</a></span><span class="help">${escapeHtml(metric)} · ${escapeHtml(when)}</span></div><div class="row-c">${challengeStatusPill(item.status)}<span class="muted">${escapeHtml(fmt(item.joined))} joined</span></div></div>`;
+/** Challenges list rendered as a table, one clickable row per challenge. */
+export function challengesTable(list: ChallengeListItem[], tz: string): string {
+  const rows = list
+    .map((item) => {
+      const c = item.challenge;
+      const when =
+        item.status === 'ended' ? `ended ${fmtDate(c.endedAt ?? c.endsAt, tz)}` : item.status === 'upcoming' ? `starts ${fmtDate(c.startsAt, tz)}` : `until ${fmtDate(c.endsAt, tz)}`;
+      const metric = goalName({ metric: c.metric, label: c.label, activityName: c.activityName });
+      return `<tr data-href="/dashboard/challenges/${c.id}"><td class="dim" data-label="ID">#${c.id}</td><td class="req" data-label="Challenge"><a class="row-link" href="/dashboard/challenges/${c.id}">${escapeHtml(c.name)}</a></td><td data-label="Goal">${escapeHtml(metric)}</td><td data-label="Status">${challengeStatusPill(item.status)}</td><td data-label="When">${escapeHtml(when)}</td><td class="r" data-label="Joined">${escapeHtml(fmt(item.joined))}</td></tr>`;
+    })
+    .join('');
+  return `<div class="tbl"><table><thead><tr><th scope="col">#</th><th scope="col">Challenge</th><th scope="col">Goal</th><th scope="col">Status</th><th scope="col">When</th><th scope="col" class="r">Joined</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 const CLEAR_CHALLENGE_FLASH_SCRIPT =
@@ -1354,7 +1366,6 @@ export function challengesPage(d: ChallengesPageData, now: number = Date.now()):
   const rolePill = d.canManageRoles ? statusPill('ok', 'Manage Roles granted') : statusPill('err', 'Missing Manage Roles — rewards cannot be granted');
   const open = d.wizard.step !== 1 || d.wizard.errors.length > 0;
   const errors = d.wizard.errors.length > 0 ? `<div class="flash" role="alert">${d.wizard.errors.map(escapeHtml).join('<br>')}</div>` : '';
-  const listItems = d.list.map((item) => challengeListItem(item, d.timezone));
   const pager = pagerHtml({
     page: d.page,
     pages: d.pages,
@@ -1365,7 +1376,7 @@ export function challengesPage(d: ChallengesPageData, now: number = Date.now()):
   });
   const body = `
     ${challengeFlash(d.flash)}
-    <details class="card chall-new" id="challenge-new"${open ? ' open' : ''}><summary><span>New challenge</span><span class="sub">Details, schedule, review</span></summary>
+    <details class="card chall-new" id="challenge-new"${open ? ' open' : ''}><summary><span>New challenge</span></summary>
       ${errors}
       ${challengeWizard(d)}
     </details>
@@ -1374,7 +1385,7 @@ export function challengesPage(d: ChallengesPageData, now: number = Date.now()):
       <div class="pills card-pills">${rolePill}</div>
       <div class="filters"><nav class="seg" aria-label="Challenge status">${filters}</nav></div>
       <div class="filters"><nav class="seg" aria-label="Sort challenges">${sorts}</nav></div>
-      <div class="rows">${listItems.length > 0 ? listItems.join('') : emptyState(d.status === 'all' ? 'No challenges yet — create one above.' : `No ${statusLabel(d.status).toLowerCase()} challenges.`)}</div>
+      ${d.list.length > 0 ? challengesTable(d.list, d.timezone) : emptyState(d.status === 'all' ? 'No challenges yet — create one above.' : `No ${statusLabel(d.status).toLowerCase()} challenges.`)}
       ${pager}
     </section>
     ${d.flash ? CLEAR_CHALLENGE_FLASH_SCRIPT : ''}`;
@@ -1408,8 +1419,10 @@ function progressTable(rows: ChallengeProgressRow[], metric: ChallengeMetric, ta
   return `<div class="tbl"><table><thead><tr><th scope="col">Rank</th><th scope="col">Member</th><th scope="col">Progress</th>${shareHead}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
-function challengeMeta(label: string, value: string): string {
-  return `<div class="row"><div class="row-l"><span class="lbl">${escapeHtml(label)}</span></div><div class="row-c">${value}</div></div>`;
+/** Compact 4-column detail meta block; labels and values are escaped. */
+export function challengeMetaGrid(items: [string, string][]): string {
+  const inner = items.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
+  return `<dl class="ch-meta">${inner}</dl>`;
 }
 
 function goalHeading(goal: ChallengeGoal): string {
@@ -1490,16 +1503,16 @@ export function challengeDetailPage(d: ChallengeDetailData, now: number = Date.n
   const goalCards = d.goals
     .map(({ goal, rows }) => `<h3 class="group-h" id="h-goal-${goal.id}">${escapeHtml(goalHeading(goal))}</h3>${progressTable(rows.slice(0, 3), goal.metric, goal.target, 'No participants yet.')}`)
     .join('');
-  const overview = `<div class="rows">
-      ${challengeMeta('Status', challengeStatusPill(d.status))}
-      ${challengeMeta('Goals', `<span>${escapeHtml(fmt(goalCount))}</span>`)}
-      ${challengeMeta('Participants', `<span>${escapeHtml(fmt(d.joined))} joined</span>`)}
-      ${challengeMeta('Starts', `<span>${escapeHtml(fmtDate(c.startsAt, d.timezone))}</span>`)}
-      ${challengeMeta('Ends', `<span>${escapeHtml(fmtDate(c.endsAt, d.timezone))}${d.status === 'ended' ? ` · ended ${escapeHtml(fmtDate(c.endedAt ?? c.endsAt, d.timezone))}` : ''}</span>`)}
-      ${challengeMeta('Channel', `<span>#${escapeHtml(d.channelName)}</span>`)}
-      ${challengeMeta('Reward role', `<span>${c.rewardRoleId ? escapeHtml(c.rewardRoleId) : 'No reward role'}</span>`)}
-      ${challengeMeta('Created by', `<span>${escapeHtml(c.createdBy)} · ${escapeHtml(fmtDate(c.createdAt, d.timezone))}</span>`)}
-    </div>
+  const overview = `${challengeMetaGrid([
+    ['Status', d.status === 'ended' ? 'Completed' : d.status === 'upcoming' ? 'Upcoming' : 'Active'],
+    ['Goals', fmt(goalCount)],
+    ['Participants', `${fmt(d.joined)} joined`],
+    ['Starts', fmtDate(c.startsAt, d.timezone)],
+    ['Ends', `${fmtDate(c.endsAt, d.timezone)}${d.status === 'ended' ? ` · ended ${fmtDate(c.endedAt ?? c.endsAt, d.timezone)}` : ''}`],
+    ['Channel', `#${d.channelName}`],
+    ['Reward role', c.rewardRoleId ?? 'No reward role'],
+    ['Created by', `${c.createdBy} · ${fmtDate(c.createdAt, d.timezone)}`],
+  ])}
     ${c.description ? `<p class="muted">${escapeHtml(c.description)}</p>` : ''}
     <h3 class="group-h" id="h-top">Goal standings</h3>
     ${goalCards || emptyState('No goals yet.')}
