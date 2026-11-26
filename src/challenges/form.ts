@@ -84,10 +84,41 @@ export function challengeWindow(startDate: string, endDate: string, now = Date.n
 export type ChallengeStatus = 'upcoming' | 'active' | 'ended';
 
 /** `ended` also when the deadline passed but the row was not finalized yet. */
-export function challengeStatus(c: { status: 'active' | 'ended'; startsAt: number; endsAt: number }, now = Date.now()): ChallengeStatus {
+export function challengeStatus(c: { status: ChallengeStatus; startsAt: number; endsAt: number }, now = Date.now()): ChallengeStatus {
   if (c.status === 'ended' || now >= c.endsAt) return 'ended';
   if (now < c.startsAt) return 'upcoming';
   return 'active';
+}
+
+/** Short label of a challenge event kind, for the dashboard activity table. */
+export const CHALLENGE_EVENT_LABELS: Record<string, string> = {
+  created: 'Created',
+  started: 'Started',
+  joined: 'Joined',
+  left: 'Left',
+  ended: 'Ended',
+  reward: 'Reward',
+};
+
+/** One-line description of a challenge event; actor and detail may be missing. Pure. */
+export function challengeEventText(kind: string, actorName: string | null, detail: string | null): string {
+  const actor = actorName?.trim() || 'A member';
+  switch (kind) {
+    case 'created':
+      return actorName?.trim() ? `Created by ${actor}` : 'Created';
+    case 'started':
+      return 'Started';
+    case 'joined':
+      return `${actor} joined`;
+    case 'left':
+      return `${actor} left`;
+    case 'ended':
+      return `Ended${actorName?.trim() ? ` by ${actor}` : ''}${detail?.trim() ? ` · ${detail.trim()}` : ''}`;
+    case 'reward':
+      return `Reward given to ${actor}${detail?.trim() ? ` (${detail.trim()})` : ''}`;
+    default:
+      return kind;
+  }
 }
 
 export interface ProgressRow {
