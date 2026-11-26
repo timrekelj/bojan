@@ -5,6 +5,7 @@ import {
   EmbedBuilder,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   PermissionFlagsBits,
   REST,
   Routes,
@@ -174,7 +175,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
     const user = interaction.options.getUser('user') ?? interaction.user;
     const summary = db.activitySummary(guildId, user.id, name);
     if (!summary) {
-      await interaction.reply({ content: `No recorded sessions for **${name}**${user.id === interaction.user.id ? '' : ` for ${user.username}`}. Start it while the bot is online and try again.`, ephemeral: true });
+      await interaction.reply({ content: `No recorded sessions for **${name}**${user.id === interaction.user.id ? '' : ` for ${user.username}`}. Start it while the bot is online and try again.`, flags: MessageFlags.Ephemeral });
       return;
     }
     const now = Date.now();
@@ -205,17 +206,17 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
 
   if (interaction.commandName === 'backfill') {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
-      await interaction.reply({ content: 'This command is admin-only.', ephemeral: true });
+      await interaction.reply({ content: 'This command is admin-only.', flags: MessageFlags.Ephemeral });
       return;
     }
     if (interaction.options.getSubcommand() === 'xp') {
       if (backfillRunning) {
-        await interaction.reply({ content: 'A backfill is already running — check the other invocation.', ephemeral: true });
+        await interaction.reply({ content: 'A backfill is already running — check the other invocation.', flags: MessageFlags.Ephemeral });
         return;
       }
       const stateKey = `xpbackfill:${guildId}`;
       if (db.getState(stateKey) !== null) {
-        await interaction.reply({ content: 'The XP backfill already ran in this server — it only runs once. New messages keep earning XP normally.', ephemeral: true });
+        await interaction.reply({ content: 'The XP backfill already ran in this server — it only runs once. New messages keep earning XP normally.', flags: MessageFlags.Ephemeral });
         return;
       }
       backfillRunning = true;
@@ -223,29 +224,29 @@ async function handleCommand(interaction: ChatInputCommandInteraction, db: BotDa
         const res = db.backfillMessageXp(guildId, Date.now());
         if (res.messages === 0) {
           console.log(`[bot] xp backfill skipped: no recorded messages in guild ${guildId}`);
-          await interaction.reply({ content: 'No recorded messages yet — run /backfill messages first, then try again.', ephemeral: true });
+          await interaction.reply({ content: 'No recorded messages yet — run /backfill messages first, then try again.', flags: MessageFlags.Ephemeral });
           return;
         }
         db.setState(stateKey, new Date().toISOString());
         console.log(`[bot] xp backfill: granted ${res.xpGranted} XP to ${res.members} member(s) for ${res.messages} messages in guild ${guildId}`);
         await interaction.reply({
           content: `XP backfill complete: granted **${fmt(res.xpGranted)} XP** to **${res.members}** member${res.members === 1 ? '' : 's'} — ${fmt(res.messages)} recorded message${res.messages === 1 ? '' : 's'} × ${XP_BACKFILL_PER_MESSAGE} XP. New levels show up on /stats right away; this only runs once.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       } catch (err) {
         console.error('[bot] xp backfill failed:', err);
-        await interaction.reply({ content: 'XP backfill failed — see bot logs.', ephemeral: true }).catch(() => undefined);
+        await interaction.reply({ content: 'XP backfill failed — see bot logs.', flags: MessageFlags.Ephemeral }).catch(() => undefined);
       } finally {
         backfillRunning = false;
       }
       return;
     }
     if (backfillRunning) {
-      await interaction.reply({ content: 'A backfill is already running — check the other invocation.', ephemeral: true });
+      await interaction.reply({ content: 'A backfill is already running — check the other invocation.', flags: MessageFlags.Ephemeral });
       return;
     }
     backfillRunning = true;
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
       const guild = interaction.guild;
       if (!guild) return;
@@ -543,7 +544,7 @@ export function registerEvents(client: Client, db: BotDatabase, builder: Builder
     if (!interaction.isChatInputCommand()) return;
     void handleCommand(interaction, db, client).catch((err) => {
       console.error('[bot] command error:', err);
-      const reply = { content: 'Something went wrong running that command.', ephemeral: true } as const;
+      const reply = { content: 'Something went wrong running that command.', flags: MessageFlags.Ephemeral } as const;
       if (interaction.replied || interaction.deferred) void interaction.followUp(reply).catch(() => undefined);
       else void interaction.reply(reply).catch(() => undefined);
     });

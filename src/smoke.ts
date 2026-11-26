@@ -33,7 +33,7 @@ import {
   buildBuildingCard, buildCancelledCard, buildClosedCard, buildConflictFixCard, buildConflictFixedCard, buildConflictManualCard, buildQueuedCard, buildResumingCard, buildFailedCard, buildMergedCard, buildNoteCard, buildPlanCard, buildPrOpenedCard,
   type BuilderMessage,
 } from './builder/cards.js';
-import { extractReply, lastConversationIsAssistant } from './builder/opencode.js';
+import { extractReply, isAuthError, lastConversationIsAssistant } from './builder/opencode.js';
 import { addUsage, estimateCostUsd, goPriceFor, parseGoPrices } from './builder/pricing.js';
 import { parseBuilderForm, parseChatLanguages, parseLimitThreshold } from './builder/form.js';
 import { blockingLimit, formatLimitDenial, LimitGate } from './builder/limits.js';
@@ -1568,6 +1568,11 @@ rmSync(dir, { recursive: true, force: true });
   check('prInfoFromJson: merged and closed ignore mergeability; prStateFromJson unchanged', prInfoFromJson({ state: 'closed', merged: true, mergeable_state: 'dirty' }).state === 'merged' && prInfoFromJson({ state: 'closed', merged: true, mergeable_state: 'dirty' }).mergeability === 'ok' && prInfoFromJson({ state: 'closed', mergeable: null }).state === 'closed' && prInfoFromJson({ state: 'closed', mergeable: null }).mergeability === 'ok' && prStateFromJson({ state: 'open', mergeable_state: 'dirty' }) === 'open');
 
   check('lastConversationIsAssistant: skips idle/other message types', lastConversationIsAssistant([{ type: 'idle' }, { type: 'agent-switched' }, { type: 'assistant' }, { type: 'user' }]) && !lastConversationIsAssistant([{ type: 'system' }, { type: 'user' }, { type: 'assistant' }]) && !lastConversationIsAssistant([{ type: 'user' }]) && lastConversationIsAssistant([]) && lastConversationIsAssistant([{ type: 'idle' }]));
+  {
+    const tagged = Object.assign(new Error('Authentication required'), { _tag: 'UnauthorizedError' });
+    check('isAuthError: tagged UnauthorizedError, 401 status, message, nested cause', isAuthError(tagged) && isAuthError({ status: 401 }) && isAuthError({ response: { status: 401 } }) && isAuthError(new Error('Authentication required')) && isAuthError(new Error('x', { cause: tagged })));
+    check('isAuthError: other errors are not auth errors', !isAuthError(new Error('connection refused')) && !isAuthError({ status: 500 }) && !isAuthError(null) && !isAuthError('Authentication required'));
+  }
   const okBuild = `done\n${json({ status: 'pr_opened', pr_url: 'https://github.com/a/b/pull/1', summary: 's' })}`;
   const okPlan = `plan\n${json({ status: 'needs_input', title: 'T', plan: 'p', questions: [] })}`;
   const rep = (text: string, finish: string | null = 'stop', error: string | null = null) => ({ text, finish, error });

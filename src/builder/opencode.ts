@@ -87,6 +87,21 @@ const WAIT_SLICE_MS = 60_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Did the OpenCode server reject our credentials (401)? The client surfaces this as the protocol's
+ * `UnauthorizedError` (a Schema.TaggedError: `_tag`/`name` "UnauthorizedError", httpApiStatus 401,
+ * message "Authentication required"); also accepts a `status`/`response.status` of 401 and, as a
+ * last resort, the message text.
+ */
+export function isAuthError(err: unknown, depth = 0): boolean {
+  if (typeof err !== 'object' || err === null || depth > 3) return false;
+  const e = err as { _tag?: unknown; name?: unknown; status?: unknown; response?: { status?: unknown }; message?: unknown; cause?: unknown };
+  if (e._tag === 'UnauthorizedError' || e.name === 'UnauthorizedError') return true;
+  if (e.status === 401 || e.response?.status === 401) return true;
+  if (typeof e.message === 'string' && /authentication required/i.test(e.message)) return true;
+  return isAuthError(e.cause, depth + 1);
+}
+
 export class OpenCodeAgent {
   readonly client: ReturnType<typeof OpenCode.make>;
 
@@ -105,6 +120,10 @@ export class OpenCodeAgent {
         const res = await this.client.agent.list({ location: { directory } });
         if (res.data.length > 0) return;
       } catch (err) {
+        if (isAuthError(err)) {
+          const msg = err instanceof Error ? err.message : 'Authentication required';
+          throw new Error(`OpenCode rejected the credentials (${msg}): OPENCODE_PASSWORD differs between the bot and the agent container`);
+        }
         last = err;
       }
       await sleep(1000);
