@@ -6,7 +6,7 @@ import type { AgentStatus } from '../builder/opencode.js';
 import { ALL_STORES, STORE_LABELS, type FreeSettings } from '../freegames/types.js';
 import type { DeployStatus } from '../dokploy.js';
 import type { TranscriptEntry, TranscriptPart } from '../builder/transcript.js';
-import { CHALLENGE_EVENT_LABELS, challengeEventText, formatChallengeTarget, formatChallengeValue, MAX_CHALLENGE_GOALS, type ChallengeStatus, type ChallengeWizardStep, type ChallengeDraft, type ProgressRow } from '../challenges/form.js';
+import { CHALLENGE_EVENT_LABELS, challengeEventText, formatChallengeTarget, formatChallengeValue, MAX_CHALLENGE_GOALS, MAX_SET_VALUE, type ChallengeStatus, type ChallengeWizardStep, type ChallengeDraft, type ProgressRow } from '../challenges/form.js';
 import { CHALLENGE_METRICS, goalName, isTimeMetric, metricLabel, metricTargetUnit, type ChallengeMetric } from '../challenges/types.js';
 import { canCancel, retryAction } from '../builder/queue.js';
 
@@ -1445,17 +1445,11 @@ function addGoalForm(c: Challenge, goalCount: number): string {
   </details>`;
 }
 
-/** Inline admin edit/delete form of one entry. */
-function entryForm(d: ChallengeDetailData, row: ChallengeEntryView): string {
+/** Editable cells of one entry inside the batch save form. */
+function entryCells(d: ChallengeDetailData, row: ChallengeEntryView): string {
   const { entry, goal } = row;
-  return `<form method="post" action="/challenge-entry">
-    <input type="hidden" name="challengeId" value="${d.challenge.id}">
-    <input type="hidden" name="entryId" value="${entry.id}">
-    <input type="number" name="value" min="1" max="5000" value="${entry.value}" aria-label="Value for ${escapeHtml(entry.displayName)}">
-    <input type="text" name="reason" maxlength="300" placeholder="Reason (optional)" aria-label="Reason for changing ${escapeHtml(entry.displayName)}'s entry">
-    <button type="submit" name="op" value="update" class="btn ghost">Save</button>
-    <button type="submit" name="op" value="delete" class="btn ghost" onclick="return confirm('Delete this entry?')">Delete</button>
-  </form>`;
+  const name = escapeHtml(entry.displayName);
+  return `<td class="dim" data-label="Time">${escapeHtml(fmtDate(entry.createdAt, d.timezone))}</td><td data-label="Member" class="name">${name}</td><td data-label="Goal">${escapeHtml(goalName(goal))}</td><td data-label="Value"><input type="number" name="value_${entry.id}" min="1" max="${MAX_SET_VALUE}" step="1" inputmode="numeric" value="${entry.value}" aria-label="Value for ${name}"></td><td data-label="Review">${entry.flagged ? '<span class="badge error">Flagged</span>' : '<span class="badge">OK</span>'}</td><td data-label="Reason"><input type="text" name="reason_${entry.id}" maxlength="300" placeholder="Reason (optional)" aria-label="Reason for changing ${name}'s entry"></td><td data-label="Delete"><label class="check"><input type="checkbox" name="del_${entry.id}" value="1" data-entry-remove aria-label="Delete ${name}'s entry"> Delete</label></td>`;
 }
 
 /** One challenge: overview goals, per-goal progress, manual entries and the event log. */
@@ -1527,16 +1521,17 @@ export function challengeDetailPage(d: ChallengeDetailData, now: number = Date.n
     .join('');
   const progress = `<h2 id="h-progress">Progress</h2>${progressGoals || emptyState('No goals yet.')}${progressPager}`;
 
-  const entryRows = d.entries.rows
-    .map(
-      ({ entry, goal }) =>
-        `<tr><td class="dim" data-label="Time">${escapeHtml(fmtDate(entry.createdAt, d.timezone))}</td><td data-label="Member" class="name">${escapeHtml(entry.displayName)}</td><td data-label="Goal">${escapeHtml(goalName(goal))}</td><td data-label="Value">${escapeHtml(formatChallengeValue(goal.metric, entry.value))}</td><td data-label="Review">${entry.flagged ? '<span class="badge error">Flagged</span>' : '<span class="badge">OK</span>'}</td><td data-label="Admin">${entryForm(d, { entry, goal })}</td></tr>`,
-    )
-    .join('');
+  const entryRows = d.entries.rows.map((row) => `<tr>${entryCells(d, row)}</tr>`).join('');
   const entriesTable =
     entryRows.length === 0
       ? emptyState(d.entries.flaggedOnly ? 'No flagged entries.' : 'No entries yet.')
-      : `<div class="tbl"><table><thead><tr><th scope="col">Time</th><th scope="col">Member</th><th scope="col">Goal</th><th scope="col">Value</th><th scope="col">Review</th><th scope="col">Admin</th></tr></thead><tbody>${entryRows}</tbody></table></div>`;
+      : `<form method="post" action="/challenge-entry">
+    <input type="hidden" name="challengeId" value="${c.id}">
+    <input type="hidden" name="page" value="${d.entries.page}">
+    <input type="hidden" name="flagged" value="${d.entries.flaggedOnly ? '1' : '0'}">
+    <div class="tbl"><table><thead><tr><th scope="col">Time</th><th scope="col">Member</th><th scope="col">Goal</th><th scope="col">Value</th><th scope="col">Review</th><th scope="col">Reason</th><th scope="col">Delete</th></tr></thead><tbody>${entryRows}</tbody></table></div>
+    <div class="savebar"><span class="muted">Edits on this page are saved together.</span><button type="submit" onclick="return !document.querySelectorAll('input[data-entry-remove]:checked').length || confirm('Delete the checked entries? Value edits on this page are saved too.')">Save changes</button></div>
+  </form>`;
   const entryFilters = ([false, true] as const)
     .map((flagged) => {
       const label = flagged ? 'Flagged only' : 'All entries';

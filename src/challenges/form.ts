@@ -208,6 +208,38 @@ export function parseEntryValue(raw: string): number | null {
   return Number.isSafeInteger(value) && value >= 1 && value <= MAX_SET_VALUE ? value : null;
 }
 
+/** One row of the batch entry editor: value and reason as typed, `remove` from the delete checkbox. */
+export interface EntryEdit {
+  entryId: number;
+  value: string;
+  reason: string;
+  remove: boolean;
+}
+
+/**
+ * Collect the batch editor's `value_<id>`, `reason_<id>` and `del_<id>` fields,
+ * sorted by entry id. Malformed ids and unrelated keys are ignored; a missing
+ * value stays an empty string so the handler can reject it.
+ */
+export function parseEntryEdits(form: Record<string, unknown>): EntryEdit[] {
+  const edits = new Map<number, EntryEdit>();
+  for (const [key, raw] of Object.entries(form)) {
+    const m = /^value_(\d+)$/.exec(key);
+    if (!m) continue;
+    const entryId = Number(m[1]);
+    if (!Number.isSafeInteger(entryId) || entryId <= 0) continue;
+    const reasonRaw = form[`reason_${entryId}`];
+    const delRaw = form[`del_${entryId}`];
+    edits.set(entryId, {
+      entryId,
+      value: typeof raw === 'string' ? raw.trim() : '',
+      reason: (typeof reasonRaw === 'string' ? reasonRaw : '').trim().slice(0, 300),
+      remove: delRaw === '1' || delRaw === 1 || delRaw === true,
+    });
+  }
+  return [...edits.values()].sort((a, b) => a.entryId - b.entryId);
+}
+
 /** Single manual sets above the threshold need an admin review; every manual metric (push-ups, custom) is checked. */
 export function shouldFlagEntry(metric: ChallengeMetric, value: number): boolean {
   return isManualMetric(metric) && value > PUSHUP_FLAG_THRESHOLD;
