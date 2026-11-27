@@ -23,7 +23,7 @@ import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challeng
 import { CHALLENGE_METRICS, goalName, isManualMetric, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, challengeDetailPage, challengeMetaGrid, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, requestsParts, settingsPage, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, challengeDetailPage, challengeMetaGrid, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, emojiGlyph, emojiHref, emojiList, emojiPage, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, pickEmoji, requestsParts, settingsPage, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type EmojiPageData, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -925,6 +925,20 @@ rmSync(dir, { recursive: true, force: true });
     const reqRes = await get('/dashboard/requests');
     check('route: logs + requests pages render', logsRes.status === 200 && (await logsRes.text()).includes('id="live-logs"') && reqRes.status === 200 && (await reqRes.text()).includes('id="live-reqs"'));
 
+    for (const [messageId, reactorId] of [['em1', 'bob'], ['em1', 'carol'], ['em2', 'bob']] as const) {
+      wdb.recordReaction({ guildId: cfg.guildId, channelId: 'c1', messageId, authorId: 'alice', reactorId, emojiKey: '🎯', emojiLabel: '🎯', ts: now });
+    }
+    const emojiRes = await get('/dashboard/emojis');
+    const emojiHtml = await emojiRes.text();
+    check(
+      'route: emojis page renders the usage list + reactor leaderboard',
+      emojiRes.status === 200 && emojiHtml.includes('id="h-emojis"') && emojiHtml.includes('id="h-emoji-users"') && emojiHtml.includes('class="emojilb"') && emojiHtml.includes('<a href="/dashboard/emojis" aria-current="page">') && (emojiHtml.match(/<a [^>]*aria-current="page"/g) ?? []).length === 2,
+      `status=${emojiRes.status} statuses list=${emojiHtml.includes('class="emojilb"')} nav=${emojiHtml.includes('<a href="/dashboard/emojis" aria-current="page">')} current=${(emojiHtml.match(/<a [^>]*aria-current="page"/g) ?? []).length}`,
+    );
+    const liveEmojiRes = await get('/dashboard/live?view=emojis');
+    const liveEmoji = (await liveEmojiRes.json()) as { parts: Record<string, string> };
+    check('route: /dashboard/live?view=emojis is known and returns chrome parts only', liveEmojiRes.status === 200 && Object.keys(liveEmoji.parts).length === 0);
+
     const p1 = await postForm('/settings', 'weeklyEnabled=1&monthlyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana&embedChannels=c1&embedChannels=c2&levelingEnabled=1&levelupChannel=&challengeChannel=ch5');
     const saved = wdb.getSettings(cfg.guildId);
     check('route: POST /settings saves and redirects to the settings page', p1.status === 302 && p1.headers.get('location') === '/dashboard/settings?saved=1' && saved.weeklyDay === 3 && saved.weeklyHour === 18 && saved.statsChannelId === 'c1' && saved.embedChannels.join() === 'c1,c2' && saved.levelingEnabled && saved.levelupChannelId === null && saved.challengeChannelId === 'ch5');
@@ -949,7 +963,51 @@ rmSync(dir, { recursive: true, force: true });
     wdb.deleteWebSessionsForUser('uview');
   }
 
-  // dashboard sessions persist in the DB so redeploys don't force a re-login
+  // ---- emoji usage leaderboard ---------------------------------------------
+{
+  const edir = mkdtempSync(join(tmpdir(), 'bojan-emoji-'));
+  const edb = new BotDatabase(join(edir, 'emoji.db'));
+  const EG = 'guild-emoji';
+  const react = (messageId: string, reactorId: string, emojiKey = '🎯'): void => edb.recordReaction({ guildId: EG, channelId: 'c1', messageId, authorId: 'author', reactorId, emojiKey, emojiLabel: emojiKey, ts: 1000 });
+  react('m1', 'bob');
+  react('m2', 'bob');
+  react('m3', 'carol');
+  react('m4', 'dave');
+  react('m4', 'erin');
+  const users = edb.topEmojiUsers(EG, '🎯', 10);
+  check('topEmojiUsers: count DESC then userId ASC', users.map((u) => `${u.userId}:${u.count}`).join() === 'bob:2,carol:1,dave:1,erin:1', users.map((u) => `${u.userId}:${u.count}`).join());
+  check('topEmojiUsers: limit + distinct reactor count', edb.topEmojiUsers(EG, '🎯', 1).length === 1 && edb.topEmojiUsers(EG, '🎯', 1)[0]?.userId === 'bob' && edb.countEmojiUsers(EG, '🎯') === 4);
+  check('countEmojiKeys: one emoji so far', edb.countEmojiKeys(EG) === 1);
+  react('m5', 'bob', '🔥');
+  check('countEmojiKeys: a second emoji counts, the first leaderboard is unchanged', edb.countEmojiKeys(EG) === 2 && edb.topEmojiUsers(EG, '🎯', 10).length === 4);
+  edb.close();
+  rmSync(edir, { recursive: true, force: true });
+
+  const rows = [
+    { emojiKey: 'a', emojiLabel: '👍', count: 12 },
+    { emojiKey: 'b', emojiLabel: '<:party:1234>', count: 7 },
+  ];
+  check('pickEmoji: exact key, stale key -> first, empty -> null', pickEmoji(rows, 'b')?.emojiKey === 'b' && pickEmoji(rows, 'zzz')?.emojiKey === 'a' && pickEmoji([], 'a') === null);
+  const glyph = emojiGlyph({ emojiLabel: '<:party:1234>' });
+  const anim = emojiGlyph({ emojiLabel: '<a:x:9>' });
+  const plain = emojiGlyph({ emojiLabel: '👍 <b>' });
+  check('emojiGlyph: custom webp/gif, literal escaped', glyph.includes('cdn.discordapp.com/emojis/1234.webp') && glyph.includes('alt="party"') && anim.includes('emojis/9.gif') && plain === '👍 &lt;b&gt;' && !plain.includes('<b>'));
+
+  const many = Array.from({ length: 12 }, (_, i) => ({ emojiKey: `e${i}`, emojiLabel: '🎯', count: 12 - i }));
+  const collapsed = emojiList(many, 'e3', false, 12);
+  const expanded = emojiList(many, 'e3', true, 12);
+  check('emojiList: collapsed 10 + show all, aria-current on the selected only', (collapsed.match(/<a /g) ?? []).length === 11 && (collapsed.match(/aria-current="page"/g) ?? []).length === 1 && collapsed.includes('Show all 12 emojis') && !collapsed.includes('Show top 10'));
+  check('emojiList: expanded shows all 12 + show top 10 with medals', (expanded.match(/<a /g) ?? []).length === 13 && expanded.includes('Show top 10') && expanded.includes('🥇'));
+  check('emojiHref: key encoded, all flag, anchor', emojiHref('a b', true) === '/dashboard/emojis?emoji=a+b&all=1#h-emoji-users' && emojiHref(null, false) === '/dashboard/emojis#h-emoji-users');
+
+  const pageData: EmojiPageData = { total: 19, emojis: rows, emojiCount: 2, all: false, selected: rows[1]!, users: [{ userId: 'bob', count: 5 }], userCount: 3, members: { bob: { name: 'Bob', avatar: null } }, user: { id: 'u', username: 'Ann', avatar: '' } };
+  const pageHtml = emojiPage(pageData, 0);
+  check('emojiPage: usage card, reactor leaderboard and glyph in the heading', pageHtml.includes('id="h-emojis"') && pageHtml.includes('id="h-emoji-users"') && pageHtml.includes('Who uses <img src="https://cdn.discordapp.com/emojis/1234.webp') && pageHtml.includes('7 uses · 3 members') && pageHtml.includes('Emoji usage'));
+  const emptyHtml = emojiPage({ ...pageData, emojis: [], emojiCount: 0, selected: null, users: [], userCount: 0, total: 0 }, 0);
+  check('emojiPage: empty state without reactions', emptyHtml.includes('No reactions tracked yet.') && emptyHtml.includes('Who uses it'));
+}
+
+// dashboard sessions persist in the DB so redeploys don't force a re-login
   const mkSess = (sid: string, userId: string, username: string, expiresAt: number): WebSessionRow => ({ sid, userId, username, avatar: `a-${sid}.png`, accessToken: `tok-${sid}`, createdAt: now, expiresAt });
   wdb.saveWebSession(mkSess('s1', 'u1', 'Ann', now + D));
   wdb.saveWebSession(mkSess('s2', 'u1', 'Ann', now - 1)); // already expired

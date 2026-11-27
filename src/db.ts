@@ -104,6 +104,11 @@ export interface EmojiRow {
   count: number;
 }
 
+export interface EmojiUserRow {
+  userId: string;
+  count: number;
+}
+
 export interface ChannelRow {
   channelId: string;
   count: number;
@@ -1309,6 +1314,25 @@ export class BotDatabase {
     return this.db
       .prepare('SELECT emoji_key AS emojiKey, emoji_label AS emojiLabel, COUNT(*) AS count FROM reactions WHERE guild_id = ? GROUP BY emoji_key ORDER BY count DESC, emoji_key ASC LIMIT ?')
       .all(guildId, limit) as unknown as EmojiRow[];
+  }
+
+  /** Members who used one emoji the most (self-reactions included). */
+  topEmojiUsers(guildId: string, emojiKey: string, limit: number): EmojiUserRow[] {
+    return this.db
+      .prepare('SELECT reactor_id AS userId, COUNT(*) AS count FROM reactions WHERE guild_id = ? AND emoji_key = ? GROUP BY reactor_id ORDER BY count DESC, userId ASC LIMIT ?')
+      .all(guildId, emojiKey, limit) as unknown as EmojiUserRow[];
+  }
+
+  /** Distinct members who used one emoji (self-reactions included). */
+  countEmojiUsers(guildId: string, emojiKey: string): number {
+    const row = this.db.prepare('SELECT COUNT(DISTINCT reactor_id) AS c FROM reactions WHERE guild_id = ? AND emoji_key = ?').get(guildId, emojiKey) as { c: number };
+    return row.c;
+  }
+
+  /** Distinct emoji ever used on this guild's messages. */
+  countEmojiKeys(guildId: string): number {
+    const row = this.db.prepare('SELECT COUNT(DISTINCT emoji_key) AS c FROM reactions WHERE guild_id = ?').get(guildId) as { c: number };
+    return row.c;
   }
 
   // ---- activities (Discord presences) -----------------------------------
