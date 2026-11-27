@@ -245,7 +245,7 @@ const CSS = `
   .emojilb .g { overflow: hidden; font-size: 20px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
   .emojilb .num { color: var(--text-2); font-size: 13px; font-variant-numeric: tabular-nums; }
   .emojilb img { width: 20px; height: 20px; vertical-align: middle; }
-  .emojitoggle { margin: 10px 0 0; font-size: 13px; }
+  .emojitoggle, .lbtoggle { margin: 10px 0 0; font-size: 13px; }
 
   /* ---- forms ---- */
   .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
@@ -684,19 +684,21 @@ export interface OverviewData {
   /** Dokploy deployment status; null/undefined = not configured. */
   deploy?: DeployStatus;
   today: number;
+  /** Cards the viewer expanded to the full list (`?expand=`). */
+  expand: ExpandToken[];
   week: {
     /** Which week the dashboard leaderboard is showing (`?week=current|last`, default current). */
     selected: 'current' | 'last';
-    current: { bounds: WeekBounds; total: number; rows: UserRow[] };
-    last: { bounds: WeekBounds; total: number; rows: UserRow[] };
+    current: { bounds: WeekBounds; total: number; rows: UserRow[]; more: boolean };
+    last: { bounds: WeekBounds; total: number; rows: UserRow[]; more: boolean };
   };
-  allTime: { total: number; rows: UserRow[] };
+  allTime: { total: number; rows: UserRow[]; more: boolean };
   /** Channel message leaderboards; the same `?week=` selection as the user week card. */
   channelWeek: {
-    current: { bounds: WeekBounds; total: number; rows: ChannelRow[] };
-    last: { bounds: WeekBounds; total: number; rows: ChannelRow[] };
+    current: { bounds: WeekBounds; total: number; rows: ChannelRow[]; more: boolean };
+    last: { bounds: WeekBounds; total: number; rows: ChannelRow[]; more: boolean };
   };
-  channelAllTime: { total: number; rows: ChannelRow[] };
+  channelAllTime: { total: number; rows: ChannelRow[]; more: boolean };
   reactions: { total: number; top: EmojiRow[] };
   /** Emoji usage card: the all-time ranking and the selected emoji's reactor leaderboard. */
   emojis: EmojiSectionData;
@@ -835,12 +837,57 @@ export function medalFor(rank: number): string | null {
   return Number.isInteger(rank) && rank >= 1 && rank <= MEDALS.length ? (MEDALS[rank - 1] ?? null) : null;
 }
 
+/** Rows a collapsed leaderboard shows, and the most an expanded one loads. */
+export const LB_LIMIT = 10;
+export const LB_CAP = 500;
+
+/** Cards whose leaderboard can be expanded via `?expand=`; order is also the URL order. */
+export const EXPAND_TOKENS = ['week', 'all', 'channels-week', 'channels-all', 'emoji-users'] as const;
+export type ExpandToken = (typeof EXPAND_TOKENS)[number];
+
+/** Known `?expand=` tokens, in canonical order, deduped; anything else is ignored. Pure. */
+export function parseExpand(raw: string | undefined): ExpandToken[] {
+  const wanted = new Set((raw ?? '').split(','));
+  return EXPAND_TOKENS.filter((token) => wanted.has(token));
+}
+
+/** Add or remove one expansion token, keeping the canonical order. Pure. */
+export function toggleExpand(tokens: readonly ExpandToken[], token: ExpandToken): ExpandToken[] {
+  return EXPAND_TOKENS.filter((t) => (t === token ? !tokens.includes(t) : tokens.includes(t)));
+}
+
+/** The Overview's current view: which week, which cards are expanded, and the selected emoji. */
+export interface OverviewLink {
+  week: 'current' | 'last';
+  expand: ExpandToken[];
+  emoji: string | null;
+  emojiAll: boolean;
+}
+
+/** Overview URL for a link state, with an anchor for the card being refreshed. Pure. */
+export function overviewHref(l: OverviewLink, hash: string): string {
+  const q = new URLSearchParams();
+  if (l.week === 'last') q.set('week', 'last');
+  if (l.expand.length > 0) q.set('expand', l.expand.join(','));
+  if (l.emoji) q.set('emoji', l.emoji);
+  if (l.emojiAll) q.set('all', '1');
+  // URLSearchParams escapes commas, but the expand list stays readable in the address bar.
+  const qs = q.toString().replace(/%2C/g, ',');
+  return `/dashboard${qs ? '?' + qs : ''}#${hash}`;
+}
+
+/** "Show full list" / "Show top 10" under a leaderboard; nothing when it is complete and collapsed. Pure. */
+export function leaderboardToggle(href: string, expanded: boolean, more: boolean): string {
+  if (!expanded && !more) return '';
+  return `<p class="muted lbtoggle"><a href="${escapeHtml(href)}">${expanded ? 'Show top 10' : 'Show full list'}</a></p>`;
+}
+
 /** Week leaderboard tabs; the selected one is plain text with aria-current, the others links. */
-export function weekTabs(selected: 'current' | 'last', hash = 'h-week', label = 'Leaderboard week'): string {
+export function weekTabs(selected: 'current' | 'last', hash = 'h-week', label = 'Leaderboard week', href?: (week: 'current' | 'last') => string): string {
   const tab = (value: 'current' | 'last', text: string): string =>
     value === selected
       ? `<span class="tab" aria-current="page">${escapeHtml(text)}</span>`
-      : `<a class="tab" href="/dashboard?week=${value}#${escapeHtml(hash)}">${escapeHtml(text)}</a>`;
+      : `<a class="tab" href="${escapeHtml(href ? href(value) : `/dashboard?week=${value}#${hash}`)}">${escapeHtml(text)}</a>`;
   return `<nav class="tabs" aria-label="${escapeHtml(label)}">${tab('current', 'This week')}${tab('last', 'Last week')}</nav>`;
 }
 
@@ -982,7 +1029,8 @@ function emojiChip(e: EmojiRow): string {
 }
 
 /** Link to the Overview's emoji section for one emoji (null = the top one) and the collapsed/expanded list. Pure. */
-export function emojiHref(emojiKey: string | null, all: boolean): string {
+export function emojiHref(emojiKey: string | null, all: boolean, base?: OverviewLink): string {
+  if (base) return overviewHref({ ...base, emoji: emojiKey, emojiAll: all }, 'h-emoji-users');
   const q = new URLSearchParams();
   if (emojiKey) q.set('emoji', emojiKey);
   if (all) q.set('all', '1');
@@ -1000,18 +1048,19 @@ export function pickEmoji(emojis: EmojiRow[], key: string | undefined): EmojiRow
  * Emoji ranking list with links to each emoji's reactor leaderboard and the
  * collapse/expand toggle. `total` is the number of distinct emoji. Pure.
  */
-export function emojiList(emojis: EmojiRow[], selectedKey: string | undefined, all: boolean, total: number): string {
+export function emojiList(emojis: EmojiRow[], selectedKey: string | undefined, all: boolean, total: number, base?: OverviewLink): string {
   if (emojis.length === 0) return emptyState('No reactions tracked yet.');
+  const href = (key: string | null, expanded: boolean): string => emojiHref(key, expanded, base);
   const shown = all ? emojis : emojis.slice(0, 10);
   const items = shown.map((e, i) => {
     const rank = medalFor(i + 1) ?? String(i + 1);
     const current = e.emojiKey === selectedKey ? ' aria-current="page"' : '';
-    return `<li><a href="${escapeHtml(emojiHref(e.emojiKey, all))}"${current}><span class="rank"${medalFor(i + 1) ? ` aria-label="Rank ${i + 1}"` : ''}>${rank}</span><span class="g">${emojiGlyph(e)}</span><span class="num">${fmt(e.count)}</span></a></li>`;
+    return `<li><a href="${escapeHtml(href(e.emojiKey, all))}"${current}><span class="rank"${medalFor(i + 1) ? ` aria-label="Rank ${i + 1}"` : ''}>${rank}</span><span class="g">${emojiGlyph(e)}</span><span class="num">${fmt(e.count)}</span></a></li>`;
   });
   const toggle = all
-    ? `<a href="${escapeHtml(emojiHref(selectedKey ?? null, false))}">Show top 10</a>`
+    ? `<a href="${escapeHtml(href(selectedKey ?? null, false))}">Show top 10</a>`
     : total > shown.length
-      ? `<a href="${escapeHtml(emojiHref(selectedKey ?? null, true))}">Show all ${fmt(total)} emojis</a>`
+      ? `<a href="${escapeHtml(href(selectedKey ?? null, true))}">Show all ${fmt(total)} emojis</a>`
       : '';
   const capped = shown.length < total ? `<span class="muted">Top ${fmt(shown.length)} of ${fmt(total)} emojis.</span> ` : '';
   return `<ol class="emojilb">${items.join('')}</ol>${toggle || capped ? `<p class="muted emojitoggle">${capped}${toggle}</p>` : ''}`;
@@ -1027,13 +1076,19 @@ export interface EmojiSectionData {
   /** Distinct members who used the selected emoji. */
   userCount: number;
   members: Members;
+  /** The reactor leaderboard is expanded past `LB_LIMIT` (and whether it has more rows). */
+  expanded: boolean;
+  more: boolean;
+  /** The Overview's current view, so emoji links keep the week and expanded cards. */
+  link: OverviewLink;
 }
 
 /** The Overview's emoji usage card + reactor leaderboard. Pure. */
 export function emojiSection(d: EmojiSectionData): string {
-  const list = `<section class="card" aria-labelledby="h-emojis"><div class="card-head"><h2 id="h-emojis">Emoji usage</h2><span class="sub">${fmt(d.count)} emoji</span></div>${emojiList(d.rows, d.selected?.emojiKey, d.all, d.count)}</section>`;
+  const list = `<section class="card" aria-labelledby="h-emojis"><div class="card-head"><h2 id="h-emojis">Emoji usage</h2><span class="sub">${fmt(d.count)} emoji</span></div>${emojiList(d.rows, d.selected?.emojiKey, d.all, d.count, d.link)}</section>`;
   const sub = d.selected ? `${fmt(d.selected.count)} uses · ${fmt(d.userCount)} member${d.userCount === 1 ? '' : 's'}` : 'none yet';
-  const users = `<section class="card" aria-labelledby="h-emoji-users"><div class="card-head"><h2 id="h-emoji-users">${d.selected ? `Who uses ${emojiGlyph(d.selected)}` : 'Who uses it'}</h2><span class="sub">${escapeHtml(sub)}</span></div>${d.selected ? leaderboard(d.users.map((u) => ({ userId: u.userId, messages: u.count })), d.selected.count, d.members, undefined, undefined, 'No reactions yet.') : emptyState('No reactions tracked yet.')}</section>`;
+  const toggle = leaderboardToggle(overviewHref({ ...d.link, expand: toggleExpand(d.link.expand, 'emoji-users') }, 'h-emoji-users'), d.expanded, d.more);
+  const users = `<section class="card" aria-labelledby="h-emoji-users"><div class="card-head"><h2 id="h-emoji-users">${d.selected ? `Who uses ${emojiGlyph(d.selected)}` : 'Who uses it'}</h2><span class="sub">${escapeHtml(sub)}</span></div>${d.selected ? leaderboard(d.users.map((u) => ({ userId: u.userId, messages: u.count })), d.selected.count, d.members, undefined, undefined, 'No reactions yet.') : emptyState('No reactions tracked yet.')}${toggle}</section>`;
   return `<div class="cols">${list}${users}</div>`;
 }
 
@@ -1067,6 +1122,8 @@ export function overviewParts(d: OverviewData, now: number = Date.now()): Record
   const weekSub = `${weekRangeLabel(wk.bounds, d.timezone)}${d.week.selected === 'current' ? ' · in progress' : ''} · ${fmt(wk.total)} messages`;
   const weekYouRank = d.week.selected === 'current' ? d.you.currentWeekRank : d.you.lastWeekRank;
   const wkChannels = d.week.selected === 'current' ? d.channelWeek.current : d.channelWeek.last;
+  const link: OverviewLink = { week: d.week.selected, expand: d.expand, emoji: d.emojis.selected?.emojiKey ?? null, emojiAll: d.emojis.all };
+  const expandHref = (token: ExpandToken, hash: string): string => overviewHref({ ...link, expand: toggleExpand(d.expand, token) }, hash);
   return {
     ...chromeParts(d.deploy, now),
     'live-health': healthPills(b, d.deploy, now),
@@ -1078,10 +1135,10 @@ export function overviewParts(d: OverviewData, now: number = Date.now()): Record
       kpi(fmt(b.embedsConverted), 'Embeds converted'),
     ].join(''),
     'live-you': youSection(d.you, { total: d.allTime.total, timezone: d.timezone, channelNames: d.channelNames, username: d.user.username }),
-    'live-week': `<section class="card" aria-labelledby="h-week"><div class="card-head"><h2 id="h-week">Week leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected)}${leaderboard(wk.rows, wk.total, d.members, { userId: d.user.id, rank: weekYouRank }, d.xpByUser, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>`,
-    'live-all': `<section class="card" aria-labelledby="h-all"><div class="card-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members, { userId: d.user.id, rank: d.you.allRank }, d.xpByUser)}</section>`,
-    'live-chan-week': `<section class="card" aria-labelledby="h-chan-week"><div class="card-head"><h2 id="h-chan-week">Channel leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected, 'h-chan-week', 'Channel leaderboard week')}${channelLeaderboard(wkChannels.rows, wkChannels.total, d.channelNames, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>`,
-    'live-chan-all': `<section class="card" aria-labelledby="h-chan-all"><div class="card-head"><h2 id="h-chan-all">Channels, all time</h2><span class="sub">${fmt(d.channelAllTime.total)} messages</span></div>${channelLeaderboard(d.channelAllTime.rows, d.channelAllTime.total, d.channelNames)}</section>`,
+    'live-week': `<section class="card" aria-labelledby="h-week"><div class="card-head"><h2 id="h-week">Week leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected, 'h-week', 'Leaderboard week', (w) => overviewHref({ ...link, week: w }, 'h-week'))}${leaderboard(wk.rows, wk.total, d.members, { userId: d.user.id, rank: weekYouRank }, d.xpByUser, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}${leaderboardToggle(expandHref('week', 'h-week'), d.expand.includes('week'), wk.more)}</section>`,
+    'live-all': `<section class="card" aria-labelledby="h-all"><div class="card-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members, { userId: d.user.id, rank: d.you.allRank }, d.xpByUser)}${leaderboardToggle(expandHref('all', 'h-all'), d.expand.includes('all'), d.allTime.more)}</section>`,
+    'live-chan-week': `<section class="card" aria-labelledby="h-chan-week"><div class="card-head"><h2 id="h-chan-week">Channel leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected, 'h-chan-week', 'Channel leaderboard week', (w) => overviewHref({ ...link, week: w }, 'h-chan-week'))}${channelLeaderboard(wkChannels.rows, wkChannels.total, d.channelNames, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}${leaderboardToggle(expandHref('channels-week', 'h-chan-week'), d.expand.includes('channels-week'), wkChannels.more)}</section>`,
+    'live-chan-all': `<section class="card" aria-labelledby="h-chan-all"><div class="card-head"><h2 id="h-chan-all">Channels, all time</h2><span class="sub">${fmt(d.channelAllTime.total)} messages</span></div>${channelLeaderboard(d.channelAllTime.rows, d.channelAllTime.total, d.channelNames)}${leaderboardToggle(expandHref('channels-all', 'h-chan-all'), d.expand.includes('channels-all'), d.channelAllTime.more)}</section>`,
     'live-react': `<section class="card" aria-labelledby="h-react"><div class="card-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}</section>`,
     'live-emojis': emojiSection(d.emojis),
   };

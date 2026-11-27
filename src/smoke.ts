@@ -23,7 +23,7 @@ import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challeng
 import { CHALLENGE_METRICS, goalName, isManualMetric, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, challengeDetailPage, challengeMetaGrid, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, emojiGlyph, emojiHref, emojiList, emojiSection, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, pickEmoji, requestsParts, settingsPage, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type EmojiSectionData, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, challengeDetailPage, challengeMetaGrid, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, emojiGlyph, emojiHref, emojiList, emojiSection, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewHref, overviewParts, parseExpand, pickEmoji, requestsParts, settingsPage, toggleExpand, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type EmojiSectionData, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -1002,7 +1002,7 @@ rmSync(dir, { recursive: true, force: true });
   check('emojiList: expanded shows all 12 + show top 10 with medals', (expanded.match(/<a /g) ?? []).length === 13 && expanded.includes('Show top 10') && expanded.includes('🥇'));
   check('emojiHref: key encoded, all flag, anchor', emojiHref('a b', true) === '/dashboard?emoji=a+b&all=1#h-emoji-users' && emojiHref(null, false) === '/dashboard#h-emoji-users');
 
-  const sectionData: EmojiSectionData = { count: 2, rows, all: false, selected: rows[1]!, users: [{ userId: 'bob', count: 5 }], userCount: 3, members: { bob: { name: 'Bob', avatar: null } } };
+  const sectionData: EmojiSectionData = { count: 2, rows, all: false, selected: rows[1]!, users: [{ userId: 'bob', count: 5 }], userCount: 3, members: { bob: { name: 'Bob', avatar: null } }, expanded: false, more: false, link: { week: 'current', expand: [], emoji: null, emojiAll: false } };
   const sectionHtml = emojiSection(sectionData);
   check('emojiSection: usage card, reactor leaderboard and glyph in the heading', sectionHtml.includes('id="h-emojis"') && sectionHtml.includes('id="h-emoji-users"') && sectionHtml.includes('Who uses <img src="https://cdn.discordapp.com/emojis/1234.webp') && sectionHtml.includes('7 uses · 3 members') && sectionHtml.includes('Emoji usage'));
   const emptySectionHtml = emojiSection({ ...sectionData, count: 0, rows: [], selected: null, users: [], userCount: 0 });
@@ -1185,12 +1185,13 @@ rmSync(dir, { recursive: true, force: true });
     botStatus: { ping: 42, uptimeSec: 3700, guilds: 1, totalMessages: 16, dbBytes: 1024 * 1024, lastWeeklySent: null, embedsConverted: 3, errors24h: 2 },
     deploy: { ok: true, state: 'running', title: 'Ship <it>', startedAt: T - 60_000, finishedAt: null },
     today: 4,
-    week: { selected: 'current', current: { bounds: currentWeekBounds('UTC'), total: 16, rows }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [] } },
-    allTime: { total: 16, rows },
-    channelWeek: { current: { bounds: currentWeekBounds('UTC'), total: 16, rows: [{ channelId: 'c1', count: 5 }] }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [] } },
-    channelAllTime: { total: 16, rows: [{ channelId: 'c1', count: 5 }] },
+    expand: [],
+    week: { selected: 'current', current: { bounds: currentWeekBounds('UTC'), total: 16, rows, more: false }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [], more: false } },
+    allTime: { total: 16, rows, more: false },
+    channelWeek: { current: { bounds: currentWeekBounds('UTC'), total: 16, rows: [{ channelId: 'c1', count: 5 }], more: false }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [], more: false } },
+    channelAllTime: { total: 16, rows: [{ channelId: 'c1', count: 5 }], more: false },
     reactions: { total: 0, top: [] },
-    emojis: { count: 0, rows: [], all: false, selected: null, users: [], userCount: 0, members: mem },
+    emojis: { count: 0, rows: [], all: false, selected: null, users: [], userCount: 0, members: mem, expanded: false, more: false, link: { week: 'current', expand: [], emoji: null, emojiAll: false } },
     recentEmbeds: [{ id: 1, guildId: G, channelId: 'c1', messageId: 'm', url: 'https://x.test/a?b="c"', provider: 'twitter', ts: T }],
     embedPage: { page: 2, pages: 3, total: 21, pageSize: 10 },
     members: mem,
@@ -1199,6 +1200,36 @@ rmSync(dir, { recursive: true, force: true });
     user: { id: 'u2', username: 'Two', avatar: null },
     you: emptyYouData,
   };
+  check('parseExpand: known tokens only, canonical order, deduped', parseExpand('all,junk,week,all').join() === 'week,all' && parseExpand(undefined).length === 0 && parseExpand('').length === 0);
+  check('toggleExpand: adds in canonical order, removes the token', toggleExpand([], 'week').join() === 'week' && toggleExpand(['emoji-users'], 'week').join() === 'week,emoji-users' && toggleExpand(['week', 'all'], 'week').join() === 'all');
+  check(
+    'overviewHref: week only when last, expand list, emoji, all flag and anchor',
+    overviewHref({ week: 'last', expand: ['week', 'emoji-users'], emoji: '🎯', emojiAll: true }, 'h-week') === '/dashboard?week=last&expand=week,emoji-users&emoji=%F0%9F%8E%AF&all=1#h-week' &&
+      overviewHref({ week: 'current', expand: [], emoji: null, emojiAll: false }, 'h-all') === '/dashboard#h-all',
+  );
+  const ovMore = overviewParts({ ...ovData, week: { ...ovData.week, current: { ...ovData.week.current, more: true } } }, T);
+  check(
+    'overviewParts: "Show full list" only on the card that has more rows',
+    (ovMore['live-week']!.match(/Show full list/g) ?? []).length === 1 &&
+      ovMore['live-week']!.includes('expand=week') &&
+      ovMore['live-week']!.includes('#h-week') &&
+      !ovMore['live-all']!.includes('Show full list') &&
+      !ovMore['live-chan-week']!.includes('Show full list'),
+  );
+  const manyRows = Array.from({ length: 12 }, (_, i) => ({ userId: `u${i}`, messages: 12 - i }));
+  const ovExpanded = overviewParts({ ...ovData, expand: ['week'], week: { ...ovData.week, current: { ...ovData.week.current, rows: manyRows, more: false } } }, T);
+  check(
+    'overviewParts: expanded week renders every row and collapses to top 10',
+    (ovExpanded['live-week']!.match(/<li/g) ?? []).length > 10 &&
+      ovExpanded['live-week']!.includes('href="/dashboard#h-week">Show top 10') &&
+      !ovExpanded['live-week']!.includes('Show full list'),
+  );
+  const ovTabs = overviewParts({ ...ovData, expand: ['week', 'all'] }, T);
+  check(
+    'overviewParts: week tabs keep the week and expanded cards',
+    ovTabs['live-week']!.includes('href="/dashboard?week=last&amp;expand=week,all#h-week"') && ovTabs['live-chan-week']!.includes('href="/dashboard?week=last&amp;expand=week,all#h-chan-week"'),
+  );
+  check('overviewParts: no toggle when nothing is expanded or hidden', !Object.values(overviewParts(ovData, T)).some((html) => html.includes('lbtoggle')));
   const ovHtml = dashboardPage(ovData, T);
   const ovParts = overviewParts(ovData, T);
   check(
