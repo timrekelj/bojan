@@ -93,7 +93,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
   login**; only server administrators (or a configured admin role) get in.
   Sessions are stored in the database (7-day lifetime), so restarting or
   redeploying the bot doesn't log you out.
-  Five pages (see [Dashboard pages](#dashboard-pages)), usable on a phone.
+  Six pages (see [Dashboard pages](#dashboard-pages)), usable on a phone.
   The Overview shows bot status (ping, uptime, DB size, errors, optional
   deployment status), leaderboards (all-time, plus a
   this-week/last-week tab switch, with 🥇🥈🥉 medals for the top 3) and recent
@@ -152,6 +152,7 @@ database (`node:sqlite` — no native dependencies, requires Node >= 22.5).
 | Page | Path | What it shows |
 | --- | --- | --- |
 | Overview | `/dashboard` | bot health, server totals, your own stats, leaderboards, reactions, embed conversions |
+| Emojis | `/dashboard/emojis` | emoji usage, top 10 expandable, per-emoji reactor leaderboard |
 | Settings | `/dashboard/settings` | weekly stats, link embeds, leveling (one form), free games, AI assistant |
 | Requests | `/dashboard/requests` | chats and feature requests with token usage and estimated cost |
 | Logs | `/dashboard/logs` | console output, filterable by level and tag |

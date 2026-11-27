@@ -1,4 +1,4 @@
-import type { BuildJob, BuildUsage, BuilderSettings, ChannelRow, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow, Challenge, ChallengeEntry, ChallengeEvent, ChallengeGoal, ChallengeSort } from '../db.js';
+import type { BuildJob, BuildUsage, BuilderSettings, ChannelRow, ChatThread, LogRow, Settings, UserRow, UserStats, EmbedLogRow, EmojiRow, EmojiUserRow, ReactionStats, VoiceStats, VoiceChannelRow, CurrentVoiceRow, ActivityAggregateRow, CurrentActivityRow, Challenge, ChallengeEntry, ChallengeEvent, ChallengeGoal, ChallengeSort } from '../db.js';
 import { activityTypeLabel, fmt, fmtDate, fmtDuration, weekRangeLabel } from '../stats.js';
 import type { WeekBounds } from '../stats.js';
 import { levelProgress, levelTag, steamLevelColors, steamLevelOutline, steamLevelShape } from '../levels.js';
@@ -237,6 +237,15 @@ const CSS = `
   .emojis small { font-size: 13px; font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums; }
   .emojis img { width: 20px; height: 20px; }
   .you-cols .emojis { margin: 0; }
+  .emojilb { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+  .emojilb a { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 10px; height: 40px; padding: 0 10px; border-radius: 10px; color: var(--text); text-decoration: none; }
+  .emojilb a:hover { background: var(--hover); }
+  .emojilb a[aria-current="page"] { background: var(--card-2); }
+  .emojilb .rank { color: var(--text-2); font-size: 13px; text-align: center; font-variant-numeric: tabular-nums; }
+  .emojilb .g { overflow: hidden; font-size: 20px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+  .emojilb .num { color: var(--text-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .emojilb img { width: 20px; height: 20px; vertical-align: middle; }
+  .emojitoggle { margin: 10px 0 0; font-size: 13px; }
 
   /* ---- forms ---- */
   .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
@@ -546,7 +555,7 @@ e.preventDefault();var u=new URL(a.href);history.replaceState(null,'',u.pathname
 })()`;
 
 // ---- shell ---------------------------------------------------------------------
-export type PageId = 'overview' | 'challenges' | 'settings' | 'requests' | 'logs';
+export type PageId = 'overview' | 'emojis' | 'challenges' | 'settings' | 'requests' | 'logs';
 
 export interface ChromeData {
   user: { username: string; avatar: string | null };
@@ -557,6 +566,7 @@ export interface ChromeData {
 const ICON = (path: string): string => `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
 const NAV: { id: PageId; href: string; label: string; icon: string }[] = [
   { id: 'overview', href: '/dashboard', label: 'Overview', icon: ICON('<rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="11" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/>') },
+  { id: 'emojis', href: '/dashboard/emojis', label: 'Emojis', icon: ICON('<circle cx="10" cy="10" r="7"/><path d="M7.5 12a3 3 0 0 0 5 0"/>') },
   { id: 'challenges', href: '/dashboard/challenges', label: 'Challenges', icon: ICON('<path d="M6.5 3.5h7v4a3.5 3.5 0 0 1-7 0z"/><path d="M6.5 5H3.5v1.2A3 3 0 0 0 6.5 9.2M13.5 5h3v1.2a3 3 0 0 1-3 3M10 11v3.5M7 17.5h6"/>') },
   { id: 'settings', href: '/dashboard/settings', label: 'Settings', icon: ICON('<path d="M3 6h7M14 6h3M3 14h3M10 14h7"/><circle cx="12" cy="6" r="2"/><circle cx="8" cy="14" r="2"/>') },
   { id: 'requests', href: '/dashboard/requests', label: 'Requests', icon: ICON('<path d="M4 4.5h12a1.5 1.5 0 0 1 1.5 1.5v6.5A1.5 1.5 0 0 1 16 14h-5.5L7 17v-3H4a1.5 1.5 0 0 1-1.5-1.5V6A1.5 1.5 0 0 1 4 4.5z"/><path d="M6.5 8h7M6.5 10.8h4"/>') },
@@ -958,12 +968,76 @@ export function youSection(y: YouData, ctx: { total: number; timezone: string; c
 }
 
 // Custom emoji labels look like <:name:id> / <a:name:id>; render them as images.
-function emojiChip(e: EmojiRow): string {
+/** Display form of an emoji: an <img> for custom emoji, the escaped literal otherwise. */
+export function emojiGlyph(e: { emojiLabel: string }): string {
   const custom = /^<(a?):([^:>]+):(\d+)>$/.exec(e.emojiLabel);
-  const glyph = custom
+  return custom
     ? `<img src="https://cdn.discordapp.com/emojis/${custom[3]}.${custom[1] ? 'gif' : 'webp'}?size=48" alt="${escapeHtml(custom[2] ?? '')}" title=":${escapeHtml(custom[2] ?? '')}:" loading="lazy">`
     : escapeHtml(e.emojiLabel);
-  return `<li>${glyph}<small>${fmt(e.count)}</small></li>`;
+}
+
+function emojiChip(e: EmojiRow): string {
+  return `<li>${emojiGlyph(e)}<small>${fmt(e.count)}</small></li>`;
+}
+
+/** Link to the Emojis page for one emoji (null = the top one) and the collapsed/expanded list. Pure. */
+export function emojiHref(emojiKey: string | null, all: boolean): string {
+  const q = new URLSearchParams();
+  if (emojiKey) q.set('emoji', emojiKey);
+  if (all) q.set('all', '1');
+  const qs = q.toString();
+  return `/dashboard/emojis${qs ? '?' + qs : ''}#h-emoji-users`;
+}
+
+/** The selected emoji: an exact key match, else the first row (stale links), else null. Pure. */
+export function pickEmoji(emojis: EmojiRow[], key: string | undefined): EmojiRow | null {
+  if (emojis.length === 0) return null;
+  return emojis.find((e) => e.emojiKey === key) ?? emojis[0] ?? null;
+}
+
+/**
+ * Emoji ranking list with links to each emoji's reactor leaderboard and the
+ * collapse/expand toggle. `total` is the number of distinct emoji. Pure.
+ */
+export function emojiList(emojis: EmojiRow[], selectedKey: string | undefined, all: boolean, total: number): string {
+  if (emojis.length === 0) return emptyState('No reactions tracked yet.');
+  const shown = all ? emojis : emojis.slice(0, 10);
+  const items = shown.map((e, i) => {
+    const rank = medalFor(i + 1) ?? String(i + 1);
+    const current = e.emojiKey === selectedKey ? ' aria-current="page"' : '';
+    return `<li><a href="${escapeHtml(emojiHref(e.emojiKey, all))}"${current}><span class="rank"${medalFor(i + 1) ? ` aria-label="Rank ${i + 1}"` : ''}>${rank}</span><span class="g">${emojiGlyph(e)}</span><span class="num">${fmt(e.count)}</span></a></li>`;
+  });
+  const toggle = all
+    ? `<a href="${escapeHtml(emojiHref(selectedKey ?? null, false))}">Show top 10</a>`
+    : total > shown.length
+      ? `<a href="${escapeHtml(emojiHref(selectedKey ?? null, true))}">Show all ${fmt(total)} emojis</a>`
+      : '';
+  const capped = shown.length < total ? `<span class="muted">Top ${fmt(shown.length)} of ${fmt(total)} emojis.</span> ` : '';
+  return `<ol class="emojilb">${items.join('')}</ol>${toggle || capped ? `<p class="muted emojitoggle">${capped}${toggle}</p>` : ''}`;
+}
+
+export interface EmojiPageData {
+  /** All tracked reactions on the guild. */
+  total: number;
+  emojis: EmojiRow[];
+  /** Distinct emoji across the guild. */
+  emojiCount: number;
+  all: boolean;
+  selected: EmojiRow | null;
+  users: EmojiUserRow[];
+  /** Distinct members who used the selected emoji. */
+  userCount: number;
+  members: Members;
+  user: { id: string; username: string; avatar: string };
+  deploy?: DeployStatus;
+}
+
+export function emojiPage(d: EmojiPageData, now: number = Date.now()): string {
+  const list = `<section class="card" aria-labelledby="h-emojis"><div class="card-head"><h2 id="h-emojis">Emoji usage</h2><span class="sub">${fmt(d.emojiCount)} emoji · ${fmt(d.total)} reactions</span></div>${emojiList(d.emojis, d.selected?.emojiKey, d.all, d.emojiCount)}</section>`;
+  const sub = d.selected ? `${fmt(d.selected.count)} uses · ${fmt(d.userCount)} member${d.userCount === 1 ? '' : 's'}` : 'none yet';
+  const users = `<section class="card" aria-labelledby="h-emoji-users"><div class="card-head"><h2 id="h-emoji-users">${d.selected ? `Who uses ${emojiGlyph(d.selected)}` : 'Who uses it'}</h2><span class="sub">${escapeHtml(sub)}</span></div>${d.selected ? leaderboard(d.users.map((u) => ({ userId: u.userId, messages: u.count })), d.selected.count, d.members, undefined, undefined, 'No reactions yet.') : emptyState('No reactions tracked yet.')}</section>`;
+  const body = `<div class="cols">${list}${users}</div>`;
+  return layout({ active: 'emojis', title: 'Emojis', sub: '<p class="hero-sub">Every reaction emoji, and who uses it the most.</p>', live: 'quiet', body, now }, { user: d.user, deploy: d.deploy });
 }
 
 function uptime(sec: number): string {
@@ -1011,7 +1085,7 @@ export function overviewParts(d: OverviewData, now: number = Date.now()): Record
     'live-all': `<section class="card" aria-labelledby="h-all"><div class="card-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members, { userId: d.user.id, rank: d.you.allRank }, d.xpByUser)}</section>`,
     'live-chan-week': `<section class="card" aria-labelledby="h-chan-week"><div class="card-head"><h2 id="h-chan-week">Channel leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected, 'h-chan-week', 'Channel leaderboard week')}${channelLeaderboard(wkChannels.rows, wkChannels.total, d.channelNames, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>`,
     'live-chan-all': `<section class="card" aria-labelledby="h-chan-all"><div class="card-head"><h2 id="h-chan-all">Channels, all time</h2><span class="sub">${fmt(d.channelAllTime.total)} messages</span></div>${channelLeaderboard(d.channelAllTime.rows, d.channelAllTime.total, d.channelNames)}</section>`,
-    'live-react': `<section class="card" aria-labelledby="h-react"><div class="card-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}</section>`,
+    'live-react': `<section class="card" aria-labelledby="h-react"><div class="card-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord. <a href="/dashboard/emojis">Emoji leaderboard →</a></p>`}</section>`,
   };
 }
 
