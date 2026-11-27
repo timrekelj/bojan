@@ -7,7 +7,7 @@ import { ChannelType, PermissionFlagsBits, type Client, type ForumChannel, type 
 import type { BotDatabase, ChallengeFilter, ChallengeSort, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { challengeDetailPage, challengesPage, chromeParts, dashboardPage, emojiPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, pickEmoji, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type ChallengeDetailData, type ChallengesPageData, type ChallengeTab, type EmojiPageData, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
+import { challengeDetailPage, challengesPage, chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, pickEmoji, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type ChallengeDetailData, type ChallengesPageData, type ChallengeTab, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
 import { cachedDeployments, dokployEnabled, fetchDeployments, type DeployResult, type DeployStatus, type DokployConfig } from '../dokploy.js';
 import { postMonthlyRecap, postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
@@ -356,7 +356,8 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
   // One loader for the Overview page and its live refresh. `embedsPage: null` skips the embed
   // table (the live endpoint doesn't render it).
-  const loadOverview = (session: Session, opts: { week: string | undefined; embedsPage: string | undefined | null; embedsSize?: string | undefined; deploy: DeployStatus }): OverviewData => {
+  const EMOJI_CAP = 500; // most emoji the expanded usage list shows
+  const loadOverview = (session: Session, opts: { week: string | undefined; embedsPage: string | undefined | null; embedsSize?: string | undefined; emoji?: string | undefined; all?: string | undefined; deploy: DeployStatus }): OverviewData => {
     const guild = client.guilds.cache.get(config.guildId);
     const settings = db.getSettings(config.guildId);
     const nowMs = Date.now();
@@ -378,10 +379,15 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const embedPages = Math.max(1, Math.ceil(embedTotal / embedSize));
     const embedPage = parsePage(opts.embedsPage ?? undefined, embedPages);
     const recentEmbeds = opts.embedsPage === null ? [] : db.recentEmbeds(config.guildId, embedSize, (embedPage - 1) * embedSize);
+    // Emoji usage: all-time ranking (top 10, expandable to EMOJI_CAP) and the selected emoji's reactors.
+    const emojiAll = opts.all === '1';
+    const emojiRows = db.topEmojiAll(config.guildId, emojiAll ? EMOJI_CAP : 10);
+    const selectedEmoji = pickEmoji(emojiRows, opts.emoji);
+    const emojiUsers = selectedEmoji ? db.topEmojiUsers(config.guildId, selectedEmoji.emojiKey, 10) : [];
 
     // Cache-only lookups: guild member -> global user -> raw id (handled in the view).
     const members: OverviewData['members'] = {};
-    for (const userId of [session.userId, ...weekRows.map((r) => r.userId), ...curWeekRows.map((r) => r.userId), ...allRows.map((r) => r.userId)]) {
+    for (const userId of [session.userId, ...weekRows.map((r) => r.userId), ...curWeekRows.map((r) => r.userId), ...allRows.map((r) => r.userId), ...emojiUsers.map((r) => r.userId)]) {
       if (members[userId]) continue;
       const m = guild?.members.cache.get(userId);
       const u = m?.user ?? client.users.cache.get(userId);
@@ -446,43 +452,21 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       },
       channelAllTime: { total, rows: allChannelRows },
       reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
+      emojis: {
+        count: db.countEmojiKeys(config.guildId),
+        rows: emojiRows,
+        all: emojiAll,
+        selected: selectedEmoji,
+        users: emojiUsers,
+        userCount: selectedEmoji ? db.countEmojiUsers(config.guildId, selectedEmoji.emojiKey) : 0,
+        members,
+      },
       recentEmbeds,
       embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: embedSize },
       members,
       channelNames,
       xpByUser: db.getUserXpTotals(config.guildId),
       user: { id: session.userId, username: session.username, avatar: session.avatar },
-    };
-  };
-
-  const EMOJI_CAP = 500; // most emoji the expanded Emojis page lists
-  // Emojis page: the all-time ranking (top 10, expandable to EMOJI_CAP) and the
-  // reactor leaderboard of the selected emoji.
-  const loadEmojis = (session: Session, q: { emoji?: string | undefined; all?: string | undefined }, deploy: DeployStatus): EmojiPageData => {
-    const guild = client.guilds.cache.get(config.guildId);
-    const all = q.all === '1';
-    const emojis = db.topEmojiAll(config.guildId, all ? EMOJI_CAP : 10);
-    const selected = pickEmoji(emojis, q.emoji);
-    const users = selected ? db.topEmojiUsers(config.guildId, selected.emojiKey, 10) : [];
-    const members: EmojiPageData['members'] = {};
-    for (const { userId } of users) {
-      if (members[userId]) continue;
-      const m = guild?.members.cache.get(userId);
-      const u = m?.user ?? client.users.cache.get(userId);
-      if (m) members[userId] = { name: m.displayName, avatar: m.displayAvatarURL({ size: 64 }) };
-      else if (u) members[userId] = { name: u.displayName, avatar: u.displayAvatarURL({ size: 64 }) };
-    }
-    return {
-      total: db.countReactions(config.guildId),
-      emojis,
-      emojiCount: db.countEmojiKeys(config.guildId),
-      all,
-      selected,
-      users,
-      userCount: selected ? db.countEmojiUsers(config.guildId, selected.emojiKey) : 0,
-      members,
-      user: { id: session.userId, username: session.username, avatar: session.avatar },
-      deploy,
     };
   };
 
@@ -561,12 +545,18 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
   app.get('/dashboard', requireAdmin, async (c) => {
     const deploy = await deployStatus(DEPLOY_PAGE_WAIT_MS);
-    return c.html(dashboardPage(loadOverview(c.get('session'), { week: c.req.query('week'), embedsPage: c.req.query('embedsPage'), embedsSize: c.req.query('embedsSize'), deploy })));
+    return c.html(dashboardPage(loadOverview(c.get('session'), { week: c.req.query('week'), embedsPage: c.req.query('embedsPage'), embedsSize: c.req.query('embedsSize'), emoji: c.req.query('emoji'), all: c.req.query('all'), deploy })));
   });
 
-  app.get('/dashboard/emojis', requireAdmin, async (c) => {
-    const deploy = await deployStatus(DEPLOY_PAGE_WAIT_MS);
-    return c.html(emojiPage(loadEmojis(c.get('session'), { emoji: c.req.query('emoji'), all: c.req.query('all') }, deploy)));
+  // Old Emojis page: the section now lives on the Overview.
+  app.get('/dashboard/emojis', requireAdmin, (c) => {
+    const q = new URLSearchParams();
+    const emoji = c.req.query('emoji');
+    const all = c.req.query('all');
+    if (emoji) q.set('emoji', emoji);
+    if (all === '1') q.set('all', '1');
+    const qs = q.toString();
+    return c.redirect(`/dashboard${qs ? '?' + qs : ''}#h-emoji-users`, 302);
   });
 
   // Live refresh: the regions of a page as HTML, rendered by the same view functions as the
@@ -577,7 +567,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     c.header('cache-control', 'no-store');
     switch (c.req.query('view')) {
       case 'overview':
-        return c.json({ parts: overviewParts(loadOverview(session, { week: c.req.query('week'), embedsPage: null, deploy })) });
+        return c.json({ parts: overviewParts(loadOverview(session, { week: c.req.query('week'), embedsPage: null, emoji: c.req.query('emoji'), all: c.req.query('all'), deploy })) });
       case 'logs':
         return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page'), size: c.req.query('size') }, deploy)) });
       case 'requests':
@@ -589,7 +579,6 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       }
       case 'settings':
       case 'challenges':
-      case 'emojis':
         return c.json({ parts: chromeParts(deploy) }); // forms are never refreshed
       default:
         return c.json({ error: 'unknown view' }, 400);
