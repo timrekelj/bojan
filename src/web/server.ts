@@ -7,7 +7,7 @@ import { ChannelType, PermissionFlagsBits, type Client, type ForumChannel, type 
 import type { BotDatabase, ChallengeFilter, ChallengeSort, Settings, WebSessionRow } from '../db.js';
 import { config } from '../config.js';
 import { currentWeekBounds, lastWeekBounds, startOfDay, weekRangeLabel } from '../stats.js';
-import { challengeDetailPage, challengesPage, chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, pickEmoji, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type ChallengeDetailData, type ChallengesPageData, type ChallengeTab, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData } from './views.js';
+import { challengeDetailPage, challengesPage, chromeParts, dashboardPage, errorPage, faviconSvg, loginPage, logsPage, logsParts, overviewParts, parsePageSize, pickEmoji, requestsPage, requestsParts, sessionPage, sessionParts, settingsPage, type ChallengeDetailData, type ChallengesPageData, type ChallengeTab, type ExpandToken, type LogsPageData, type OverviewData, type PageFlash, type RequestsPageData, type SessionPageData, type SettingsPageData, LB_CAP, LB_LIMIT, parseExpand } from './views.js';
 import { cachedDeployments, dokployEnabled, fetchDeployments, type DeployResult, type DeployStatus, type DokployConfig } from '../dokploy.js';
 import { postMonthlyRecap, postWeeklyStats } from '../scheduler.js';
 import { announceEverywhere } from '../freegames/actions.js';
@@ -357,7 +357,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
   // One loader for the Overview page and its live refresh. `embedsPage: null` skips the embed
   // table (the live endpoint doesn't render it).
   const EMOJI_CAP = 500; // most emoji the expanded usage list shows
-  const loadOverview = (session: Session, opts: { week: string | undefined; embedsPage: string | undefined | null; embedsSize?: string | undefined; emoji?: string | undefined; all?: string | undefined; deploy: DeployStatus }): OverviewData => {
+  const loadOverview = (session: Session, opts: { week: string | undefined; embedsPage: string | undefined | null; embedsSize?: string | undefined; emoji?: string | undefined; all?: string | undefined; expand?: string | undefined; deploy: DeployStatus }): OverviewData => {
     const guild = client.guilds.cache.get(config.guildId);
     const settings = db.getSettings(config.guildId);
     const nowMs = Date.now();
@@ -365,15 +365,22 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const curWeek = currentWeekBounds(settings.timezone);
     const curEnd = Math.min(curWeek.end, nowMs);
     const weekSel: OverviewData['week']['selected'] = opts.week === 'last' ? 'last' : 'current';
+    const expand: ExpandToken[] = parseExpand(opts.expand);
+    // Collapsed cards fetch one extra row to know whether "Show full list" is worth showing.
+    const lb = <T>(token: ExpandToken, fetch: (limit: number) => T[]): { rows: T[]; more: boolean } => {
+      const on = expand.includes(token);
+      const rows = fetch(on ? LB_CAP : LB_LIMIT + 1);
+      return on ? { rows, more: false } : { rows: rows.slice(0, LB_LIMIT), more: rows.length > LB_LIMIT };
+    };
     const total = db.countMessages(config.guildId);
-    const weekRows = db.topUsers(config.guildId, 10, week.start, week.end);
-    const curWeekRows = db.topUsers(config.guildId, 10, curWeek.start, curEnd);
-    const allRows = db.topUsers(config.guildId, 10);
+    const weekUsers = lb('week', (limit) => db.topUsers(config.guildId, limit, week.start, week.end));
+    const curWeekUsers = lb('week', (limit) => db.topUsers(config.guildId, limit, curWeek.start, curEnd));
+    const allUsers = lb('all', (limit) => db.topUsers(config.guildId, limit));
     const lastWeekTotal = db.countMessages(config.guildId, week.start, week.end);
     const curWeekTotal = db.countMessages(config.guildId, curWeek.start, curEnd);
-    const weekChannelRows = db.topChannels(config.guildId, week.start, week.end, 10);
-    const curWeekChannelRows = db.topChannels(config.guildId, curWeek.start, curEnd, 10);
-    const allChannelRows = db.topChannelsAll(config.guildId, 10);
+    const weekChannels = lb('channels-week', (limit) => db.topChannels(config.guildId, week.start, week.end, limit));
+    const curWeekChannels = lb('channels-week', (limit) => db.topChannels(config.guildId, curWeek.start, curEnd, limit));
+    const allChannels = lb('channels-all', (limit) => db.topChannelsAll(config.guildId, limit));
     const embedTotal = db.countEmbeds(config.guildId);
     const embedSize = parsePageSize(opts.embedsSize);
     const embedPages = Math.max(1, Math.ceil(embedTotal / embedSize));
@@ -383,11 +390,11 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const emojiAll = opts.all === '1';
     const emojiRows = db.topEmojiAll(config.guildId, emojiAll ? EMOJI_CAP : 10);
     const selectedEmoji = pickEmoji(emojiRows, opts.emoji);
-    const emojiUsers = selectedEmoji ? db.topEmojiUsers(config.guildId, selectedEmoji.emojiKey, 10) : [];
+    const emojiUsers = selectedEmoji ? lb('emoji-users', (limit) => db.topEmojiUsers(config.guildId, selectedEmoji.emojiKey, limit)) : { rows: [], more: false };
 
     // Cache-only lookups: guild member -> global user -> raw id (handled in the view).
     const members: OverviewData['members'] = {};
-    for (const userId of [session.userId, ...weekRows.map((r) => r.userId), ...curWeekRows.map((r) => r.userId), ...allRows.map((r) => r.userId), ...emojiUsers.map((r) => r.userId)]) {
+    for (const userId of [session.userId, ...weekUsers.rows.map((r) => r.userId), ...curWeekUsers.rows.map((r) => r.userId), ...allUsers.rows.map((r) => r.userId), ...emojiUsers.rows.map((r) => r.userId)]) {
       if (members[userId]) continue;
       const m = guild?.members.cache.get(userId);
       const u = m?.user ?? client.users.cache.get(userId);
@@ -399,7 +406,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
       const name = guild?.channels.cache.get(channelId)?.name;
       if (name) channelNames[channelId] = name;
     }
-    for (const { channelId } of [...weekChannelRows, ...curWeekChannelRows, ...allChannelRows]) {
+    for (const { channelId } of [...weekChannels.rows, ...curWeekChannels.rows, ...allChannels.rows]) {
       const name = guild?.channels.cache.get(channelId)?.name;
       if (name) channelNames[channelId] = name;
     }
@@ -440,26 +447,30 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
         errors24h: db.countLogErrorsSince(Date.now() - 24 * 3600 * 1000),
       },
       today: db.countMessages(config.guildId, startOfDay(settings.timezone)),
+      expand,
       week: {
         selected: weekSel,
-        current: { bounds: curWeek, total: curWeekTotal, rows: curWeekRows },
-        last: { bounds: week, total: lastWeekTotal, rows: weekRows },
+        current: { bounds: curWeek, total: curWeekTotal, rows: curWeekUsers.rows, more: curWeekUsers.more },
+        last: { bounds: week, total: lastWeekTotal, rows: weekUsers.rows, more: weekUsers.more },
       },
-      allTime: { total, rows: allRows },
+      allTime: { total, rows: allUsers.rows, more: allUsers.more },
       channelWeek: {
-        current: { bounds: curWeek, total: curWeekTotal, rows: curWeekChannelRows },
-        last: { bounds: week, total: lastWeekTotal, rows: weekChannelRows },
+        current: { bounds: curWeek, total: curWeekTotal, rows: curWeekChannels.rows, more: curWeekChannels.more },
+        last: { bounds: week, total: lastWeekTotal, rows: weekChannels.rows, more: weekChannels.more },
       },
-      channelAllTime: { total, rows: allChannelRows },
+      channelAllTime: { total, rows: allChannels.rows, more: allChannels.more },
       reactions: { total: db.countReactions(config.guildId), top: db.topEmojiAll(config.guildId, 8) },
       emojis: {
         count: db.countEmojiKeys(config.guildId),
         rows: emojiRows,
         all: emojiAll,
         selected: selectedEmoji,
-        users: emojiUsers,
+        users: emojiUsers.rows,
         userCount: selectedEmoji ? db.countEmojiUsers(config.guildId, selectedEmoji.emojiKey) : 0,
         members,
+        expanded: expand.includes('emoji-users'),
+        more: emojiUsers.more,
+        link: { week: weekSel, expand, emoji: selectedEmoji?.emojiKey ?? null, emojiAll },
       },
       recentEmbeds,
       embedPage: { page: embedPage, pages: embedPages, total: embedTotal, pageSize: embedSize },
@@ -545,7 +556,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
 
   app.get('/dashboard', requireAdmin, async (c) => {
     const deploy = await deployStatus(DEPLOY_PAGE_WAIT_MS);
-    return c.html(dashboardPage(loadOverview(c.get('session'), { week: c.req.query('week'), embedsPage: c.req.query('embedsPage'), embedsSize: c.req.query('embedsSize'), emoji: c.req.query('emoji'), all: c.req.query('all'), deploy })));
+    return c.html(dashboardPage(loadOverview(c.get('session'), { week: c.req.query('week'), embedsPage: c.req.query('embedsPage'), embedsSize: c.req.query('embedsSize'), emoji: c.req.query('emoji'), all: c.req.query('all'), expand: c.req.query('expand'), deploy })));
   });
 
   // Old Emojis page: the section now lives on the Overview.
@@ -555,6 +566,8 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     const all = c.req.query('all');
     if (emoji) q.set('emoji', emoji);
     if (all === '1') q.set('all', '1');
+    const expand = c.req.query('expand');
+    if (expand) q.set('expand', expand);
     const qs = q.toString();
     return c.redirect(`/dashboard${qs ? '?' + qs : ''}#h-emoji-users`, 302);
   });
@@ -567,7 +580,7 @@ export function createWebApp(client: Client, db: BotDatabase, opts: { freestuffP
     c.header('cache-control', 'no-store');
     switch (c.req.query('view')) {
       case 'overview':
-        return c.json({ parts: overviewParts(loadOverview(session, { week: c.req.query('week'), embedsPage: null, emoji: c.req.query('emoji'), all: c.req.query('all'), deploy })) });
+        return c.json({ parts: overviewParts(loadOverview(session, { week: c.req.query('week'), embedsPage: null, emoji: c.req.query('emoji'), all: c.req.query('all'), expand: c.req.query('expand'), deploy })) });
       case 'logs':
         return c.json({ parts: logsParts(loadLogs(session, { level: c.req.query('level'), tag: c.req.query('tag'), page: c.req.query('page'), size: c.req.query('size') }, deploy)) });
       case 'requests':
