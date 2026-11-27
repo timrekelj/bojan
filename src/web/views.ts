@@ -555,7 +555,7 @@ e.preventDefault();var u=new URL(a.href);history.replaceState(null,'',u.pathname
 })()`;
 
 // ---- shell ---------------------------------------------------------------------
-export type PageId = 'overview' | 'emojis' | 'challenges' | 'settings' | 'requests' | 'logs';
+export type PageId = 'overview' | 'challenges' | 'settings' | 'requests' | 'logs';
 
 export interface ChromeData {
   user: { username: string; avatar: string | null };
@@ -566,7 +566,6 @@ export interface ChromeData {
 const ICON = (path: string): string => `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
 const NAV: { id: PageId; href: string; label: string; icon: string }[] = [
   { id: 'overview', href: '/dashboard', label: 'Overview', icon: ICON('<rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="11" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/>') },
-  { id: 'emojis', href: '/dashboard/emojis', label: 'Emojis', icon: ICON('<circle cx="10" cy="10" r="7"/><path d="M7.5 12a3 3 0 0 0 5 0"/>') },
   { id: 'challenges', href: '/dashboard/challenges', label: 'Challenges', icon: ICON('<path d="M6.5 3.5h7v4a3.5 3.5 0 0 1-7 0z"/><path d="M6.5 5H3.5v1.2A3 3 0 0 0 6.5 9.2M13.5 5h3v1.2a3 3 0 0 1-3 3M10 11v3.5M7 17.5h6"/>') },
   { id: 'settings', href: '/dashboard/settings', label: 'Settings', icon: ICON('<path d="M3 6h7M14 6h3M3 14h3M10 14h7"/><circle cx="12" cy="6" r="2"/><circle cx="8" cy="14" r="2"/>') },
   { id: 'requests', href: '/dashboard/requests', label: 'Requests', icon: ICON('<path d="M4 4.5h12a1.5 1.5 0 0 1 1.5 1.5v6.5A1.5 1.5 0 0 1 16 14h-5.5L7 17v-3H4a1.5 1.5 0 0 1-1.5-1.5V6A1.5 1.5 0 0 1 4 4.5z"/><path d="M6.5 8h7M6.5 10.8h4"/>') },
@@ -699,6 +698,8 @@ export interface OverviewData {
   };
   channelAllTime: { total: number; rows: ChannelRow[] };
   reactions: { total: number; top: EmojiRow[] };
+  /** Emoji usage card: the all-time ranking and the selected emoji's reactor leaderboard. */
+  emojis: EmojiSectionData;
   recentEmbeds: EmbedLogRow[];
   embedPage: { page: number; pages: number; total: number; pageSize: number };
   members: Members;
@@ -980,13 +981,13 @@ function emojiChip(e: EmojiRow): string {
   return `<li>${emojiGlyph(e)}<small>${fmt(e.count)}</small></li>`;
 }
 
-/** Link to the Emojis page for one emoji (null = the top one) and the collapsed/expanded list. Pure. */
+/** Link to the Overview's emoji section for one emoji (null = the top one) and the collapsed/expanded list. Pure. */
 export function emojiHref(emojiKey: string | null, all: boolean): string {
   const q = new URLSearchParams();
   if (emojiKey) q.set('emoji', emojiKey);
   if (all) q.set('all', '1');
   const qs = q.toString();
-  return `/dashboard/emojis${qs ? '?' + qs : ''}#h-emoji-users`;
+  return `/dashboard${qs ? '?' + qs : ''}#h-emoji-users`;
 }
 
 /** The selected emoji: an exact key match, else the first row (stale links), else null. Pure. */
@@ -1016,28 +1017,24 @@ export function emojiList(emojis: EmojiRow[], selectedKey: string | undefined, a
   return `<ol class="emojilb">${items.join('')}</ol>${toggle || capped ? `<p class="muted emojitoggle">${capped}${toggle}</p>` : ''}`;
 }
 
-export interface EmojiPageData {
-  /** All tracked reactions on the guild. */
-  total: number;
-  emojis: EmojiRow[];
+export interface EmojiSectionData {
   /** Distinct emoji across the guild. */
-  emojiCount: number;
+  count: number;
+  rows: EmojiRow[];
   all: boolean;
   selected: EmojiRow | null;
   users: EmojiUserRow[];
   /** Distinct members who used the selected emoji. */
   userCount: number;
   members: Members;
-  user: { id: string; username: string; avatar: string };
-  deploy?: DeployStatus;
 }
 
-export function emojiPage(d: EmojiPageData, now: number = Date.now()): string {
-  const list = `<section class="card" aria-labelledby="h-emojis"><div class="card-head"><h2 id="h-emojis">Emoji usage</h2><span class="sub">${fmt(d.emojiCount)} emoji · ${fmt(d.total)} reactions</span></div>${emojiList(d.emojis, d.selected?.emojiKey, d.all, d.emojiCount)}</section>`;
+/** The Overview's emoji usage card + reactor leaderboard. Pure. */
+export function emojiSection(d: EmojiSectionData): string {
+  const list = `<section class="card" aria-labelledby="h-emojis"><div class="card-head"><h2 id="h-emojis">Emoji usage</h2><span class="sub">${fmt(d.count)} emoji</span></div>${emojiList(d.rows, d.selected?.emojiKey, d.all, d.count)}</section>`;
   const sub = d.selected ? `${fmt(d.selected.count)} uses · ${fmt(d.userCount)} member${d.userCount === 1 ? '' : 's'}` : 'none yet';
   const users = `<section class="card" aria-labelledby="h-emoji-users"><div class="card-head"><h2 id="h-emoji-users">${d.selected ? `Who uses ${emojiGlyph(d.selected)}` : 'Who uses it'}</h2><span class="sub">${escapeHtml(sub)}</span></div>${d.selected ? leaderboard(d.users.map((u) => ({ userId: u.userId, messages: u.count })), d.selected.count, d.members, undefined, undefined, 'No reactions yet.') : emptyState('No reactions tracked yet.')}</section>`;
-  const body = `<div class="cols">${list}${users}</div>`;
-  return layout({ active: 'emojis', title: 'Emojis', sub: '<p class="hero-sub">Every reaction emoji, and who uses it the most.</p>', live: 'quiet', body, now }, { user: d.user, deploy: d.deploy });
+  return `<div class="cols">${list}${users}</div>`;
 }
 
 function uptime(sec: number): string {
@@ -1085,7 +1082,8 @@ export function overviewParts(d: OverviewData, now: number = Date.now()): Record
     'live-all': `<section class="card" aria-labelledby="h-all"><div class="card-head"><h2 id="h-all">All time</h2><span class="sub">${fmt(d.allTime.total)} messages</span></div>${leaderboard(d.allTime.rows, d.allTime.total, d.members, { userId: d.user.id, rank: d.you.allRank }, d.xpByUser)}</section>`,
     'live-chan-week': `<section class="card" aria-labelledby="h-chan-week"><div class="card-head"><h2 id="h-chan-week">Channel leaderboard</h2><span class="sub">${escapeHtml(weekSub)}</span></div>${weekTabs(d.week.selected, 'h-chan-week', 'Channel leaderboard week')}${channelLeaderboard(wkChannels.rows, wkChannels.total, d.channelNames, d.week.selected === 'current' ? 'No messages yet this week.' : 'No messages last week.')}</section>`,
     'live-chan-all': `<section class="card" aria-labelledby="h-chan-all"><div class="card-head"><h2 id="h-chan-all">Channels, all time</h2><span class="sub">${fmt(d.channelAllTime.total)} messages</span></div>${channelLeaderboard(d.channelAllTime.rows, d.channelAllTime.total, d.channelNames)}</section>`,
-    'live-react': `<section class="card" aria-labelledby="h-react"><div class="card-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord. <a href="/dashboard/emojis">Emoji leaderboard →</a></p>`}</section>`,
+    'live-react': `<section class="card" aria-labelledby="h-react"><div class="card-head"><h2 id="h-react">Reactions</h2><span class="sub">${fmt(d.reactions.total)} tracked</span></div>${d.reactions.top.length === 0 ? emptyState('No reactions tracked yet.') : `<ul class="emojis">${d.reactions.top.map(emojiChip).join('')}</ul><p class="muted">Most used emoji server-wide. Per-member emoji are in the <code>/stats</code> command in Discord.</p>`}</section>`,
+    'live-emojis': emojiSection(d.emojis),
   };
 }
 
@@ -1151,6 +1149,7 @@ export function dashboardPage(d: OverviewData, now: number = Date.now()): string
   <div class="cols">${region('live-week', parts)}${region('live-all', parts)}</div>
   <div class="cols">${region('live-chan-week', parts)}${region('live-chan-all', parts)}</div>
   ${region('live-react', parts)}
+  ${region('live-emojis', parts)}
   <section class="card" aria-labelledby="h-embeds"><div class="card-head"><h2 id="h-embeds">Embed conversions</h2><span class="sub">${fmt(d.embedPage.total)} converted</span></div>
     ${d.recentEmbeds.length === 0 ? emptyState('Nothing converted yet.') : embedRows(d) + embedPager(d)}
   </section>`;

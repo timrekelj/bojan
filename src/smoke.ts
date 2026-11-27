@@ -23,7 +23,7 @@ import { CHALLENGE_EVENT_LABELS, challengeButtonId, challengeEventText, challeng
 import { CHALLENGE_METRICS, goalName, isManualMetric, isTimeMetric, metricLabel, metricTargetUnit } from './challenges/types.js';
 import { ALL_STORES, type FreeGame, type FreeSettings } from './freegames/types.js';
 import { parseFreeForm } from './freegames/form.js';
-import { builderSection, challengeDetailPage, challengeMetaGrid, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, emojiGlyph, emojiHref, emojiList, emojiPage, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, pickEmoji, requestsParts, settingsPage, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type EmojiPageData, type OverviewData, type SettingsPageData } from './web/views.js';
+import { builderSection, challengeDetailPage, challengeMetaGrid, challengesPage, challengeTabs, chromeParts, CLOUDS_URL, CLOUDS_VERSION, dashboardPage, deployPill, emojiGlyph, emojiHref, emojiList, emojiSection, errorPage, faviconSvg, fmtAgo, channelLeaderboard, healthPills, leaderboard, levelBadge, levelBar, LIVE_SCRIPT, loginPage, logsPage, logsParts, medalFor, overviewParts, pickEmoji, requestsParts, settingsPage, weekTabs, youSection, type ChallengeDetailData, type ChallengesPageData, type EmojiSectionData, type OverviewData, type SettingsPageData } from './web/views.js';
 import { summarizeDeployments, dokployEnabled, fetchDeployments } from './dokploy.js';
 import { createHash, createHmac } from 'node:crypto';
 import { generateKeyPairSync, sign } from 'node:crypto';
@@ -904,14 +904,17 @@ rmSync(dir, { recursive: true, force: true });
     const setAnon = await get('/dashboard/settings', false);
     check('route: unauthenticated /dashboard/settings -> login', setAnon.status === 302 && setAnon.headers.get('location') === '/login');
 
+    for (const [messageId, reactorId] of [['em1', 'bob'], ['em1', 'carol'], ['em2', 'bob']] as const) {
+      wdb.recordReaction({ guildId: cfg.guildId, channelId: 'c1', messageId, authorId: 'alice', reactorId, emojiKey: '🎯', emojiLabel: '🎯', ts: now });
+    }
     const ovRes = await get('/dashboard');
     const ov = await ovRes.text();
-    check('route: overview renders shell + live regions, no settings forms', ovRes.status === 200 && ov.includes('data-live="overview"') && ['live-health', 'live-kpis', 'live-you', 'live-week', 'live-all', 'live-react'].every((id) => ov.includes(`id="${id}"`)) && !ov.includes('<form') && ov.includes('Viewer &lt;i&gt;') && !ov.includes('Viewer <i>'));
+    check('route: overview renders shell + live regions, no settings forms', ovRes.status === 200 && ov.includes('data-live="overview"') && ['live-health', 'live-kpis', 'live-you', 'live-week', 'live-all', 'live-react', 'live-emojis'].every((id) => ov.includes(`id="${id}"`)) && !ov.includes('<form') && ov.includes('Viewer &lt;i&gt;') && !ov.includes('Viewer <i>'));
     const liveRes = await get('/dashboard/live?view=overview&week=last');
     const liveJson = (await liveRes.json()) as { parts: Record<string, string> };
     check(
       'route: /dashboard/live returns the overview regions as html',
-      liveRes.status === 200 && ['live-health', 'live-kpis', 'live-you', 'live-week', 'live-all', 'live-react'].every((id) => typeof liveJson.parts[id] === 'string') && liveJson.parts['live-week']!.includes('<span class="tab" aria-current="page">Last week</span>') && ov.includes(liveJson.parts['live-kpis']!) && !('live-deploy' in liveJson.parts),
+      liveRes.status === 200 && ['live-health', 'live-kpis', 'live-you', 'live-week', 'live-all', 'live-react', 'live-emojis'].every((id) => typeof liveJson.parts[id] === 'string') && liveJson.parts['live-week']!.includes('<span class="tab" aria-current="page">Last week</span>') && liveJson.parts['live-emojis']!.includes('id="h-emoji-users"') && liveJson.parts['live-emojis']!.includes('class="emojilb"') && ov.includes(liveJson.parts['live-kpis']!) && !('live-deploy' in liveJson.parts),
     );
     const liveLogs = (await (await get('/dashboard/live?view=logs&level=error')).json()) as { parts: Record<string, string> };
     const liveReqs = (await (await get('/dashboard/live?view=requests')).json()) as { parts: Record<string, string> };
@@ -925,19 +928,18 @@ rmSync(dir, { recursive: true, force: true });
     const reqRes = await get('/dashboard/requests');
     check('route: logs + requests pages render', logsRes.status === 200 && (await logsRes.text()).includes('id="live-logs"') && reqRes.status === 200 && (await reqRes.text()).includes('id="live-reqs"'));
 
-    for (const [messageId, reactorId] of [['em1', 'bob'], ['em1', 'carol'], ['em2', 'bob']] as const) {
-      wdb.recordReaction({ guildId: cfg.guildId, channelId: 'c1', messageId, authorId: 'alice', reactorId, emojiKey: '🎯', emojiLabel: '🎯', ts: now });
-    }
     const emojiRes = await get('/dashboard/emojis');
-    const emojiHtml = await emojiRes.text();
+    check('route: /dashboard/emojis redirects to the overview emoji section', emojiRes.status === 302 && emojiRes.headers.get('location') === '/dashboard#h-emoji-users', `status=${emojiRes.status} loc=${emojiRes.headers.get('location')}`);
+    const emojiSel = await get('/dashboard/emojis?emoji=%F0%9F%8E%AF&all=1');
+    check('route: /dashboard/emojis keeps emoji/all in the redirect', emojiSel.status === 302 && emojiSel.headers.get('location') === '/dashboard?emoji=%F0%9F%8E%AF&all=1#h-emoji-users', `status=${emojiSel.status} loc=${emojiSel.headers.get('location')}`);
+    const ovEmoji = await (await get('/dashboard?emoji=%F0%9F%8E%AF&all=1')).text();
     check(
-      'route: emojis page renders the usage list + reactor leaderboard',
-      emojiRes.status === 200 && emojiHtml.includes('id="h-emojis"') && emojiHtml.includes('id="h-emoji-users"') && emojiHtml.includes('class="emojilb"') && emojiHtml.includes('<a href="/dashboard/emojis" aria-current="page">') && (emojiHtml.match(/<a [^>]*aria-current="page"/g) ?? []).length === 2,
-      `status=${emojiRes.status} statuses list=${emojiHtml.includes('class="emojilb"')} nav=${emojiHtml.includes('<a href="/dashboard/emojis" aria-current="page">')} current=${(emojiHtml.match(/<a [^>]*aria-current="page"/g) ?? []).length}`,
+      'route: overview renders the emoji leaderboard below reactions',
+      ovEmoji.includes('id="h-emojis"') && ovEmoji.includes('id="h-emoji-users"') && ovEmoji.includes('class="emojilb"') && !ovEmoji.includes('href="/dashboard/emojis"'),
+      `list=${ovEmoji.includes('class="emojilb"')} oldLink=${ovEmoji.includes('href="/dashboard/emojis"')}`,
     );
     const liveEmojiRes = await get('/dashboard/live?view=emojis');
-    const liveEmoji = (await liveEmojiRes.json()) as { parts: Record<string, string> };
-    check('route: /dashboard/live?view=emojis is known and returns chrome parts only', liveEmojiRes.status === 200 && Object.keys(liveEmoji.parts).length === 0);
+    check('route: /dashboard/live?view=emojis is gone', liveEmojiRes.status === 400);
 
     const p1 = await postForm('/settings', 'weeklyEnabled=1&monthlyEnabled=1&statsChannel=c1&weeklyDay=3&weeklyHour=18&timezone=Europe%2FLjubljana&embedChannels=c1&embedChannels=c2&levelingEnabled=1&levelupChannel=&challengeChannel=ch5');
     const saved = wdb.getSettings(cfg.guildId);
@@ -998,13 +1000,13 @@ rmSync(dir, { recursive: true, force: true });
   const expanded = emojiList(many, 'e3', true, 12);
   check('emojiList: collapsed 10 + show all, aria-current on the selected only', (collapsed.match(/<a /g) ?? []).length === 11 && (collapsed.match(/aria-current="page"/g) ?? []).length === 1 && collapsed.includes('Show all 12 emojis') && !collapsed.includes('Show top 10'));
   check('emojiList: expanded shows all 12 + show top 10 with medals', (expanded.match(/<a /g) ?? []).length === 13 && expanded.includes('Show top 10') && expanded.includes('🥇'));
-  check('emojiHref: key encoded, all flag, anchor', emojiHref('a b', true) === '/dashboard/emojis?emoji=a+b&all=1#h-emoji-users' && emojiHref(null, false) === '/dashboard/emojis#h-emoji-users');
+  check('emojiHref: key encoded, all flag, anchor', emojiHref('a b', true) === '/dashboard?emoji=a+b&all=1#h-emoji-users' && emojiHref(null, false) === '/dashboard#h-emoji-users');
 
-  const pageData: EmojiPageData = { total: 19, emojis: rows, emojiCount: 2, all: false, selected: rows[1]!, users: [{ userId: 'bob', count: 5 }], userCount: 3, members: { bob: { name: 'Bob', avatar: null } }, user: { id: 'u', username: 'Ann', avatar: '' } };
-  const pageHtml = emojiPage(pageData, 0);
-  check('emojiPage: usage card, reactor leaderboard and glyph in the heading', pageHtml.includes('id="h-emojis"') && pageHtml.includes('id="h-emoji-users"') && pageHtml.includes('Who uses <img src="https://cdn.discordapp.com/emojis/1234.webp') && pageHtml.includes('7 uses · 3 members') && pageHtml.includes('Emoji usage'));
-  const emptyHtml = emojiPage({ ...pageData, emojis: [], emojiCount: 0, selected: null, users: [], userCount: 0, total: 0 }, 0);
-  check('emojiPage: empty state without reactions', emptyHtml.includes('No reactions tracked yet.') && emptyHtml.includes('Who uses it'));
+  const sectionData: EmojiSectionData = { count: 2, rows, all: false, selected: rows[1]!, users: [{ userId: 'bob', count: 5 }], userCount: 3, members: { bob: { name: 'Bob', avatar: null } } };
+  const sectionHtml = emojiSection(sectionData);
+  check('emojiSection: usage card, reactor leaderboard and glyph in the heading', sectionHtml.includes('id="h-emojis"') && sectionHtml.includes('id="h-emoji-users"') && sectionHtml.includes('Who uses <img src="https://cdn.discordapp.com/emojis/1234.webp') && sectionHtml.includes('7 uses · 3 members') && sectionHtml.includes('Emoji usage'));
+  const emptySectionHtml = emojiSection({ ...sectionData, count: 0, rows: [], selected: null, users: [], userCount: 0 });
+  check('emojiSection: empty state without reactions', emptySectionHtml.includes('No reactions tracked yet.') && emptySectionHtml.includes('Who uses it'));
 }
 
 // dashboard sessions persist in the DB so redeploys don't force a re-login
@@ -1188,6 +1190,7 @@ rmSync(dir, { recursive: true, force: true });
     channelWeek: { current: { bounds: currentWeekBounds('UTC'), total: 16, rows: [{ channelId: 'c1', count: 5 }] }, last: { bounds: lastWeekBounds('UTC'), total: 0, rows: [] } },
     channelAllTime: { total: 16, rows: [{ channelId: 'c1', count: 5 }] },
     reactions: { total: 0, top: [] },
+    emojis: { count: 0, rows: [], all: false, selected: null, users: [], userCount: 0, members: mem },
     recentEmbeds: [{ id: 1, guildId: G, channelId: 'c1', messageId: 'm', url: 'https://x.test/a?b="c"', provider: 'twitter', ts: T }],
     embedPage: { page: 2, pages: 3, total: 21, pageSize: 10 },
     members: mem,
@@ -1219,7 +1222,7 @@ rmSync(dir, { recursive: true, force: true });
   );
   check(
     'dashboardPage: every live region holds exactly what overviewParts renders',
-    Object.keys(ovParts).sort().join() === 'live-all,live-chan-all,live-chan-week,live-deploy,live-health,live-kpis,live-react,live-week,live-you' && Object.entries(ovParts).every(([id, html]) => new RegExp(`id="${id}"[^>]*>`).test(ovHtml) && ovHtml.includes(`>${html}</div>`)),
+    Object.keys(ovParts).sort().join() === 'live-all,live-chan-all,live-chan-week,live-deploy,live-emojis,live-health,live-kpis,live-react,live-week,live-you' && Object.entries(ovParts).every(([id, html]) => new RegExp(`id="${id}"[^>]*>`).test(ovHtml) && ovHtml.includes(`>${html}</div>`)),
   );
   check(
     'dashboardPage: no settings forms; embed table with data-labels, escaped url and pager links',
