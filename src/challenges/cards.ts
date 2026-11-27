@@ -24,7 +24,6 @@ import { isManualMetric, goalName } from './types.js';
 
 // Components V2 allows 4000 chars of text across all TextDisplays; keep headroom.
 const TEXT_BUDGET = 3800;
-const MAX_GOAL_ROWS = 5;
 
 export interface ChallengeCardData {
   challenge: Challenge;
@@ -69,7 +68,8 @@ export function buildChallengeCard(data: ChallengeCardData) {
   const now = data.now ?? Date.now();
   const status = challengeStatus(challenge, now);
   const ranked = goals.map((goal) => ({ goal, rows: rankProgress(participants, totalsByGoal[goal.id] ?? {}) }));
-  const limits = goals.map(() => MAX_GOAL_ROWS);
+  // Show every participant; the shrink loop below trims the tail only when the text budget runs out.
+  const limits = ranked.map(({ rows }) => rows.length);
   const when =
     status === 'ended'
       ? `Ended ${fmtDate(challenge.endedAt ?? challenge.endsAt, data.timeZone)} · ${fmt(participants.length)} joined`
@@ -79,32 +79,42 @@ export function buildChallengeCard(data: ChallengeCardData) {
 
   const render = (description: string): string => {
     const sections = ranked.map(({ goal, rows }, i) => {
-      const top = rows.slice(0, limits[i] ?? 0);
-      return [
-        goalHeading(goal),
-        top.length > 0
-          ? top.map((r) => `${medal(r.rank)} <@${r.userId}> — **${formatChallengeValue(goal.metric, r.value)}**`).join('\n')
-          : participants.length === 0
-            ? 'No one has joined yet — be the first!'
-            : 'No progress yet.',
-      ].join('\n');
+      const limit = limits[i] ?? 0;
+      const top = rows.slice(0, limit);
+      const lines = [goalHeading(goal)];
+      if (top.length > 0) lines.push(top.map((r) => `${medal(r.rank)} <@${r.userId}> — **${formatChallengeValue(goal.metric, r.value)}**`).join('\n'));
+      else if (rows.length === 0) lines.push(participants.length === 0 ? 'No one has joined yet — be the first!' : 'No progress yet.');
+      if (rows.length > limit) lines.push(`-# +${rows.length - limit} more`);
+      return lines.join('\n');
     });
     return [`## 🏆 ${challenge.name}`, ...(description ? [description] : []), '', `-# ${when}`, '', ...sections.flatMap((s) => [s, ''])].join('\n').trimEnd();
   };
 
-  let description = challenge.description.slice(0, MAX_CHALLENGE_DESCRIPTION);
-  let text = render(description);
-  while (text.length > TEXT_BUDGET && limits.some((n) => n > 0)) {
+  // Drop the lowest-ranked row of the last goal that still has more than its top row.
+  const trimToTopRow = (): boolean => {
+    let i = limits.length - 1;
+    while (i >= 0 && (limits[i] ?? 0) <= 1) i--;
+    if (i < 0) return false;
+    limits[i] = (limits[i] ?? 1) - 1;
+    return true;
+  };
+  // Once every goal is down to one row, allow goals to disappear entirely, last goal first.
+  const trimAny = (): boolean => {
     let i = limits.length - 1;
     while (i >= 0 && (limits[i] ?? 0) <= 0) i--;
-    if (i < 0) break;
+    if (i < 0) return false;
     limits[i] = (limits[i] ?? 1) - 1;
-    text = render(description);
-  }
+    return true;
+  };
+
+  let description = challenge.description.slice(0, MAX_CHALLENGE_DESCRIPTION);
+  let text = render(description);
+  while (text.length > TEXT_BUDGET && trimToTopRow()) text = render(description);
   if (text.length > TEXT_BUDGET && description) {
     description = '';
     text = render(description);
   }
+  while (text.length > TEXT_BUDGET && trimAny()) text = render(description);
   if (text.length > TEXT_BUDGET) text = text.slice(0, TEXT_BUDGET - 1) + '…';
 
   const container = new ContainerBuilder().setAccentColor(BLURPLE).addTextDisplayComponents(new TextDisplayBuilder().setContent(text));

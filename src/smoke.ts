@@ -2392,6 +2392,45 @@ rmSync(dir, { recursive: true, force: true });
   check('challenge card: ended shows Ended and hides the buttons', chEndedJson.includes('Ended') && !chEndedJson.includes('challenge:join') && !chEndedJson.includes('challenge:log'));
   const chEmptyJson = JSON.stringify(buildChallengeCard({ challenge: cardChallenge, participants: [], goals: cardGoals, totalsByGoal: {}, timeZone: 'UTC', now: chNow }).components.map((c) => c.toJSON()));
   check('challenge card: empty leaderboard hint, budget respected', chEmptyJson.includes('No one has joined yet') && chEmptyJson.length < 4000);
+
+  const cardText = (card: ReturnType<typeof buildChallengeCard>): string => {
+    const out: string[] = [];
+    const walk = (x: unknown): void => {
+      if (Array.isArray(x)) x.forEach(walk);
+      else if (x && typeof x === 'object') {
+        const o = x as Record<string, unknown>;
+        if (o.type === 10 && typeof o.content === 'string') out.push(o.content);
+        Object.values(o).forEach(walk);
+      }
+    };
+    walk(card.components.map((c) => c.toJSON()));
+    return out.join('\n');
+  };
+  const eightParticipants = Array.from({ length: 8 }, (_, i) => ({ challengeId: 7, userId: `u${i + 1}`, displayName: `U${i + 1}`, joinedAt: chNow - 800 + i * 10 }));
+  const eightGoal = [{ id: 21, challengeId: 7, metric: 'messages' as const, activityName: null, label: null, target: 500, position: 0, createdAt: chNow }];
+  const eightTotals = { 21: Object.fromEntries(eightParticipants.map((p, i) => [p.userId, 1000 - i * 10])) };
+  const eightCard = buildChallengeCard({ challenge: cardChallenge, participants: eightParticipants, goals: eightGoal, totalsByGoal: eightTotals, timeZone: 'UTC', now: chNow });
+  const eightText = cardText(eightCard);
+  check(
+    'challenge card: lists every participant when the roster fits, no truncation marker',
+    eightCard.components.length === 1 && eightParticipants.every((p) => eightText.includes(`<@${p.userId}>`)) &&
+      eightText.includes('6. <@u6>') && eightText.includes('7. <@u7>') && !eightText.includes(' more'),
+    eightText,
+  );
+  const crowdParticipants = Array.from({ length: 150 }, (_, i) => ({ challengeId: 7, userId: `p${i + 1}`, displayName: `P${i + 1}`, joinedAt: chNow - 2000 + i }));
+  const crowdGoals = [
+    { id: 31, challengeId: 7, metric: 'messages' as const, activityName: null, label: null, target: 500, position: 0, createdAt: chNow },
+    { id: 32, challengeId: 7, metric: 'pushups' as const, activityName: null, label: null, target: 100, position: 1, createdAt: chNow },
+  ];
+  const crowdValues = Object.fromEntries(crowdParticipants.map((p, i) => [p.userId, 1000 - i]));
+  const crowdCard = buildChallengeCard({ challenge: cardChallenge, participants: crowdParticipants, goals: crowdGoals, totalsByGoal: { 31: crowdValues, 32: crowdValues }, timeZone: 'UTC', now: chNow });
+  const crowdText = cardText(crowdCard);
+  check(
+    'challenge card: large roster is trimmed to the text budget with a +N more marker, top rank kept',
+    crowdCard.components.length === 1 && crowdText.length < 4000 && crowdText.includes('-# +') && crowdText.includes('🥇 <@p1>') &&
+      crowdText.includes('### Messages') && crowdText.includes('### Push-ups'),
+    `${crowdText.length} chars`,
+  );
 }
 
 // ---- monthly recap data layer ---------------------------------------------
